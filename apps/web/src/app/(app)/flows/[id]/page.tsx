@@ -3,6 +3,7 @@
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import FlowCanvas from '@/components/FlowCanvas';
 
 interface FlowNode {
   id: string;
@@ -276,48 +277,21 @@ export default function FlowEditorPage() {
         </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Node list + edges */}
-        <section className="card p-4">
-          <h2 className="mb-3 font-semibold">Nodes</h2>
-          <div className="space-y-1">
-            {graph.nodes.map((node) => (
-              <button
-                key={node.id}
-                onClick={() => {
-                  setSelectedNodeId(node.id);
-                  setPreview(null);
-                }}
-                className="block w-full rounded-lg px-3 py-2 text-left text-sm"
-                style={
-                  selectedNodeId === node.id
-                    ? { background: 'var(--surface-2)', border: '1px solid var(--accent)' }
-                    : { border: '1px solid var(--border)' }
-                }
-              >
-                <span className="font-mono text-xs" style={{ color: 'var(--accent)' }}>{node.type}</span>
-                {node.mandatory && <span className="ml-1 text-xs" style={{ color: 'var(--good)' }}>· mandatory</span>}
-                <br />
-                <span>{node.label ?? node.id}</span>
-                {graph.entryNodeId === node.id && (
-                  <span className="ml-1 text-xs" style={{ color: 'var(--text-dim)' }}>(entry)</span>
-                )}
-              </button>
-            ))}
-          </div>
-          <h2 className="mb-2 mt-5 font-semibold">Edges</h2>
-          <div className="space-y-1 text-xs" style={{ color: 'var(--text-dim)' }}>
-            {graph.edges.map((edge) => (
-              <p key={edge.id}>
-                {edge.from} → {edge.to}
-                {edge.conditions.length > 0 && (
-                  <span> when {edge.conditions.map((c) => `${c.variable} ${c.operator} ${String(c.value ?? '')}`).join(' AND ')}</span>
-                )}
-              </p>
-            ))}
-          </div>
-        </section>
+      {/* Flow canvas — the visual graph. Click a node to edit it in the panel below. */}
+      <section className="card p-4">
+        <h2 className="mb-2 font-semibold">Flow canvas</h2>
+        <FlowCanvas
+          graph={graph}
+          selectedNodeId={selectedNodeId}
+          onSelectNode={(id) => {
+            setSelectedNodeId(id);
+            setPreview(null);
+          }}
+          storageKey={`cocally-flow-layout-${params.id}`}
+        />
+      </section>
 
+      <div className="grid gap-6 lg:grid-cols-2">
         {/* Node editor */}
         <section className="card p-4">
           <h2 className="mb-3 font-semibold">Node editor</h2>
