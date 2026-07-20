@@ -9,6 +9,7 @@ import { Roles } from '../../common/auth/roles.decorator';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
+import { User, UserDocument } from '../../schemas/user.schema';
 import { LeadsService } from '../leads/leads.service';
 import { RecordingsService } from '../recordings/recordings.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
@@ -52,6 +53,7 @@ export class CallsController {
     @InjectModel(Call.name) private readonly callModel: Model<CallDocument>,
     @InjectModel(Lead.name) private readonly leadModel: Model<LeadDocument>,
     @InjectModel(Campaign.name) private readonly campaignModel: Model<CampaignDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly leads: LeadsService,
     private readonly recordings: RecordingsService,
     private readonly webhooks: WebhooksService,
@@ -64,10 +66,33 @@ export class CallsController {
   async list(
     @CurrentUser() user: AuthenticatedUser,
     @Query('campaignId') campaignId?: string,
+    @Query('agentId') agentId?: string,
+    @Query('outcome') outcome?: string,
+    @Query('disposition') disposition?: string,
+    @Query('amdClass') amdClass?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
     @Query('limit') limit?: string,
   ) {
     const filter: Record<string, unknown> = { tenantId: new Types.ObjectId(user.tenantId) };
-    if (campaignId) filter.campaignId = new Types.ObjectId(campaignId);
+    if (campaignId && Types.ObjectId.isValid(campaignId)) filter.campaignId = new Types.ObjectId(campaignId);
+    // "unassigned" = AI-only calls that never reached a human.
+    if (agentId === 'unassigned') filter.agentId = { $in: [null, undefined] };
+    else if (agentId && Types.ObjectId.isValid(agentId)) filter.agentId = new Types.ObjectId(agentId);
+    if (outcome) filter.outcome = outcome;
+    if (disposition) filter.disposition = disposition;
+    if (amdClass) filter.amdClass = amdClass;
+
+    const startedAt: Record<string, Date> = {};
+    if (from && !Number.isNaN(Date.parse(from))) startedAt.$gte = new Date(from);
+    // A bare date means "to the end of that day", not midnight at its start.
+    if (to && !Number.isNaN(Date.parse(to))) {
+      const end = new Date(to);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(to)) end.setHours(23, 59, 59, 999);
+      startedAt.$lte = end;
+    }
+    if (Object.keys(startedAt).length > 0) filter.startedAt = startedAt;
+
     const calls = await this.callModel
       .find(filter)
       .sort({ startedAt: -1 })
@@ -75,7 +100,22 @@ export class CallsController {
       .select('-transcript')
       .lean()
       .exec();
-    return calls;
+
+    // Resolve the human agent who took each transfer, for display and filtering.
+    const agentIds = [...new Set(calls.map((c) => c.agentId?.toString()).filter((id): id is string => Boolean(id)))];
+    const agents = agentIds.length
+      ? await this.userModel
+          .find({ _id: { $in: agentIds.map((id) => new Types.ObjectId(id)) } })
+          .select('name email')
+          .lean()
+          .exec()
+      : [];
+    const agentById = new Map(agents.map((a) => [a._id.toString(), a.name || a.email]));
+
+    return calls.map((call) => ({
+      ...call,
+      agentName: call.agentId ? (agentById.get(call.agentId.toString()) ?? null) : null,
+    }));
   }
 
   /** Call deep-dive per DASH-07: replay with score-over-time, signals, compliance events. */

@@ -5,6 +5,7 @@ import { Model, Types } from 'mongoose';
 import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { Client, ClientDocument } from '../../schemas/tenant.schema';
 import { FlowVersion, FlowVersionDocument } from '../../schemas/flow.schema';
+import { User, UserDocument } from '../../schemas/user.schema';
 import { AuditService } from '../audit/audit.service';
 import { CountryPacksService } from '../country-packs/country-packs.service';
 
@@ -14,6 +15,7 @@ export class CampaignsService {
     @InjectModel(Campaign.name) private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectModel(FlowVersion.name) private readonly versionModel: Model<FlowVersionDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly packs: CountryPacksService,
     private readonly audit: AuditService,
   ) {}
@@ -62,6 +64,71 @@ export class CampaignsService {
       .exec();
     if (!campaign) throw new NotFoundException('Campaign not found');
     return campaign;
+  }
+
+  /**
+   * Roster for a campaign. Transfer eligibility (XFER-01) is skill-based: an
+   * agent is eligible when their `skills` contain this campaign id, OR when
+   * they have no skills at all — an unrestricted agent takes any campaign.
+   * That fallback is why `unrestricted` is reported separately: assigning the
+   * first agent to a campaign silently narrows who else can receive it.
+   */
+  async team(tenantId: string, campaignId: string) {
+    const agents = await this.userModel
+      .find({ tenantId: new Types.ObjectId(tenantId), roles: 'AGENT', active: true })
+      .select('name email skills presence')
+      .sort({ name: 1 })
+      .lean()
+      .exec();
+
+    return agents.map((a) => ({
+      id: a._id.toString(),
+      name: a.name || a.email,
+      email: a.email,
+      presence: a.presence,
+      assigned: a.skills.includes(campaignId),
+      unrestricted: a.skills.length === 0,
+    }));
+  }
+
+  /** Set exactly which agents are assigned to this campaign. */
+  async setTeam(
+    tenantId: string,
+    actor: { id: string; label: string },
+    campaignId: string,
+    agentIds: string[],
+  ) {
+    const campaign = await this.get(tenantId, campaignId);
+    const wanted = new Set(agentIds);
+    const agents = await this.userModel
+      .find({ tenantId: new Types.ObjectId(tenantId), roles: 'AGENT', active: true })
+      .select('skills')
+      .exec();
+
+    const before: string[] = [];
+    for (const agent of agents) {
+      const id = agent._id.toString();
+      const has = agent.skills.includes(campaignId);
+      if (has) before.push(id);
+      if (wanted.has(id) === has) continue;
+      agent.skills = wanted.has(id)
+        ? [...agent.skills, campaignId]
+        : agent.skills.filter((s) => s !== campaignId);
+      await agent.save();
+    }
+
+    await this.audit.record({
+      tenantId,
+      actorId: actor.id,
+      actorLabel: actor.label,
+      action: 'campaign.team.set',
+      entityType: 'Campaign',
+      entityId: campaignId,
+      before: { agentIds: before },
+      after: { agentIds },
+    });
+
+    return this.team(tenantId, campaign._id.toString());
   }
 
   async update(tenantId: string, actor: { id: string; label: string }, campaignId: string, patch: Record<string, unknown>) {

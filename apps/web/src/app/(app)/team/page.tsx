@@ -147,7 +147,8 @@ export default function TeamInsightsPage() {
               <th className="p-3">Conversion</th>
               <th className="p-3">Talk time</th>
               <th className="p-3">Avg handle</th>
-              <th className="p-3">Offers</th>
+              <th className="p-3">Calls sent</th>
+              <th className="p-3">Accepted</th>
               <th className="p-3">Acceptance</th>
               <th className="p-3">Avg QA</th>
               <th className="p-3">Recordings</th>
@@ -179,6 +180,7 @@ export default function TeamInsightsPage() {
                 <td className="p-3">{fmtDuration(m.talkSeconds)}</td>
                 <td className="p-3">{m.handled > 0 ? fmtDuration(m.avgHandleSeconds) : '—'}</td>
                 <td className="p-3">{m.transfers.offered}</td>
+                <td className="p-3" style={{ color: 'var(--good)' }}>{m.transfers.accepted}</td>
                 <td className="p-3">
                   {m.transfers.offered > 0 ? `${Math.round(m.transfers.acceptanceRate * 100)}%` : '—'}
                 </td>

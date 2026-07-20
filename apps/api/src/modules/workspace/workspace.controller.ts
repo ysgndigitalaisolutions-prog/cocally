@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { PRESENCE_STATES, type PresenceState } from '@cocally/shared';
 import { IsIn } from 'class-validator';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
@@ -21,11 +21,34 @@ export class WorkspaceController {
     private readonly gateway: RealtimeGateway,
   ) {}
 
+  /** Own presence — server truth, so the UI never shows a stale local state. */
+  @Get('me')
+  @Roles('AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER', 'QA')
+  async me(@CurrentUser() user: AuthenticatedUser) {
+    const presence = await this.presence.getPresence(user.userId);
+    return { userId: user.userId, presence: presence ?? 'OFFLINE' };
+  }
+
+  /** Live team roster with presence — powers the "who's online" panels. */
+  @Get('team')
+  @Roles('AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER', 'QA')
+  team(@CurrentUser() user: AuthenticatedUser) {
+    return this.presence.team(user.tenantId);
+  }
+
   @Post('presence')
   @Roles('AGENT', 'SUPERVISOR', 'ADMIN')
   async setPresence(@CurrentUser() user: AuthenticatedUser, @Body() dto: SetPresenceDto) {
     await this.presence.setPresence(user.userId, dto.state);
     this.gateway.emitToTenant(user.tenantId, 'presence.updated', { userId: user.userId, state: dto.state });
+    return { ok: true };
+  }
+
+  /** Client keep-alive; the sweep signs out anyone who stops sending these. */
+  @Post('heartbeat')
+  @Roles('AGENT', 'SUPERVISOR', 'ADMIN', 'QA', 'OWNER')
+  async heartbeat(@CurrentUser() user: AuthenticatedUser) {
+    await this.presence.heartbeat(user.userId);
     return { ok: true };
   }
 

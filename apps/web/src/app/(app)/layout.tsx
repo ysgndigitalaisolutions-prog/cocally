@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
 import { disconnectSocket } from '@/lib/socket';
+import { api } from '@/lib/api';
 
 const NAV = [
   { href: '/dashboard', label: 'Dashboard', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
@@ -33,6 +34,16 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     const stored = localStorage.getItem('cocally.user');
     if (stored) setUser(JSON.parse(stored));
   }, [router, setUser]);
+
+  // Presence keep-alive: the server signs out staffed agents who stop checking
+  // in, so a closed laptop can't leave a ghost agent taking transfer offers.
+  useEffect(() => {
+    if (!localStorage.getItem('cocally.token')) return;
+    const beat = () => api.post('/workspace/heartbeat').catch(() => undefined);
+    beat();
+    const timer = setInterval(beat, 30_000);
+    return () => clearInterval(timer);
+  }, [pathname]);
 
   function logout() {
     localStorage.removeItem('cocally.token');

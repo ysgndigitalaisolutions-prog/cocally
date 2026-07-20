@@ -62,8 +62,9 @@ class UpdateUserDto {
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
+  /** QA needs the roster to filter calls by the agent who handled them. */
   @Get()
-  @Roles('ADMIN', 'SUPERVISOR')
+  @Roles('ADMIN', 'SUPERVISOR', 'QA')
   list(@CurrentUser() user: AuthenticatedUser) {
     return this.usersService.list(user.tenantId);
   }

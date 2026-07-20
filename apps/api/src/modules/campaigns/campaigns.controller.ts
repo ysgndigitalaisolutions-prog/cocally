@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
-import { IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/auth/jwt-auth.guard';
 import { Roles } from '../../common/auth/roles.decorator';
@@ -22,6 +22,12 @@ class CreateCampaignDto {
 class SetStatusDto {
   @IsIn(['ACTIVE', 'PAUSED', 'COMPLETED'])
   status: 'ACTIVE' | 'PAUSED' | 'COMPLETED';
+}
+
+class SetTeamDto {
+  @IsArray()
+  @IsString({ each: true })
+  agentIds: string[];
 }
 
 @Controller('campaigns')
@@ -50,6 +56,19 @@ export class CampaignsController {
   @Roles('ADMIN')
   update(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() patch: Record<string, unknown>) {
     return this.campaignsService.update(user.tenantId, { id: user.userId, label: user.email }, id, patch);
+  }
+
+  /** Which agents receive this campaign's warm transfers (XFER-01 skills). */
+  @Get(':id/team')
+  @Roles('ADMIN', 'SUPERVISOR', 'QA')
+  team(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.campaignsService.team(user.tenantId, id);
+  }
+
+  @Post(':id/team')
+  @Roles('ADMIN', 'SUPERVISOR')
+  setTeam(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: SetTeamDto) {
+    return this.campaignsService.setTeam(user.tenantId, { id: user.userId, label: user.email }, id, dto.agentIds);
   }
 
   /** Supervisors can pause per §2; only admins can (re)activate. */

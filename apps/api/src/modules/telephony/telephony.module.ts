@@ -5,6 +5,7 @@ import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
 import { CliNumber, CliNumberSchema } from '../../schemas/cli-number.schema';
 import { Lead, LeadSchema } from '../../schemas/lead.schema';
 import { Tenant, TenantSchema } from '../../schemas/tenant.schema';
+import { User, UserSchema } from '../../schemas/user.schema';
 import { CountryPacksModule } from '../country-packs/country-packs.module';
 import { EngineModule } from '../engine/engine.module';
 import { FlowsModule } from '../flows/flows.module';
@@ -16,6 +17,7 @@ import { WorkspaceModule } from '../workspace/workspace.module';
 import { CallOrchestratorService } from './call-orchestrator.service';
 import { CallsController } from './calls.controller';
 import { CliService } from './cli.service';
+import { DialerController } from './dialer.controller';
 import { DialerService } from './dialer.service';
 
 @Module({
@@ -26,6 +28,7 @@ import { DialerService } from './dialer.service';
       { name: Lead.name, schema: LeadSchema },
       { name: Tenant.name, schema: TenantSchema },
       { name: CliNumber.name, schema: CliNumberSchema },
+      { name: User.name, schema: UserSchema },
     ]),
     CountryPacksModule,
     EngineModule,
@@ -36,7 +39,7 @@ import { DialerService } from './dialer.service';
     WebhooksModule,
     WorkspaceModule,
   ],
-  controllers: [CallsController],
+  controllers: [CallsController, DialerController],
   providers: [CallOrchestratorService, CliService, DialerService],
   exports: [CallOrchestratorService, CliService, DialerService],
 })

@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 
-export type RangePreset = 'today' | '7d' | 'month' | '30d';
+export type RangePreset = 'today' | '7d' | 'month' | '30d' | '12m';
 
 export interface RangeQuery {
   from: string;
@@ -16,6 +16,7 @@ export const RANGE_PRESETS: Array<{ key: RangePreset; label: string }> = [
   { key: '7d', label: '7 days' },
   { key: 'month', label: 'This month' },
   { key: '30d', label: '30 days' },
+  { key: '12m', label: 'By month' },
 ];
 
 export function rangeForPreset(preset: RangePreset): RangeQuery {
@@ -31,6 +32,13 @@ export function rangeForPreset(preset: RangePreset): RangeQuery {
         from: new Date(now.getFullYear(), now.getMonth(), 1).toISOString(),
         to: now.toISOString(),
         granularity: 'day',
+      };
+    case '12m':
+      // Rolling 12 months bucketed per month — the month-over-month trend view.
+      return {
+        from: new Date(now.getFullYear() - 1, now.getMonth(), 1).toISOString(),
+        to: now.toISOString(),
+        granularity: 'month',
       };
     case '30d':
     default:

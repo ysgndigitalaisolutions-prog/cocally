@@ -41,6 +41,14 @@ export class User {
   @Prop()
   availableSince?: Date;
 
+  /**
+   * Last client heartbeat. A staffed presence with no recent heartbeat means
+   * the agent closed the tab or lost the network, so the presence sweep signs
+   * them out — otherwise a ghost agent keeps attracting dials and transfers.
+   */
+  @Prop()
+  lastSeenAt?: Date;
+
   /** Cumulative talk-time today (seconds) — drives least-talk-time routing. */
   @Prop({ default: 0 })
   talkTimeTodaySeconds: number;

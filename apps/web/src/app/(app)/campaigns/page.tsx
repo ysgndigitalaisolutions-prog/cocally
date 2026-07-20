@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { DialerStatusBody, type DialStatus } from '@/components/DialerStatus';
 
 interface Campaign {
   _id: string;
@@ -25,6 +26,7 @@ export default function CampaignsPage() {
   const [name, setName] = useState('');
   const [clientId, setClientId] = useState('');
   const [creating, setCreating] = useState(false);
+  const [dialStatus, setDialStatus] = useState<Record<string, DialStatus>>({});
 
   async function load() {
     const [campaignRes, clientRes] = await Promise.all([api.get('/campaigns'), api.get('/tenants/clients')]);
@@ -36,6 +38,25 @@ export default function CampaignsPage() {
   useEffect(() => {
     load().catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Live dialer state: why each campaign is or isn't placing calls right now.
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () =>
+      api
+        .get<DialStatus[]>('/dialer/status')
+        .then((r) => {
+          if (cancelled) return;
+          setDialStatus(Object.fromEntries(r.data.map((s) => [s.campaignId, s])));
+        })
+        .catch(() => undefined);
+    poll();
+    const timer = setInterval(poll, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, []);
 
   async function createCampaign(e: React.FormEvent) {
@@ -85,10 +106,10 @@ export default function CampaignsPage() {
             <tr className="text-left" style={{ color: 'var(--text-dim)' }}>
               <th className="p-4">Name</th>
               <th className="p-4">Status</th>
+              <th className="p-4">Dialer</th>
               <th className="p-4">Pack</th>
               <th className="p-4">Daily budget</th>
               <th className="p-4">Channels</th>
-              <th className="p-4">Transcription</th>
               <th className="p-4" />
             </tr>
           </thead>
@@ -111,10 +132,16 @@ export default function CampaignsPage() {
                     {campaign.status}
                   </span>
                 </td>
+                <td className="p-4">
+                  {dialStatus[campaign._id] ? (
+                    <DialerStatusBody status={dialStatus[campaign._id]} />
+                  ) : (
+                    <span className="text-xs" style={{ color: 'var(--text-dim)' }}>checking…</span>
+                  )}
+                </td>
                 <td className="p-4">{campaign.countryPackCode}</td>
                 <td className="p-4">{campaign.dailyDialBudget}</td>
                 <td className="p-4">{campaign.maxConcurrentCalls}</td>
-                <td className="p-4">{campaign.transcriptionMode}</td>
                 <td className="p-4">
                   {campaign.status === 'ACTIVE' ? (
                     <button className="btn btn-ghost text-xs" onClick={() => setStatus(campaign._id, 'PAUSED')}>

@@ -9,6 +9,8 @@ const envSchema = z.object({
     .regex(/^[0-9a-f]{64}$/i, 'VAULT_KEY must be 32 bytes hex')
     .default('0'.repeat(64)),
   TELEPHONY_DRIVER: z.enum(['SIMULATION', 'SIP']).default('SIMULATION'),
+  /** Minutes without a client heartbeat before a staffed agent is auto-signed-out. */
+  PRESENCE_TIMEOUT_MINUTES: z.coerce.number().min(1).default(5),
   PORT: z.coerce.number().default(4000),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
   RECORDINGS_DIR: z.string().default('./recordings-data'),
@@ -27,6 +29,7 @@ export const config = {
   jwtExpiresIn: parsed.JWT_EXPIRES_IN,
   vaultKey: parsed.VAULT_KEY,
   telephonyDriver: parsed.TELEPHONY_DRIVER,
+  presenceTimeoutMinutes: parsed.PRESENCE_TIMEOUT_MINUTES,
   port: parsed.PORT,
   corsOrigin: parsed.CORS_ORIGIN,
   recordingsDir: parsed.RECORDINGS_DIR,
