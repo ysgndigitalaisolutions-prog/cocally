@@ -1,16 +1,27 @@
 import { Body, Controller, Post } from '@nestjs/common';
-import { IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsOptional, IsString, MinLength } from 'class-validator';
 import { Public } from '../../common/auth/public.decorator';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/auth/jwt-auth.guard';
 import { AuthService } from './auth.service';
 
 class LoginDto {
-  @IsEmail()
+  /**
+   * Login identifier — an email address, or a plain username for the short
+   * demo accounts seeded by `seed.ts`. Was `@IsEmail()`; relaxed so username
+   * logins reach the service (which looks up `email` lowercased either way).
+   */
+  @IsString()
+  @MinLength(1)
   email: string;
 
+  /**
+   * NOTE: floor lowered from 8 to 4 to admit the demo accounts' `1234`.
+   * Raise this back to 8 before any production deployment — this is a public,
+   * unauthenticated endpoint and the floor applies to every environment.
+   */
   @IsString()
-  @MinLength(8)
+  @MinLength(4)
   password: string;
 
   @IsOptional()

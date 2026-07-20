@@ -9,7 +9,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "test": "vitest run",
-    "seed": "ts-node src/seeds/seed.ts"
+    "seed": "ts-node src/seeds/seed.ts",
+    "demo-data": "ts-node src/seeds/demo-data.ts"
   },
   "dependencies": {
     "@cocally/shared": "workspace:*",

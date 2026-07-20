@@ -26,9 +26,14 @@ class CreateListDto {
 }
 
 class ImportCsvDto {
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  listId: string;
+  listId?: string;
+
+  /** Preferred: import straight into a campaign; its list is managed automatically. */
+  @IsOptional()
+  @IsString()
+  campaignId?: string;
 
   @IsString()
   @IsNotEmpty()

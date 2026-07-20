@@ -1,0 +1,12 @@
+{
+  "name": "CoCally — AI Outbound Calling Platform",
+  "short_name": "CoCally",
+  "description": "AI dials, qualifies and warm-transfers. Your closers close.",
+  "start_url": "/",
+  "display": "browser",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "icons": [
+    { "src": "/assets/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

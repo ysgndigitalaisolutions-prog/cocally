@@ -7,6 +7,24 @@ import { getSocket } from '@/lib/socket';
 import { useAppStore } from '@/lib/store';
 
 const PRESENCE_OPTIONS = ['AVAILABLE', 'WRAP_UP', 'BREAK', 'OFFLINE'] as const;
+
+interface TeamMember {
+  id: string;
+  name: string;
+  roles: string[];
+  presence: string;
+  availableSince: string | null;
+  talkTimeTodaySeconds: number;
+}
+
+const PRESENCE_META: Record<string, { dot: string; label: string; hint: string }> = {
+  AVAILABLE: { dot: 'var(--good)', label: 'Available', hint: 'You will receive warm-transfer offers.' },
+  RESERVED: { dot: 'var(--accent)', label: 'Reserved', hint: 'A transfer is being offered to you right now.' },
+  ON_CALL: { dot: 'var(--accent)', label: 'On call', hint: 'Bridged with a customer.' },
+  WRAP_UP: { dot: 'var(--accent-dim)', label: 'Wrap-up', hint: 'Finishing notes — no new offers until you go Available.' },
+  BREAK: { dot: 'var(--text-dim)', label: 'On break', hint: 'No offers while on break.' },
+  OFFLINE: { dot: 'var(--bad)', label: 'Offline', hint: 'Go Available to start receiving transfers.' },
+};
 const DISPOSITIONS = [
   ['BOOKED', 'Booked'],
   ['CALLBACK', 'Callback'],
@@ -24,11 +42,29 @@ export default function WorkspacePage() {
   const [summary, setSummary] = useState('');
   const [countdown, setCountdown] = useState(0);
   const [notes, setNotes] = useState('');
+  const [team, setTeam] = useState<TeamMember[]>([]);
   const offerRef = useRef<TransferCard | null>(null);
+
+  // Server truth on load: own presence + team roster. The buttons and banner
+  // always reflect what the SERVER believes, never a stale local default.
+  useEffect(() => {
+    api.get('/workspace/me').then((r) => setPresence(r.data.presence)).catch(() => undefined);
+    api.get('/workspace/team').then((r) => setTeam(r.data)).catch(() => undefined);
+    const timer = setInterval(() => {
+      api.get('/workspace/team').then((r) => setTeam(r.data)).catch(() => undefined);
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [setPresence]);
 
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
+
+    socket.on('presence.updated', ({ userId, state }: { userId: string; state: string }) => {
+      setTeam((prev) => prev.map((m) => (m.id === userId ? { ...m, presence: state } : m)));
+      const me = JSON.parse(localStorage.getItem('cocally.user') ?? '{}') as { id?: string };
+      if (me.id === userId) setPresence(state as (typeof PRESENCE_OPTIONS)[number]);
+    });
 
     socket.on('transfer.offer', (card: TransferCard) => {
       offerRef.current = card;
@@ -62,6 +98,7 @@ export default function WorkspacePage() {
     socket.on('call.summary.updated', ({ summary: s }: { summary: string }) => setSummary(s));
 
     return () => {
+      socket.off('presence.updated');
       socket.off('transfer.offer');
       socket.off('transfer.cancelled');
       socket.off('transfer.bridged');
@@ -70,7 +107,7 @@ export default function WorkspacePage() {
       socket.off('transcript.segment');
       socket.off('call.summary.updated');
     };
-  }, [setActiveCallId, setTransferOffer]);
+  }, [setActiveCallId, setTransferOffer, setPresence]);
 
   // Countdown ring per WS-03.
   useEffect(() => {
@@ -109,6 +146,8 @@ export default function WorkspacePage() {
     setPresence('WRAP_UP');
   }
 
+  const meta = PRESENCE_META[presence] ?? PRESENCE_META.OFFLINE!;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -128,6 +167,23 @@ export default function WorkspacePage() {
               {option.replace('_', ' ')}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Status banner: always shows the server-truth state, unambiguously */}
+      <div
+        className="flex items-center gap-3 rounded-xl border px-4 py-3"
+        style={{ borderColor: meta.dot, background: 'var(--surface)' }}
+      >
+        <span className="relative flex h-3 w-3">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60" style={{ background: meta.dot }} />
+          <span className="relative inline-flex h-3 w-3 rounded-full" style={{ background: meta.dot }} />
+        </span>
+        <div>
+          <p className="text-sm font-bold">You are {meta.label}</p>
+          <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+            {meta.hint}
+          </p>
         </div>
       </div>
 
@@ -216,6 +272,38 @@ export default function WorkspacePage() {
           </div>
         </div>
       )}
+
+      <section>
+        <h2 className="mb-3 font-semibold">Team</h2>
+        <div className="card divide-y" style={{ borderColor: 'var(--border)' }}>
+          {team.length === 0 && (
+            <p className="p-4 text-sm" style={{ color: 'var(--text-dim)' }}>
+              No agents on this tenant yet.
+            </p>
+          )}
+          {team.map((member) => {
+            const m = PRESENCE_META[member.presence] ?? PRESENCE_META.OFFLINE!;
+            return (
+              <div key={member.id} className="flex items-center justify-between px-4 py-2" style={{ borderColor: 'var(--border)' }}>
+                <div className="flex items-center gap-3">
+                  <span className="inline-flex h-2.5 w-2.5 rounded-full" style={{ background: m.dot }} />
+                  <span className="text-sm font-medium">{member.name}</span>
+                  <span className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                    {member.roles.join(', ').toLowerCase()}
+                  </span>
+                </div>
+                <div className="flex items-center gap-4 text-xs" style={{ color: 'var(--text-dim)' }}>
+                  <span style={{ color: m.dot }}>{m.label}</span>
+                  {member.presence === 'AVAILABLE' && member.availableSince && (
+                    <span>idle {Math.max(0, Math.round((Date.now() - new Date(member.availableSince).getTime()) / 60000))}m</span>
+                  )}
+                  <span>talk today {Math.round(member.talkTimeTodaySeconds / 60)}m</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
 
       <section>
         <h2 className="mb-3 font-semibold">Live floor</h2>

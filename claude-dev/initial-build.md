@@ -191,6 +191,15 @@ Modeled on ElevenLabs' agent workflow builder, per Nithin's request: describe a 
 - Test-drive realism: `InteractiveRuntime.amdClassify` returns HUMAN on the re-check after a DTMF keypress, mirroring a real "press 1 to connect".
 - Verified: generation with both toggles (13 nodes), IVR-off variant omits the keypress nodes; test-drive through the voicemail path ends `VOICEMAIL_DROPPED`; through the IVR path: `IVR → DTMF 1 → re-check HUMAN → disclosure → conversation with live scoring`.
 
+## 16. UX cleanup: leads↔campaigns connected, presence made unambiguous
+
+Nithin flagged: Network Error in the web app, leads/campaigns feeling disconnected and cluttered, and agent online status unclear.
+
+- **Network Error root cause**: two dev API instances raced for :4000 (`EADDRINUSE`), then both died — nothing listening. Killed strays, single clean restart. (Recurring hazard with parallel sessions — always `pkill -f ts-node-dev` + verify `lsof -ti :4000` before `pnpm dev`.)
+- **Leads ↔ campaigns**: `POST /leads/import` now accepts `campaignId` (preferred) — the campaign's active list is found or auto-created (`"{campaign} — leads"`); `listId` still works for advanced use. Leads page rebuilt campaign-first: campaign selector + link to the campaign hub, collapsed import panel that always targets the selected campaign, state-count chips doubling as filters, next-attempt column, empty-state hint.
+- **Campaign detail as hub**: header shows pack, lead count, **available-agent count** and live channel count; activate/pause inline; live team strip with presence dots; links to Manage leads. Auto-refreshes every 10s.
+- **Presence clarity**: new `GET /workspace/me` (own server-truth presence) and `GET /workspace/team` (roster with presence/idle/talk-time). Workspace page: syncs presence from the server on load (never trusts stale local state — the earlier restart-desync bug class is gone), pulsing status banner ("You are Available — you will receive warm-transfer offers"), live Team panel driven by `presence.updated` socket events + 15s poll fallback.
+
 ## 10. Deliberately deferred (fast-follow / external deps)
 
 - **SIP media driver** — blocked on carrier answers (PRD §7: IP pairing, DTMF method, capacity). `CallRuntime` interface is the seam; drachtio/FreeSWITCH implementation slots in without touching executor/AI/transfer code.

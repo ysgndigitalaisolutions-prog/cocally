@@ -1,0 +1,49 @@
+# CoCally
+
+> CoCally (co-cally.com) is the AI front line for revenue teams: an AI-first outbound contact-centre platform. AI voice agents call new leads within seconds of arrival (speed-to-lead), qualify them in natural conversation, score buying intent live on every turn, and warm-transfer real buyers to human closers with an AI-written briefing — with sub-second bridge dead-air. Every call is recorded, transcribed, automatically QA-scored and compliance-logged: proof, not promises. No per-seat fees, no seat minimums.
+
+## The problem CoCally solves
+
+- Average lead response time is measured in hours or days, while a lead called within 5 minutes is ~21x more likely to qualify (MIT/HBR lead-response research). Humans structurally cannot call every lead in under a minute, around the clock.
+- Human qualification is expensive and fragile: a fully-loaded SDR costs A$150K+/yr (US ~$110K+), ramps for ~3 months and stays ~14 months; call-centre attrition exceeds 40%/yr.
+- Spam labeling has collapsed outbound answer rates; manual QA samples only 1–2% of calls; regulators (FCC/TCPA, EU AI Act Article 50, UK PECR, Australian ACMA) are tightening rules on AI voice calling.
+- CoCally's answer: an AI front line (calls, qualifies, scores — zero abandoned calls structurally) with a human close (warm transfer with briefing), compliance enforced by the platform, and verifiable receipts on 100% of calls.
+
+## What CoCally does
+
+- AI voice agents hold natural, structured qualification conversations: every reply carries intent, captured facts and objections; the AI never re-asks an answered question, works objections from the customer's own rebuttal playbook, and identifies itself as an AI.
+- Speed-to-lead: new web leads trigger an instant AI callback within legal calling hours, 24/7.
+- Pacing-aware autonomous dialer: legal calling-window enforcement (timezone- and DST-aware), do-not-call register washing, caller-ID pool rotation with automatic resting of spam-flagged numbers, retry matrices, frequency caps.
+- Answering-machine detection (AMD) with configurable voicemail policy and IVR navigation.
+- Live intent scoring: weighted propensity score recomputed on every conversation turn; crossing the campaign threshold triggers warm transfer.
+- Warm transfer with sub-second bridge dead-air, skills-based and sticky-agent routing, accept-window cascade, and an AI-generated briefing card for the human agent; booking fallback if no agent is free.
+- The closer workspace: live transfer offers with countdown, AI briefing cards, live intent scores, one-click dispositions, supervisor floor feed.
+- Visual flow builder with validation, immutable versioning, a text simulator, and a live test-drive that runs the exact production engine.
+- Compliance country packs (Australia shipped first): DNC wash rules, legal calling hours, public holidays, mandatory disclosures and AI identification — enforced at publish time and dial time, not by policy documents. Opt-out requests are executed by safety rails before the AI model is consulted. Zero abandoned calls structurally (no predictive overdial).
+- Dual-leg call recording stitched into one timeline, automatic PII redaction, retention rules and legal hold.
+- 100% automatic QA scoring of every call — no sampling.
+- Analytics: KPI band, lead funnel, objection intelligence with rebuttal win-rates, best-time-to-call heatmap, per-call cost breakdown, agent & team insights with auditable presence/occupancy.
+- Provider abstraction layer: ElevenLabs, Deepgram, OpenAI, Anthropic, Google Gemini and more behind one interface with automatic failover; models and voices can be mixed per conversation node.
+- Enterprise platform: multi-tenancy, RBAC, immutable audit log, encrypted per-tenant secrets vault, HMAC-signed webhooks, scoped API keys, pause-everything kill switch.
+
+## Primary use cases
+
+1. Speed-to-lead qualification of inbound web enquiries (solar, home services, insurance, real estate, education).
+2. Database reactivation: aged leads, lapsed quotes, past customers.
+3. Appointment setting, confirmation and no-show reduction.
+4. B2B qualification front line for account executives.
+5. For BPOs calling into Australia: CoCally as a white-label AI front line — AI dials from AU numbers with enforced DNCR/ACMA compliance and warm-transfers to the BPO's existing agents anywhere in the world; multi-client tenant floors and per-call evidence packs built in.
+
+## Key facts
+
+- Onboarding: signup to first live dial in 2–3 business days (Day 1: numbers, leads, compliance pack; Day 2: flow design + simulator rehearsal; Day 3: live dialing).
+- Speed-to-lead: under 60 seconds from lead arrival to first dial.
+- Warm-transfer handoff: sub-second bridge dead-air, with AI briefing delivered to the human agent.
+- QA coverage: 100% of calls, automatically scored.
+- Pricing: usage-based — platform subscription with free AI minutes included (500/month on Launch at A$249, 2,000/month on Scale at A$599), then a per-AI-minute rate; no per-seat fees, no seat minimums; AUD, ex GST; outcome-aligned pricing (per qualified transfer) available on Enterprise; telephony passes through at carrier cost.
+- Positioning: the AI-fronter → human-closer platform — versus voice-AI APIs (minutes without operations), parallel dialers (humans still do every conversation), and BPOs ($150–600 per appointment). CoCally is the whole operation with proof on every call.
+
+## Contact
+
+- Website: https://co-cally.com
+- Demo requests: via the form at https://co-cally.com/#demo

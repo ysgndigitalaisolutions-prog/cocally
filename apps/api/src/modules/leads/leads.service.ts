@@ -56,17 +56,40 @@ export class LeadsService {
   /**
    * CSV import per LEAD-01/02: forgiving parsing, E.164 normalisation,
    * dedup on import and cross-list, mobile/landline detection, timezone
-   * inference, and a rejects report.
+   * inference, and a rejects report. Callers target a CAMPAIGN (the normal
+   * path — the campaign's default list is found or created automatically)
+   * or an explicit list id.
    */
   async importCsv(
     tenantId: string,
     actor: { id: string; label: string },
-    input: { listId: string; filename: string; csvContent: string; mapping: ColumnMapping },
+    input: { listId?: string; campaignId?: string; filename: string; csvContent: string; mapping: ColumnMapping },
   ) {
-    const list = await this.listModel
-      .findOne({ _id: new Types.ObjectId(input.listId), tenantId: new Types.ObjectId(tenantId) })
-      .exec();
-    if (!list) throw new NotFoundException('Lead list not found');
+    let list;
+    if (input.listId) {
+      list = await this.listModel
+        .findOne({ _id: new Types.ObjectId(input.listId), tenantId: new Types.ObjectId(tenantId) })
+        .exec();
+      if (!list) throw new NotFoundException('Lead list not found');
+    } else if (input.campaignId) {
+      const campaignObjectId = new Types.ObjectId(input.campaignId);
+      const campaignDoc = await this.campaignModel.findOne({ _id: campaignObjectId, tenantId: new Types.ObjectId(tenantId) }).exec();
+      if (!campaignDoc) throw new NotFoundException('Campaign not found');
+      list = await this.listModel
+        .findOne({ tenantId: new Types.ObjectId(tenantId), campaignId: campaignObjectId, status: 'ACTIVE' })
+        .exec();
+      if (!list) {
+        list = await this.listModel.create({
+          tenantId: new Types.ObjectId(tenantId),
+          clientId: campaignDoc.clientId,
+          name: `${campaignDoc.name} — leads`,
+          campaignId: campaignObjectId,
+          priority: 0,
+        });
+      }
+    } else {
+      throw new BadRequestException('Provide campaignId (preferred) or listId');
+    }
 
     const campaign = list.campaignId
       ? await this.campaignModel.findById(list.campaignId).lean().exec()

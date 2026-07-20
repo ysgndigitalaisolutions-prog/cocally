@@ -169,6 +169,66 @@ Notes:
 
 **Deprecation watch:** Gemini 2.5 Flash retires **2026-10-16**. Flash-Lite has no announced retirement, but the PAL's adapter registry + fallback chain means a model swap is a config change, not a code change — keep a second adapter (Claude Haiku 4.5 or the next Flash generation) configured in the chain as the failover hop.
 
+## 8. Per-call billing anatomy — who meters what
+
+> Added while validating the transfer model. §2/§3 give per-minute rates by *leg*; this section explains what is actually metering during a call, because several meters run **concurrently on the same call** and that is easy to miss when reading the leg tables.
+
+### The room, concretely
+
+One call = one LiveKit room with up to three participants:
+
+| Participant | How it joins | Present for | LiveKit meter |
+|---|---|---|---|
+| **Customer** | SIP participant — LiveKit dials out through the Twilio/Telnyx trunk, presenting the selected CLI | **The whole call** | SIP participant-minute (~$0.003–0.004/min) |
+| **AI agent** | Worker VM process, joins **outbound** over WebRTC, dispatched by LiveKit agent dispatch | AI leg only | WebRTC participant-minute (~$0.0004–0.0005/min) |
+| **Human agent** | Browser, joins the **same room** over WebRTC on transfer accept | Human leg only | WebRTC participant-minute (~$0.0004–0.0005/min) |
+
+Plus **egress**: recording tracks written directly to GCS, metered for the duration they run.
+
+The transfer is a participant joining a room that already exists — not a new call. Nothing is re-dialled, no second PSTN leg is created, no DID is involved. This is why bridge dead-air can be low: it's a WebRTC join and track subscription, not call setup.
+
+### Two meters run on the customer leg, not one
+
+This is the single most missed point:
+
+- **The carrier (Twilio/Telnyx)** bills the PSTN minutes — the actual phone call.
+- **LiveKit** separately bills the SIP participant-minute — the bridge between PSTN and the room.
+
+Both run for the **entire call duration, including the human-talk portion.** The carrier bill does not stop at transfer. §3's human-leg table ($0.019/min) is ex-telco like the rest of the doc, so the true marginal cost of a human-talk minute is **$0.019 + ~$0.065 = ~$0.084/min** — roughly 4.4× what the table alone implies.
+
+### Worked example — one transferred call (3 min AI + 6 min human)
+
+| Line | Math | USD | INR |
+|---|---|---|---|
+| AI leg (ex-telco, buffered §2) | 3 × $0.037 | $0.111 | ₹10.9 |
+| Human leg (ex-telco, buffered §3) | 6 × $0.019 | $0.114 | ₹11.2 |
+| **Platform subtotal (ex-telco)** | | **$0.225** | **₹22.1** |
+| Telco PSTN (separate bill) | 9 × $0.065 | $0.585 | ₹57.3 |
+| **True all-in per transferred call** | | **≈ $0.81** | **≈ ₹79** |
+
+**Telco is ~72% of the true cost of a transferred call.** Every platform-side lever in §7 operates on the remaining 28%. This reinforces §7 item 6 — carrier rate negotiation outweighs every other optimization combined, and the ex-telco framing used throughout this doc systematically understates true cost by ~3.6× on transferred calls. Anyone reading the totals needs that stated.
+
+### Does the AI keep listening after transfer?
+
+**Default: no, and the AI should fully *leave* the room rather than mute.** The reason is capacity, not billing. A muted AI participant costs ~$0.0005/min — negligible. But if the worker *process* stays attached, it holds a **job slot on the worker VM**, and that is the scarce resource: ~10–20 concurrent sessions per 4 vCPU (architecture §3). Holding slots through 6-minute human legs would cut effective dialling concurrency by more than half and force a second worker VM far earlier than the ~40–50k min/mo threshold in §6b.
+
+**So: on transfer accept, the AI publishes its final state and disconnects.** "Mutes/exits" in architecture §8 should be read as *exits* — worth making explicit when the LiveKit runtime is built, because muting is the easier implementation and the expensive mistake.
+
+### The human-leg QA transcript should be batch, not streaming
+
+§3 carries streaming STT ($0.0077/min) on the human leg for the QA transcript, and §7 item 3 notes it's ~45% of human-leg cost. But QA has **no real-time requirement** — the transcript is read after the call. Two changes follow:
+
+1. **Transcribe the human leg from the recording, post-call, in batch.** Deepgram pre-recorded is materially cheaper than streaming (roughly 40–45% less — *verify against the current price sheet before relying on this*).
+2. **Batch transcription needs no participant in the room**, so it doesn't hold a worker slot either.
+
+Combined with sampling (§7 item 3), the human-leg STT line is the easiest remaining saving in the model — and unlike the LLM lines, it's still worth chasing because the human leg is twice the duration of the AI leg in the §6 volume assumptions.
+
+### The one case for keeping the AI listening — a premium feature, not a default
+
+Keeping the full AI pipeline running through the human leg would enable **real-time agent assist**: live compliance flagging, next-best-action, automatic objection surfacing in the agent script panel. That is a genuinely differentiated product capability and directly complements the agent-script work (ops map C12).
+
+Cost it honestly before promising it: it puts STT + LLM back on the human leg (~$0.008–0.010/min on top) **and** holds a worker slot for the call's full duration, which is the larger constraint. Price it as a premium tier, and default it off.
+
 ## Assumptions to revisit after 2 weeks of pilot data
 
 - Turns/min (2.5) and chars/min (400) — measure from `providersUsed` per-call cost records already captured by the engine.

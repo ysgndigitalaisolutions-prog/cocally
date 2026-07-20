@@ -10,13 +10,58 @@ import { DEFAULT_SCORING_CONFIG } from '@cocally/shared';
 import { config } from '../common/config';
 import { AU_PACK } from '../modules/country-packs/au.pack';
 
+/**
+ * Short demo logins (`admin` / `agent`, password `1234`) for walkthroughs where
+ * typing full addresses is friction. Idempotent, so it also tops up a database
+ * that was seeded before these existed.
+ *
+ * Skipped when NODE_ENV=production — these credentials must never exist in a
+ * real environment. The full-strength accounts above are the real ones.
+ */
+type Db = NonNullable<typeof mongoose.connection.db>;
+
+async function seedDemoLogins(db: Db, tenantId: Types.ObjectId): Promise<void> {
+  if (process.env.NODE_ENV === 'production') {
+    console.log('Skipping short demo logins (NODE_ENV=production).');
+    return;
+  }
+  const now = new Date();
+  const demoHash = await argon2.hash('1234');
+  const demoUsers: Array<[string, string, string[]]> = [
+    ['admin', 'Demo Admin', ['ADMIN']],
+    ['agent', 'Demo Agent', ['AGENT']],
+  ];
+  for (const [email, name, userRoles] of demoUsers) {
+    await db.collection('users').updateOne(
+      { tenantId, email },
+      {
+        $set: { name, passwordHash: demoHash, roles: userRoles, active: true, updatedAt: now },
+        $setOnInsert: {
+          tenantId,
+          email,
+          skills: [],
+          languages: ['en'],
+          presence: 'OFFLINE',
+          talkTimeTodaySeconds: 0,
+          adminIpAllowlist: [],
+          totpEnabled: false,
+          createdAt: now,
+        },
+      },
+      { upsert: true },
+    );
+  }
+  console.log('Demo logins ready: admin / 1234  ·  agent / 1234');
+}
+
 async function main(): Promise<void> {
   await mongoose.connect(config.mongoUri);
   const db = mongoose.connection.db!;
 
   const existing = await db.collection('tenants').findOne({ slug: 'sunrise-connect' });
   if (existing) {
-    console.log('Seed already applied (tenant sunrise-connect exists). Nothing to do.');
+    console.log('Seed already applied (tenant sunrise-connect exists).');
+    await seedDemoLogins(db, existing._id as Types.ObjectId);
     await mongoose.disconnect();
     return;
   }
@@ -288,9 +333,12 @@ async function main(): Promise<void> {
     })),
   );
 
+  await seedDemoLogins(db, tenantId);
+
   console.log('Seed complete.');
   console.log('Login: owner@cocally.dev / admin@cocally.dev / supervisor@cocally.dev / agent1@cocally.dev / qa@cocally.dev');
   console.log('Password (all): CoCally!Pilot2026');
+  console.log('Short demo logins: admin / 1234  ·  agent / 1234');
   await mongoose.disconnect();
 }
 
