@@ -52,8 +52,8 @@ export default function LoginPage() {
         </div>
         <form onSubmit={submit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium">Email</label>
-            <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            <label className="mb-1 block text-sm font-medium">Email or username</label>
+            <input className="input" type="text" value={email} onChange={(e) => setEmail(e.target.value)} required />
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium">Password</label>
@@ -63,7 +63,7 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              minLength={8}
+              minLength={4}
             />
           </div>
           {requires2fa && (

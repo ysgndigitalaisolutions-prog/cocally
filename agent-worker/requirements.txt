@@ -1,0 +1,8 @@
+# CoCally LiveKit Agents worker.
+# Deepgram = STT + Aura TTS; Groq (via the OpenAI-compatible plugin) = LLM.
+# No ElevenLabs / OpenAI / Google needed.
+# If your installed livekit-agents differs, check its docs — the AgentSession /
+# plugin API is stable across 1.x but import paths can shift between majors.
+livekit-agents[deepgram,openai,silero,turn-detector]~=1.0
+python-dotenv~=1.0
+aiohttp~=3.9

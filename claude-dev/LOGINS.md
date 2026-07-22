@@ -34,3 +34,6 @@ All six share the password **`CoCally!Pilot2026`**.
 3. AI leg runs (AMD → disclosure → qualification → live scoring); at the transfer threshold agent1 gets the transfer card → accept → bridge → disposition.
 
 Note: automatic dialing additionally requires an AVAILABLE agent *and* the lead's local calling window to be open (AU: Mon–Fri 09:00–20:00, Sat 09:00–17:00, no Sundays). The Campaigns page **Dialer** column shows which gate is currently closed and when it reopens. **Dial (sim)** bypasses these, which is why it always works for a demo.
+
+
+Deepgramkey=28643adefcae1aba1fa8b1a5dbfceaf472286230

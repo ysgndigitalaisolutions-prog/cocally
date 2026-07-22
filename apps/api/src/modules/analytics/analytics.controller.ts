@@ -26,14 +26,34 @@ export class AnalyticsController {
 
   @Get('funnel')
   @Roles('ADMIN', 'SUPERVISOR', 'QA', 'OWNER')
-  funnel(@CurrentUser() user: AuthenticatedUser, @Query('campaignId') campaignId?: string) {
-    return this.analytics.funnel(user.tenantId, campaignId);
+  funnel(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('campaignId') campaignId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.analytics.funnel(
+      user.tenantId,
+      campaignId,
+      from ? new Date(from) : undefined,
+      to ? new Date(to) : undefined,
+    );
   }
 
   @Get('objections')
   @Roles('ADMIN', 'SUPERVISOR', 'QA', 'OWNER')
-  objections(@CurrentUser() user: AuthenticatedUser, @Query('campaignId') campaignId?: string) {
-    return this.analytics.objections(user.tenantId, campaignId);
+  objections(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('campaignId') campaignId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.analytics.objections(
+      user.tenantId,
+      campaignId,
+      from ? new Date(from) : undefined,
+      to ? new Date(to) : undefined,
+    );
   }
 
   @Get('outcomes')
@@ -46,5 +66,29 @@ export class AnalyticsController {
   @Roles('ADMIN', 'SUPERVISOR', 'QA', 'OWNER')
   heatmap(@CurrentUser() user: AuthenticatedUser, @Query('campaignId') campaignId?: string) {
     return this.analytics.heatmap(user.tenantId, campaignId);
+  }
+
+  /** Abandon rate — connected customers who found no available closer. */
+  @Get('pacing-health')
+  @Roles('ADMIN', 'SUPERVISOR', 'QA', 'OWNER')
+  pacingHealth(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('campaignId') campaignId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.analytics.pacingHealth(
+      user.tenantId,
+      campaignId,
+      from ? new Date(from) : undefined,
+      to ? new Date(to) : undefined,
+    );
+  }
+
+  /** Penetration and remaining dialable inventory for the day's list. */
+  @Get('list-health')
+  @Roles('ADMIN', 'SUPERVISOR', 'QA', 'OWNER')
+  listHealth(@CurrentUser() user: AuthenticatedUser, @Query('campaignId') campaignId?: string) {
+    return this.analytics.listHealth(user.tenantId, campaignId);
   }
 }

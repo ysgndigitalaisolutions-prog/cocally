@@ -120,6 +120,9 @@ export class DialerService {
       campaignId,
       state_: { $in: ['FRESH', 'ATTEMPTED', 'CONTACTED', 'CALLBACK'] },
       $or: [{ nextAttemptAt: { $exists: false } }, { nextAttemptAt: null }, { nextAttemptAt: { $lte: new Date() } }],
+      // A lead a human has claimed for manual dialing is off-limits to the AI
+      // dialer — this is what stops manual and auto from double-dialing a lead.
+      manualClaimedBy: null,
     };
   }
 
@@ -366,8 +369,13 @@ export class DialerService {
       // Fire the call without blocking the tick loop.
       void this.orchestrator
         .placeCall(campaign, lead, cli?.number)
-        .then(() => cli && this.cli.recordDial(cli._id, true))
-        .catch((err) => this.logger.error(`call failed: ${(err as Error).message}`));
+        // Feed the real answer result into CLI health so a number whose answer
+        // rate collapses actually gets rested.
+        .then((result) => cli && this.cli.recordDial(cli._id, result.answered))
+        .catch(async (err) => {
+          this.logger.error(`call failed: ${(err as Error).message}`);
+          if (cli) await this.cli.recordDial(cli._id, false);
+        });
     }
   }
 }

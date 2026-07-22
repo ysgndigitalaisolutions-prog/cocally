@@ -19,6 +19,9 @@ import { CallsController } from './calls.controller';
 import { CliService } from './cli.service';
 import { DialerController } from './dialer.controller';
 import { DialerService } from './dialer.service';
+import { LivekitService } from './livekit.service';
+import { ManualDialController } from './manual-dial.controller';
+import { ManualDialService } from './manual-dial.service';
 
 @Module({
   imports: [
@@ -39,8 +42,8 @@ import { DialerService } from './dialer.service';
     WebhooksModule,
     WorkspaceModule,
   ],
-  controllers: [CallsController, DialerController],
-  providers: [CallOrchestratorService, CliService, DialerService],
-  exports: [CallOrchestratorService, CliService, DialerService],
+  controllers: [CallsController, DialerController, ManualDialController],
+  providers: [CallOrchestratorService, CliService, DialerService, ManualDialService, LivekitService],
+  exports: [CallOrchestratorService, CliService, DialerService, LivekitService],
 })
 export class TelephonyModule {}

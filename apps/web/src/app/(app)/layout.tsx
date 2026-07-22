@@ -10,6 +10,7 @@ import { api } from '@/lib/api';
 const NAV = [
   { href: '/dashboard', label: 'Dashboard', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/workspace', label: 'Workspace', roles: ['AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER'] },
+  { href: '/manual-dial', label: 'Manual dial', roles: ['AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER'] },
   { href: '/insights', label: 'My insights', roles: ['AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER'] },
   { href: '/team', label: 'Team insights', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/campaigns', label: 'Campaigns', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
@@ -18,6 +19,7 @@ const NAV = [
   { href: '/calls', label: 'Calls', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/providers', label: 'Providers', roles: ['OWNER', 'ADMIN'] },
   { href: '/audit', label: 'Audit log', roles: ['OWNER', 'ADMIN', 'QA'] },
+  { href: '/live-demo', label: 'Live demo', roles: ['OWNER', 'ADMIN'] },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {

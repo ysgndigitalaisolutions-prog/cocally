@@ -67,6 +67,7 @@ export class VaultService {
       'openai-whisper': config.providerKeys.openai,
       anthropic: config.providerKeys.anthropic,
       google: config.providerKeys.google,
+      groq: config.providerKeys.groq,
       'google-stt': config.providerKeys.google,
       'google-tts': config.providerKeys.google,
       gemini: config.providerKeys.google,

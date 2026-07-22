@@ -208,11 +208,25 @@ export class TransfersService {
       facts,
       flaggedObjection: openObjection,
       proposedAppointment: (lead.facts?.['appointmentSlot'] as string) ?? null,
-      suggestedOpener: call.summary
-        ? `Opener: pick up from — ${call.summary.slice(0, 140)}`
-        : `Hi ${lead.firstName ?? 'there'}, thanks for chatting with our assistant — let's sort the details.`,
+      suggestedOpener: this.buildOpener(lead, openObjection),
       acceptDeadline: Date.now() + acceptWindowSeconds * 1000,
     };
+  }
+
+  /**
+   * A natural first line for the agent to say on bridge. Deliberately NOT the
+   * raw summary blob (name/score/facts already render structurally on the card);
+   * it reflects the lead's context — an open objection or appointment intent.
+   */
+  private buildOpener(lead: LeadDocument, openObjection: string | null): string {
+    const name = lead.firstName ?? 'there';
+    if (openObjection) {
+      return `Hi ${name}, thanks for holding — I know you mentioned ${openObjection.replace(/_/g, ' ')}, let me help sort that out.`;
+    }
+    if (lead.facts?.['appointmentInterest']) {
+      return `Hi ${name}, thanks for holding — I understand you're keen on a free solar assessment. Let me lock in a time that suits you.`;
+    }
+    return `Hi ${name}, thanks for chatting with our assistant — let me confirm a couple of details and see how we can help.`;
   }
 
   private buildWhisper(call: CallDocument, lead: LeadDocument): string {

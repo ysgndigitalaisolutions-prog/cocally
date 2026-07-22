@@ -59,8 +59,9 @@ export class Call {
   @Prop({ type: Types.ObjectId, ref: 'Lead', required: true, index: true })
   leadId: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: 'FlowVersion', required: true })
-  flowVersionId: Types.ObjectId;
+  /** The AI flow that ran this call. Absent for manual dials (no AI leg). */
+  @Prop({ type: Types.ObjectId, ref: 'FlowVersion' })
+  flowVersionId?: Types.ObjectId;
 
   @Prop({ type: String, enum: ['OUTBOUND', 'INBOUND'], default: 'OUTBOUND' })
   direction: 'OUTBOUND' | 'INBOUND';
@@ -84,6 +85,10 @@ export class Call {
   /** Human agent bridged on transfer, if any. */
   @Prop({ type: Types.ObjectId, ref: 'User' })
   agentId?: Types.ObjectId;
+
+  /** True for agent-initiated manual dials (no AI leg) per the manual dialer. */
+  @Prop({ default: false })
+  manual: boolean;
 
   @Prop({ type: String, enum: DISPOSITIONS })
   disposition?: Disposition;
@@ -144,3 +149,12 @@ export const CallSchema = SchemaFactory.createForClass(Call);
 CallSchema.index({ tenantId: 1, campaignId: 1, startedAt: -1 });
 CallSchema.index({ leadId: 1, startedAt: 1 });
 CallSchema.index({ tenantId: 1, agentId: 1, bridgedAt: -1 });
+// Floor timeline and tenant-wide KPI scans (no campaign filter).
+CallSchema.index({ tenantId: 1, startedAt: -1 });
+// Disposition/outcome mix and the calls screen's primary filters.
+CallSchema.index({ tenantId: 1, campaignId: 1, disposition: 1, startedAt: -1 });
+CallSchema.index({ tenantId: 1, campaignId: 1, outcome: 1, startedAt: -1 });
+// Hung-call sweep: find non-terminal calls older than the cutoff.
+CallSchema.index({ state: 1, startedAt: 1 });
+// Per-agent productivity over a window.
+CallSchema.index({ tenantId: 1, agentId: 1, startedAt: -1 });

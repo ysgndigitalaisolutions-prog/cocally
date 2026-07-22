@@ -346,6 +346,54 @@ export class OpenAiLlm implements LlmAdapter {
   }
 }
 
+/**
+ * Groq's OpenAI-compatible chat endpoint — the same low-latency Llama models
+ * the LiveKit voice worker uses. Registered separately from `openai` (not
+ * reusing that adapter with a custom baseUrl) so a real OpenAI key, if added
+ * later, never collides with the Groq one.
+ */
+export class GroqLlm implements LlmAdapter {
+  readonly info = {
+    id: 'groq',
+    label: 'Groq',
+    capability: 'LLM' as const,
+    unitCost: { amountCentsPer: 0, unit: '1k_tokens' as const },
+    credentialSchema: [{ key: 'apiKey', label: 'API key', type: 'secret' as const, required: true, placeholder: 'gsk_…' }],
+    models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b'],
+  };
+
+  async complete(request: LlmRequest, credentials?: ProviderCredentials): Promise<LlmResult> {
+    const apiKey = credentials?.apiKey;
+    if (!apiKey) throw new Error('Groq API key not configured');
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: request.model ?? this.info.models[0],
+        max_tokens: request.maxTokens ?? 512,
+        temperature: request.temperature ?? 0.7,
+        messages: request.messages,
+        ...(request.jsonMode ? { response_format: { type: 'json_object' } } : {}),
+      }),
+    });
+    if (!response.ok) throw new Error(`Groq completion failed: ${response.status}`);
+    const data = (await response.json()) as {
+      choices: Array<{ message: { content: string } }>;
+      usage: { prompt_tokens: number; completion_tokens: number };
+    };
+    return {
+      text: data.choices[0]?.message.content ?? '',
+      inputTokens: data.usage.prompt_tokens,
+      outputTokens: data.usage.completion_tokens,
+      costCents: 0,
+    };
+  }
+
+  async healthy(credentials?: ProviderCredentials): Promise<boolean> {
+    return Boolean(credentials?.apiKey);
+  }
+}
+
 export class GeminiLlm implements LlmAdapter {
   readonly info = {
     id: 'gemini',

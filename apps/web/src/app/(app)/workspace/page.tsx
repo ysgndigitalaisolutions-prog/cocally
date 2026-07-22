@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { FloorCallCard, TransferCard } from '@cocally/shared';
+import { Room, RoomEvent, Track } from 'livekit-client';
 import { api } from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAppStore } from '@/lib/store';
@@ -35,15 +36,39 @@ const DISPOSITIONS = [
   ['FOLLOW_UP', 'Follow up'],
 ] as const;
 
+interface CallBriefing {
+  callId: string;
+  leadName: string;
+  location: string;
+  score: number;
+  summary: string;
+  facts: Array<{ label: string; value: string; confirmed: boolean }>;
+  objection: string | null;
+  campaignName: string;
+  rebuttals: Array<{ objection: string; rebuttal: string }>;
+}
+
 export default function WorkspacePage() {
   const { presence, setPresence, transferOffer, setTransferOffer, activeCallId, setActiveCallId } = useAppStore();
   const [floor, setFloor] = useState<Record<string, FloorCallCard>>({});
   const [transcript, setTranscript] = useState<Array<{ speaker: string; text: string }>>([]);
   const [summary, setSummary] = useState('');
+  const [briefing, setBriefing] = useState<CallBriefing | null>(null);
   const [countdown, setCountdown] = useState(0);
   const [notes, setNotes] = useState('');
   const [team, setTeam] = useState<TeamMember[]>([]);
   const offerRef = useRef<TransferCard | null>(null);
+
+  // Real LiveKit audio bridge for a bridged transfer (the live-voice-demo
+  // dial trigger itself lives on the admin-only /live-demo page — an agent
+  // only ever sees the resulting transfer offer + on-call audio here). See
+  // claude-dev/2026-07-22-live-voice-build-progress.md.
+  const liveKitRoomRef = useRef<Room | null>(null);
+  const liveKitAudioRef = useRef<HTMLDivElement | null>(null);
+  const [audioStatus, setAudioStatus] = useState<'idle' | 'connecting' | 'live' | 'blocked' | 'error'>('idle');
+  const [audioError, setAudioError] = useState('');
+  const [audioRetryCount, setAudioRetryCount] = useState(0);
+  const [micMuted, setMicMuted] = useState(false);
 
   // Server truth on load: own presence + team roster. The buttons and banner
   // always reflect what the SERVER believes, never a stale local default.
@@ -55,6 +80,67 @@ export default function WorkspacePage() {
     }, 15_000);
     return () => clearInterval(timer);
   }, [setPresence]);
+
+  // Bridge real audio into a live-voice-demo call: when this agent gets
+  // bridged (activeCallId set), join the same LiveKit room the AI worker and
+  // the browser "lead" are in, publish mic, and play back what they hear —
+  // the human takes over the mic where the AI worker leaves off.
+  useEffect(() => {
+    if (!activeCallId) {
+      liveKitRoomRef.current?.disconnect();
+      liveKitRoomRef.current = null;
+      setAudioStatus('idle');
+      setMicMuted(false);
+      return;
+    }
+    let cancelled = false;
+    setAudioStatus('connecting');
+    setAudioError('');
+    api
+      .get(`/calls/${activeCallId}/agent-token`)
+      .then(async (r) => {
+        if (cancelled) return;
+        const room = new Room();
+        room.on(RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind !== Track.Kind.Audio) return;
+          const el = track.attach();
+          liveKitAudioRef.current?.appendChild(el);
+          // Autoplay can still be blocked even after an earlier page
+          // interaction (this connect is triggered by a socket event, not a
+          // click) — surface a one-click "Enable audio" fallback instead of
+          // silently failing.
+          el.play().catch(() => setAudioStatus('blocked'));
+        });
+        await room.connect(r.data.url, r.data.token);
+        await room.localParticipant.setMicrophoneEnabled(true);
+        liveKitRoomRef.current = room;
+        setAudioStatus((prev) => (prev === 'blocked' ? prev : 'live'));
+      })
+      // Not every bridged call is a live-voice-demo call (simulation-path
+      // transfers have no LiveKit room), but a real failure (denied mic
+      // permission, LiveKit connect error, etc.) must be visible — silently
+      // swallowing it left agents with no audio and no explanation at all.
+      .catch((e) => {
+        setAudioError(e instanceof Error ? e.message : 'Could not connect call audio.');
+        setAudioStatus('error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCallId, audioRetryCount]);
+
+  function enableAudio() {
+    liveKitAudioRef.current?.querySelectorAll('audio').forEach((el) => void (el as HTMLAudioElement).play());
+    setAudioStatus('live');
+  }
+
+  function toggleMic() {
+    const room = liveKitRoomRef.current;
+    if (!room) return;
+    const next = !micMuted;
+    void room.localParticipant.setMicrophoneEnabled(!next);
+    setMicMuted(next);
+  }
 
   useEffect(() => {
     const socket = getSocket();
@@ -120,6 +206,20 @@ export default function WorkspacePage() {
     return () => clearInterval(timer);
   }, [transferOffer, setTransferOffer]);
 
+  // On bridge, pull the call briefing (summary + campaign playbook). The summary
+  // socket event fires during the AI leg — before this agent is assigned — so a
+  // fetch is what reliably gives a just-bridged agent the context and script.
+  useEffect(() => {
+    if (!activeCallId) {
+      setBriefing(null);
+      return;
+    }
+    api
+      .get(`/calls/${activeCallId}/briefing`)
+      .then((r) => setBriefing(r.data))
+      .catch(() => undefined);
+  }, [activeCallId]);
+
   async function changePresence(state: (typeof PRESENCE_OPTIONS)[number]) {
     await api.post('/workspace/presence', { state });
     setPresence(state);
@@ -127,21 +227,39 @@ export default function WorkspacePage() {
 
   async function acceptOffer() {
     if (!transferOffer) return;
-    await api.post(`/workspace/transfers/${transferOffer.transferId}/accept`);
+    try {
+      await api.post(`/workspace/transfers/${transferOffer.transferId}/accept`);
+    } catch {
+      // The 13s(ish) accept window can lapse between the card rendering and
+      // the click landing (server already cascaded to the next agent) — was
+      // previously an uncaught 404 that crashed the page instead of just
+      // clearing the stale card with an explanation.
+      alert('This offer has expired — it was likely already offered to someone else. Wait for the next one.');
+      setTransferOffer(null);
+    }
   }
 
   async function declineOffer() {
     if (!transferOffer) return;
-    await api.post(`/workspace/transfers/${transferOffer.transferId}/decline`);
+    try {
+      await api.post(`/workspace/transfers/${transferOffer.transferId}/decline`);
+    } catch {
+      // Already expired — nothing to decline, just clear it below.
+    }
     setTransferOffer(null);
   }
 
   async function setDisposition(disposition: string) {
     if (!activeCallId) return;
     await api.post(`/calls/${activeCallId}/disposition`, { disposition, notes: notes || undefined });
+    liveKitRoomRef.current?.disconnect();
+    liveKitRoomRef.current = null;
+    setAudioStatus('idle');
+    setMicMuted(false);
     setActiveCallId(null);
     setTranscript([]);
     setSummary('');
+    setBriefing(null);
     setNotes('');
     setPresence('WRAP_UP');
   }
@@ -234,15 +352,111 @@ export default function WorkspacePage() {
 
       {activeCallId && (
         <div className="card p-6">
-          <h2 className="mb-2 font-semibold" style={{ color: 'var(--good)' }}>
-            On call
-          </h2>
-          {summary && (
-            <div className="mb-4 rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
-              <span className="font-semibold">Summary: </span>
-              {summary}
+          <div className="mb-3 flex items-baseline justify-between">
+            <h2 className="font-semibold" style={{ color: 'var(--good)' }}>
+              On call{briefing ? ` · ${briefing.leadName}` : ''}
+            </h2>
+            {briefing && (
+              <span className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                {briefing.campaignName}
+                {briefing.location ? ` · ${briefing.location}` : ''}
+                {' · score '}
+                <span className="font-bold" style={{ color: 'var(--good)' }}>{briefing.score}</span>
+              </span>
+            )}
+          </div>
+
+          {/* Real LiveKit audio status for the live-voice-demo path. Absent
+              (idle) for simulation-path transfers, which have no LiveKit
+              room — but a real failure (denied mic, bad token, etc.) must
+              always be visible, never silently hidden like "error" used to be. */}
+          {audioStatus !== 'idle' && (
+            <div
+              className="mb-4 flex items-center justify-between rounded-lg p-3 text-sm"
+              style={{ background: 'var(--surface-2)' }}
+            >
+              {audioStatus === 'connecting' && <span>Connecting call audio…</span>}
+              {audioStatus === 'live' && (
+                <span style={{ color: 'var(--good)' }}>🎙 Live audio connected — talk normally, your mic is on.</span>
+              )}
+              {audioStatus === 'blocked' && (
+                <span style={{ color: 'var(--accent)' }}>Audio is connected but your browser blocked autoplay.</span>
+              )}
+              {audioStatus === 'error' && (
+                <span style={{ color: 'var(--bad)' }}>
+                  Could not connect call audio{audioError ? ` — ${audioError}` : ''}. Check your mic permission for
+                  this site.
+                </span>
+              )}
+              <div className="flex gap-2">
+                {audioStatus === 'blocked' && (
+                  <button onClick={enableAudio} className="btn btn-primary text-xs">
+                    Enable audio
+                  </button>
+                )}
+                {audioStatus === 'live' && (
+                  <button onClick={toggleMic} className="btn btn-ghost text-xs">
+                    {micMuted ? 'Unmute' : 'Mute'}
+                  </button>
+                )}
+                {audioStatus === 'error' && (
+                  <button onClick={() => setAudioRetryCount((n) => n + 1)} className="btn btn-primary text-xs">
+                    Retry
+                  </button>
+                )}
+              </div>
             </div>
           )}
+
+          {/* Summary + campaign script, side by side, so the agent has both in view */}
+          <div className="mb-4 grid gap-4 md:grid-cols-2">
+            <div className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+                AI summary
+              </p>
+              <p>{briefing?.summary || summary || 'No summary captured yet.'}</p>
+              {briefing && briefing.facts.length > 0 && (
+                <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5">
+                  {briefing.facts.map((fact) => (
+                    <li key={fact.label} style={{ color: fact.confirmed ? 'var(--good)' : 'var(--text-dim)' }}>
+                      {fact.confirmed ? '✓' : '·'} {fact.label}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+                Script &amp; rebuttals
+              </p>
+              {briefing && briefing.objection && (
+                <p className="mb-2" style={{ color: 'var(--accent)' }}>
+                  Flagged objection: <span className="font-semibold">{briefing.objection.replace(/_/g, ' ')}</span>
+                </p>
+              )}
+              {briefing && briefing.rebuttals.length > 0 ? (
+                <ul className="space-y-2">
+                  {briefing.rebuttals.map((r) => {
+                    const active = briefing.objection === r.objection;
+                    return (
+                      <li
+                        key={r.objection}
+                        className="rounded p-2"
+                        style={active ? { background: 'var(--surface)', border: '1px solid var(--accent)' } : undefined}
+                      >
+                        <p className="font-semibold capitalize">{r.objection.replace(/_/g, ' ')}</p>
+                        <p style={{ color: 'var(--text-dim)' }}>{r.rebuttal}</p>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p style={{ color: 'var(--text-dim)' }}>No rebuttal playbook configured for this campaign.</p>
+              )}
+            </div>
+          </div>
+
           {transcript.length > 0 && (
             <div className="mb-4 max-h-48 space-y-1 overflow-y-auto text-sm">
               {transcript.map((line, i) => (
@@ -270,6 +484,7 @@ export default function WorkspacePage() {
               </button>
             ))}
           </div>
+          <div ref={liveKitAudioRef} style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden' }} />
         </div>
       )}
 

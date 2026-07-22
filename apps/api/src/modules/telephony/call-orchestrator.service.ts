@@ -50,12 +50,20 @@ export class CallOrchestratorService {
     return [...this.activeCalls.values()].filter((c) => c.tenantId === tenantId).length;
   }
 
-  async placeCall(campaign: CampaignDocument, lead: LeadDocument, cli: string | undefined, options?: { personaPrompt?: string; scriptedReplies?: string[]; amdClass?: AmdClass }): Promise<void> {
+  /**
+   * Place a call and report whether a human actually answered.
+   *
+   * The `answered` flag exists so the caller can feed CLI health accurately —
+   * the dialer previously hardcoded `recordDial(cli, true)`, which meant the
+   * answer-rate spam heuristic ("rest a number below 5% answer rate") could
+   * never fire no matter how badly a number was performing.
+   */
+  async placeCall(campaign: CampaignDocument, lead: LeadDocument, cli: string | undefined, options?: { personaPrompt?: string; scriptedReplies?: string[]; amdClass?: AmdClass }): Promise<{ answered: boolean }> {
     const pack = await this.packs.getByCode(campaign.countryPackCode);
     const flowVersionId = this.pickFlowVersion(campaign);
     if (!flowVersionId) {
       this.logger.warn(`Campaign ${campaign.name} has no active flow version`);
-      return;
+      return { answered: false };
     }
     const graph = await this.flows.getPublishedGraph(flowVersionId);
 
@@ -93,6 +101,7 @@ export class CallOrchestratorService {
       );
 
       await this.runCall(call, campaign, lead, pack.disclosures, graph, runtime);
+      return { answered: call.amdClass === 'HUMAN' };
     } finally {
       this.activeCalls.delete(callId);
       this.gateway.removeFloorCall(campaign.tenantId.toString(), callId);

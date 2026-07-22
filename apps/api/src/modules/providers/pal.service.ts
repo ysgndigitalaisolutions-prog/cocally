@@ -10,6 +10,7 @@ import {
   ElevenLabsTts,
   GeminiLlm,
   GoogleTts,
+  GroqLlm,
   OpenAiLlm,
   OpenAiWhisperStt,
   SelfHostedLlm,
@@ -57,7 +58,7 @@ export class PalService {
       this.ttsAdapters.set(adapter.info.id, adapter);
     for (const adapter of [new DeepgramStt(), new OpenAiWhisperStt(), new AzureStt(), new SimulationStt()])
       this.sttAdapters.set(adapter.info.id, adapter);
-    for (const adapter of [new AnthropicLlm(), new OpenAiLlm(), new GeminiLlm(), new SelfHostedLlm(), new SimulationLlm()])
+    for (const adapter of [new GroqLlm(), new AnthropicLlm(), new OpenAiLlm(), new GeminiLlm(), new SelfHostedLlm(), new SimulationLlm()])
       this.llmAdapters.set(adapter.info.id, adapter);
   }
 
@@ -115,7 +116,9 @@ export class PalService {
     const defaults: Record<ProviderCapability, ResolvedChainEntry[]> = {
       TTS: [{ providerId: 'elevenlabs' }, { providerId: 'sim-tts' }],
       STT: [{ providerId: 'deepgram' }, { providerId: 'openai-whisper' }, { providerId: 'sim-stt' }],
-      LLM: [{ providerId: 'anthropic' }, { providerId: 'openai' }, { providerId: 'gemini' }, { providerId: 'sim-llm' }],
+      // groq first: the only provider with a real key configured in this
+      // deployment (ANTHROPIC/OPENAI/GOOGLE are unset — see apps/api/.env).
+      LLM: [{ providerId: 'groq' }, { providerId: 'anthropic' }, { providerId: 'openai' }, { providerId: 'gemini' }, { providerId: 'sim-llm' }],
     };
     return defaults[capability];
   }
