@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { PRESENCE_STATES, type PresenceState } from '@cocally/shared';
+import { PAUSE_CODES, PRESENCE_STATES, type PauseCode, type PresenceState } from '@cocally/shared';
 import { HydratedDocument, Types } from 'mongoose';
 
 /**
@@ -17,6 +17,14 @@ export class AgentActivity {
 
   @Prop({ type: String, enum: PRESENCE_STATES, required: true })
   state: PresenceState;
+
+  /**
+   * Reason code, set only on BREAK segments. This is what turns the activity
+   * log from "how long were they paused" into "how long were they paused, and
+   * was it productive" — the distinction adherence reporting is built on.
+   */
+  @Prop({ type: String, enum: PAUSE_CODES })
+  pauseCode?: PauseCode;
 
   @Prop({ required: true })
   startedAt: Date;

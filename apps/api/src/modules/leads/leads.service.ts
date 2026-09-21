@@ -31,6 +31,7 @@ const DEFAULT_RETRY_MATRIX: RetryRule[] = [
   { outcome: 'ANSWERED_VOICEMAIL', delayMinutes: 1440, shiftTimeBand: true, maxAttempts: 3 },
   { outcome: 'DISCONNECTED', delayMinutes: 0, shiftTimeBand: false, maxAttempts: 1 },
   { outcome: 'FAILED', delayMinutes: 60, shiftTimeBand: false, maxAttempts: 3 },
+  { outcome: 'ABANDONED', delayMinutes: 5, shiftTimeBand: false, maxAttempts: 999 },
 ];
 
 @Injectable()
@@ -308,6 +309,21 @@ export class LeadsService {
       if (lead.state_ === 'FRESH' || lead.state_ === 'ATTEMPTED') {
         this.transition(lead, 'CONTACTED', 'Human answered');
       }
+      await lead.save();
+      return;
+    }
+
+    // A human DID answer here — this is a connect, not a miss — the predictive
+    // dialer just had nobody free to take it. Retry fast (not the generic
+    // matrix's hours-later delay) since we owe this person a prompt callback,
+    // and don't let it exhaust the lead after a handful of unlucky ratios.
+    if (outcome === 'ABANDONED') {
+      lead.lastContactedAt = new Date();
+      if (lead.state_ === 'FRESH' || lead.state_ === 'ATTEMPTED') {
+        this.transition(lead, 'CONTACTED', 'Reached, but abandoned — no agent was free');
+      }
+      const rule = matrix.find((r) => r.outcome === 'ABANDONED');
+      lead.nextAttemptAt = new Date(Date.now() + (rule?.delayMinutes ?? 5) * 60 * 1000);
       await lead.save();
       return;
     }

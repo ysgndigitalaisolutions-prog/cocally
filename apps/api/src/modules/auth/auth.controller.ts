@@ -1,6 +1,7 @@
 import { Body, Controller, Post } from '@nestjs/common';
 import { IsOptional, IsString, MinLength } from 'class-validator';
 import { Public } from '../../common/auth/public.decorator';
+import { Roles } from '../../common/auth/roles.decorator';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/auth/jwt-auth.guard';
 import { AuthService } from './auth.service';
@@ -44,12 +45,18 @@ export class AuthController {
     return this.authService.login(dto.email, dto.password, dto.totpCode);
   }
 
+  // Self-service on the caller's own account, so every authenticated role is
+  // allowed. Listed explicitly because RolesGuard now denies by default —
+  // previously an undecorated handler was reachable by anyone signed in, which
+  // is the wrong default for a platform with a floor of agents on it.
   @Post('2fa/setup')
+  @Roles('OWNER', 'ADMIN', 'SUPERVISOR', 'AGENT', 'QA', 'API_CLIENT')
   setup2fa(@CurrentUser() user: AuthenticatedUser) {
     return this.authService.setup2fa(user.userId);
   }
 
   @Post('2fa/confirm')
+  @Roles('OWNER', 'ADMIN', 'SUPERVISOR', 'AGENT', 'QA', 'API_CLIENT')
   confirm2fa(@CurrentUser() user: AuthenticatedUser, @Body() dto: Confirm2faDto) {
     return this.authService.confirm2fa(user.userId, dto.code);
   }

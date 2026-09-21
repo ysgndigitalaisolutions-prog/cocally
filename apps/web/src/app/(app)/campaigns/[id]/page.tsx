@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { DialerStatusCard } from '@/components/DialerStatus';
+import { PredictiveDialerStatusCard } from '@/components/PredictiveDialerStatus';
 import CampaignInsights from '@/components/CampaignInsights';
 import CampaignTeamAssignment from '@/components/CampaignTeamAssignment';
 
@@ -39,6 +40,15 @@ interface Campaign {
   frequencyCapDays: number;
   aiSelfIdentification: boolean;
   activeFlowVersionId?: string;
+  predictiveDialing: {
+    enabled: boolean;
+    method: 'FIXED_RATIO' | 'ADAPT_HARD_LIMIT';
+    ratio: number;
+    minRatio: number;
+    maxRatio: number;
+    maxAbandonRatePercent: number;
+    abandonTimeoutSeconds: number;
+  };
 }
 
 interface Lead {
@@ -86,6 +96,13 @@ export default function CampaignDetailPage() {
     setMessage('Saved.');
     await load();
     setTimeout(() => setMessage(''), 2000);
+  }
+
+  // `predictiveDialing` is replaced whole on PATCH (not deep-merged server-side),
+  // so every edit here must resend the full current config with one field changed.
+  async function savePredictive(patch: Partial<Campaign['predictiveDialing']>) {
+    if (!campaign) return;
+    await save({ predictiveDialing: { ...campaign.predictiveDialing, ...patch } });
   }
 
   async function devDial(leadId: string) {
@@ -206,6 +223,62 @@ export default function CampaignDetailPage() {
             options={['LONGEST_IDLE', 'ROUND_ROBIN', 'LEAST_TALK_TIME', 'SKILL_PRIORITY', 'STICKY']}
             onSave={(v) => save({ routingStrategy: v })}
           />
+        </section>
+
+        <section className="card space-y-4 p-6">
+          <div>
+            <h2 className="font-semibold">Predictive dialing (human-agent floor)</h2>
+            <p className="mt-1 text-xs" style={{ color: 'var(--text-dim)' }}>
+              Ratio/adaptive dialing for a floor of human agents — ViciDial-style, no AI leg. Mutually
+              exclusive with the AI auto-dialer above: enabling this pauses AI dialing for this campaign.
+            </p>
+          </div>
+
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={campaign.predictiveDialing.enabled}
+              onChange={(e) => savePredictive({ enabled: e.target.checked })}
+            />
+            Enabled
+          </label>
+
+          {campaign.predictiveDialing.enabled && (
+            <>
+              <PredictiveDialerStatusCard campaignId={String(params.id)} />
+
+              <SelectField
+                label="Method"
+                value={campaign.predictiveDialing.method}
+                options={['ADAPT_HARD_LIMIT', 'FIXED_RATIO']}
+                onSave={(v) => savePredictive({ method: v as 'FIXED_RATIO' | 'ADAPT_HARD_LIMIT' })}
+              />
+              {campaign.predictiveDialing.method === 'FIXED_RATIO' && (
+                <Field
+                  label="Ratio (lines per logged-in agent)"
+                  value={campaign.predictiveDialing.ratio}
+                  onSave={(v) => savePredictive({ ratio: Number(v) })}
+                />
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                <Field
+                  label="Min ratio"
+                  value={campaign.predictiveDialing.minRatio}
+                  onSave={(v) => savePredictive({ minRatio: Number(v) })}
+                />
+                <Field
+                  label="Max ratio"
+                  value={campaign.predictiveDialing.maxRatio}
+                  onSave={(v) => savePredictive({ maxRatio: Number(v) })}
+                />
+              </div>
+              <Field
+                label="Max abandon rate % (legal cap)"
+                value={campaign.predictiveDialing.maxAbandonRatePercent}
+                onSave={(v) => savePredictive({ maxAbandonRatePercent: Number(v) })}
+              />
+            </>
+          )}
         </section>
 
         <section className="card p-6">

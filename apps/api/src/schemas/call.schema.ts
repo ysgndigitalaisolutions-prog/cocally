@@ -1,13 +1,17 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import {
   AMD_CLASSES,
+  CALL_END_REASONS,
   CALL_OUTCOMES,
   CALL_STATES,
   DISPOSITIONS,
+  SUPERVISION_MODES,
   type AmdClass,
+  type CallEndReason,
   type CallOutcome,
   type CallState,
   type Disposition,
+  type SupervisionMode,
 } from '@cocally/shared';
 import { HydratedDocument, Types } from 'mongoose';
 
@@ -36,7 +40,12 @@ export interface ComplianceEvent {
     | 'OPT_OUT_DETECTED'
     | 'DISTRESS_EXIT'
     | 'WINDOW_CHECK'
-    | 'DNC_CHECK';
+    | 'DNC_CHECK'
+    | 'ABANDONED_CALL_NOTICE'
+    /** Customer pressed the keypad opt-out digit — a rail that does not depend on an LLM. */
+    | 'DTMF_OPT_OUT'
+    /** A supervisor attached to the live call (monitor/whisper/barge), recorded for audit. */
+    | 'SUPERVISION_ATTACHED';
   detail: string;
 }
 
@@ -90,6 +99,10 @@ export class Call {
   @Prop({ default: false })
   manual: boolean;
 
+  /** True for calls placed by the ratio/adaptive human-agent predictive dialer. */
+  @Prop({ default: false })
+  predictive: boolean;
+
   @Prop({ type: String, enum: DISPOSITIONS })
   disposition?: Disposition;
 
@@ -142,6 +155,71 @@ export class Call {
   /** Providers actually used (after fallbacks), for the cost view and tracing. */
   @Prop({ type: Object, default: {} })
   providersUsed: Record<string, string>;
+
+  // ── Real-carrier call progress ────────────────────────────────────────
+  // Populated by the LiveKit webhook receiver. Before these existed nothing
+  // advanced a live call past RINGING, so BUSY / NO_ANSWER / DISCONNECTED
+  // were declared outcomes that no code path could ever produce — which in
+  // turn made the whole retry matrix dead for real calls.
+
+  /** LiveKit SIP call id, for correlating webhooks and carrier-side CDRs. */
+  @Prop({ index: true, sparse: true })
+  sipCallId?: string;
+
+  /** Final SIP response code seen on the customer leg. */
+  @Prop()
+  sipStatusCode?: number;
+
+  /** Normalised disconnect cause — see CALL_END_REASONS. */
+  @Prop({ type: String, enum: CALL_END_REASONS })
+  endReason?: CallEndReason;
+
+  /** Wall-clock ms from INVITE to answer; null when never answered. */
+  @Prop()
+  ringMs?: number;
+
+  // ── Agent call control ────────────────────────────────────────────────
+
+  /** Times the agent placed the customer on hold. */
+  @Prop({ default: 0 })
+  holdCount: number;
+
+  /** Total ms the customer spent on hold — surfaced in QA. */
+  @Prop({ default: 0 })
+  heldMs: number;
+
+  /** Set while the customer is parked on music-on-hold. */
+  @Prop()
+  heldSince?: Date;
+
+  /** Agent who handed this call over, when it arrived by agent-to-agent transfer. */
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  transferredFromAgentId?: Types.ObjectId;
+
+  /** Every agent who has been on this call, in order — conference and transfer history. */
+  @Prop({ type: [Types.ObjectId], ref: 'User', default: [] })
+  participantAgentIds: Types.ObjectId[];
+
+  /** Supervisor currently attached, if any. */
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  supervisorId?: Types.ObjectId;
+
+  @Prop({ type: String, enum: SUPERVISION_MODES })
+  supervisionMode?: SupervisionMode;
+
+  // ── Recording ─────────────────────────────────────────────────────────
+
+  /** LiveKit Egress id for the room composite recording. */
+  @Prop()
+  recordingEgressId?: string;
+
+  /** Where the finished audio landed (object-store key or local path). */
+  @Prop()
+  recordingUri?: string;
+
+  /** Wrap-up deadline; the sweep auto-returns the agent to AVAILABLE after this. */
+  @Prop()
+  wrapUpDeadline?: Date;
 }
 
 export type CallDocument = HydratedDocument<Call>;
@@ -156,5 +234,9 @@ CallSchema.index({ tenantId: 1, campaignId: 1, disposition: 1, startedAt: -1 });
 CallSchema.index({ tenantId: 1, campaignId: 1, outcome: 1, startedAt: -1 });
 // Hung-call sweep: find non-terminal calls older than the cutoff.
 CallSchema.index({ state: 1, startedAt: 1 });
+// "What am I on right now?" — the call-bar recovery lookup, hit on every reload.
+CallSchema.index({ agentId: 1, state: 1 });
+// Wrap-up auto-return sweep.
+CallSchema.index({ wrapUpDeadline: 1 });
 // Per-agent productivity over a window.
 CallSchema.index({ tenantId: 1, agentId: 1, startedAt: -1 });

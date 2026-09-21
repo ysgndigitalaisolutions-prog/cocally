@@ -6,26 +6,30 @@ import { useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
 import { disconnectSocket } from '@/lib/socket';
 import { api } from '@/lib/api';
+import GlobalCallBar from '@/components/GlobalCallBar';
 
 const NAV = [
   { href: '/dashboard', label: 'Dashboard', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/workspace', label: 'Workspace', roles: ['AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER'] },
   { href: '/manual-dial', label: 'Manual dial', roles: ['AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER'] },
   { href: '/insights', label: 'My insights', roles: ['AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER'] },
+  { href: '/supervisor', label: 'Supervisor desk', roles: ['SUPERVISOR', 'ADMIN', 'OWNER'] },
   { href: '/team', label: 'Team insights', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/campaigns', label: 'Campaigns', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/flows', label: 'Flows', roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
   { href: '/leads', label: 'Leads', roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
   { href: '/calls', label: 'Calls', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/providers', label: 'Providers', roles: ['OWNER', 'ADMIN'] },
+  { href: '/cli-numbers', label: 'CLI numbers', roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
   { href: '/audit', label: 'Audit log', roles: ['OWNER', 'ADMIN', 'QA'] },
+  { href: '/reports', label: 'Reports', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/live-demo', label: 'Live demo', roles: ['OWNER', 'ADMIN'] },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { user, setUser } = useAppStore();
+  const { user, setUser, activeCall } = useAppStore();
 
   useEffect(() => {
     const token = localStorage.getItem('cocally.token');
@@ -91,7 +95,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </button>
         </div>
       </aside>
-      <main className="flex-1 overflow-x-hidden p-8">{children}</main>
+      <main className="flex-1 overflow-x-hidden p-8" style={{ paddingBottom: activeCall ? '5rem' : undefined }}>
+        {children}
+      </main>
+      <GlobalCallBar />
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { PRESENCE_STATES, ROLES, type PresenceState, type Role } from '@cocally/shared';
+import { PAUSE_CODES, PRESENCE_STATES, ROLES, type PauseCode, type PresenceState, type Role } from '@cocally/shared';
 import { HydratedDocument, Types } from 'mongoose';
 
 @Schema({ timestamps: true })
@@ -52,6 +52,24 @@ export class User {
   /** Cumulative talk-time today (seconds) — drives least-talk-time routing. */
   @Prop({ default: 0 })
   talkTimeTodaySeconds: number;
+
+  /**
+   * Reason attached to the current BREAK presence.
+   *
+   * A single undifferentiated BREAK state makes adherence reporting
+   * impossible — a supervisor cannot separate a paid coaching session from
+   * an unpaid lunch, and payroll has no source record. Set whenever presence
+   * becomes BREAK; cleared on every other transition.
+   */
+  @Prop({ type: String, enum: PAUSE_CODES })
+  pauseCode?: PauseCode;
+
+  @Prop()
+  pausedSince?: Date;
+
+  /** Shift clock-on. Null when the agent is off the clock. */
+  @Prop()
+  clockedInAt?: Date;
 
   /** Optional IP allowlist for admin access per ADM-01. */
   @Prop({ type: [String], default: [] })

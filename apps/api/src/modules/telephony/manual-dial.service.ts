@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { config } from '../../common/config';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
@@ -12,8 +13,21 @@ import { AssignmentService } from '../leads/assignment.service';
 import { SuppressionService } from '../leads/suppression.service';
 import { PresenceService } from '../workspace/presence.service';
 import { RealtimeGateway } from '../workspace/realtime.gateway';
+import { CliService } from './cli.service';
+import { LivekitService } from './livekit.service';
 
 const DIALABLE_STATES = ['FRESH', 'ATTEMPTED', 'CONTACTED', 'CALLBACK'];
+
+export interface ManualDialResult {
+  callId: string;
+  leadName: string;
+  phone: string;
+  cli: string | null;
+  /** LiveKit room join details for the agent's browser — see `connect()`. */
+  livekitUrl: string;
+  livekitToken: string;
+  roomName: string;
+}
 
 export interface ManualLeadRow {
   id: string;
@@ -42,10 +56,12 @@ export interface ManualLeadRow {
  * are checked here. Only the *operational* gates (pacing, agent-availability)
  * are skipped — a human manually dialing is present by definition.
  *
- * NOTE: with TELEPHONY_DRIVER=SIMULATION there is no real audio leg. The manual
- * call is created and attributed to the agent, who then dispositions it exactly
- * as they would a bridged AI transfer. When the SIP CallRuntime lands, the
- * agent's live audio leg bridges into this same call with no workflow change.
+ * `dial()` + `connect()` place a real carrier call over whichever outbound SIP
+ * trunk `LIVEKIT_SIP_TRUNK_ID` points at: the agent's browser joins the
+ * LiveKit room first (dial()), then `connect()` sends the SIP INVITE with the
+ * selected CLI on `From` — see claude-dev/2026-07-23-human-dialing-requirements.md
+ * R1/R2. The agent dispositions the call exactly as they would a bridged AI
+ * transfer once it ends.
  */
 @Injectable()
 export class ManualDialService {
@@ -62,6 +78,8 @@ export class ManualDialService {
     private readonly presence: PresenceService,
     private readonly gateway: RealtimeGateway,
     private readonly assignment: AssignmentService,
+    private readonly cli: CliService,
+    private readonly livekit: LivekitService,
   ) {}
 
   /** Campaign ids this agent may manually dial (skill match, or unrestricted). */
@@ -215,15 +233,19 @@ export class ManualDialService {
   }
 
   /**
-   * Place a manual call. Enforces the legal gates, claims the lead (so the AI
-   * dialer can't grab it mid-call), attributes the call to the agent, and puts
-   * the agent ON_CALL. The agent closes it via the normal disposition endpoint.
+   * Step 1 of 2: claims the lead, opens the LiveKit room, and hands the agent's
+   * browser a join token — but does NOT dial the carrier yet.
+   *
+   * The actual SIP leg is placed by `connect()`, called once the agent's
+   * browser has confirmed it is in the room with its mic published. Dialling
+   * before the agent joins risks the customer answering to silence; see
+   * claude-dev/2026-07-23-human-dialing-requirements.md R1.
    */
   async dial(
     tenantId: string,
     agent: { id: string; email: string },
     leadId: string,
-  ): Promise<{ callId: string; leadName: string; phone: string }> {
+  ): Promise<ManualDialResult> {
     const lead = await this.loadClaimable(tenantId, agent.id, leadId);
     if (lead.manualClaimedBy && lead.manualClaimedBy.toString() !== agent.id) {
       throw new BadRequestException('Lead is claimed by another agent.');
@@ -275,30 +297,205 @@ export class ManualDialService {
     lead.timeline.push({ at: new Date(), kind: 'MANUAL_DIAL', detail: `Manual dial by ${agent.email}` });
     await lead.save();
 
+    const cliNumber = await this.cli.selectCli({
+      tenantId,
+      poolIds: campaign.cliPool,
+      leadState: lead.state,
+      geoMatch: campaign.cliRules.geoMatch,
+    });
+
     const now = new Date();
     const call = await this.callModel.create({
       tenantId: campaign.tenantId,
       campaignId: campaign._id,
       leadId: lead._id,
-      cli: undefined,
-      state: 'IN_CONVERSATION',
+      cli: cliNumber?.number,
+      state: 'DIALING',
       agentId: new Types.ObjectId(agent.id),
       manual: true,
-      amdClass: 'HUMAN',
+      // `amdClass` is deliberately NOT set here. It used to be stamped 'HUMAN'
+      // at creation, before the phone had even rung — so every manual dial
+      // counted as a human answer in the CLI answer-rate aggregation, whether
+      // or not anyone picked up. That made number-health blind to exactly the
+      // burn it exists to detect. It stays unset until the call is answered
+      // and something actually classifies the far end.
       startedAt: now,
-      answeredAt: now,
-      // Talk time is counted from bridge; a manual call is "bridged" at dial.
-      bridgedAt: now,
     });
+    const callId = call._id.toString();
+
+    // Open the room and mint the agent's token BEFORE dialling the carrier —
+    // `connect()` places the SIP leg only once the browser confirms it has
+    // joined, so the customer never answers to an empty room.
+    await this.livekit.ensureRoom(callId);
+    const { url, token, roomName } = await this.livekit.mintToken(callId, agent.id, agent.email);
 
     await this.presence.markOnCall(agent.id);
     this.gateway.emitToTenant(tenantId, 'presence.updated', { userId: agent.id, state: 'ON_CALL' });
-    this.logger.log(`Manual dial: ${agent.email} → ${lead.phone} (call ${call._id.toString()})`);
+    this.logger.log(`Manual dial staged: ${agent.email} → ${lead.phone} via ${cliNumber?.number ?? 'trunk default'} (call ${callId})`);
 
     return {
-      callId: call._id.toString(),
+      callId,
       leadName: [lead.firstName, lead.lastName].filter(Boolean).join(' ') || lead.phone,
       phone: lead.phone,
+      cli: cliNumber?.number ?? null,
+      livekitUrl: url,
+      livekitToken: token,
+      roomName,
     };
+  }
+
+  /** Load a manual call this agent owns and hasn't already dispositioned. */
+  private async loadOwnedCall(tenantId: string, agentId: string, callId: string): Promise<CallDocument> {
+    if (!Types.ObjectId.isValid(callId)) throw new NotFoundException('Call not found');
+    const call = await this.callModel
+      .findOne({ _id: new Types.ObjectId(callId), tenantId: new Types.ObjectId(tenantId), manual: true })
+      .exec();
+    if (!call) throw new NotFoundException('Call not found');
+    if (call.agentId?.toString() !== agentId) throw new ForbiddenException('This call belongs to another agent.');
+    if (call.disposition) throw new BadRequestException('This call has already been dispositioned.');
+    return call;
+  }
+
+  /**
+   * Step 2 of 2: the agent's browser has joined the LiveKit room and published
+   * its mic — now actually ring the customer over the carrier trunk,
+   * presenting the CLI selected in `dial()`.
+   *
+   * `dial()` has already burned an attempt on the lead and pinned the agent to
+   * ON_CALL. If the INVITE then fails — no trunk configured, carrier auth
+   * rejected, bad destination — the agent used to be stranded: presence stuck
+   * ON_CALL with no call to hang up, and the lead one attempt closer to
+   * EXHAUSTED for a call that never left the building.
+   *
+   * The fix is a rollback here rather than a pre-flight check in `dial()`,
+   * because a pre-flight check can only cover the *configuration* failure
+   * (`LIVEKIT_SIP_TRUNK_ID` missing). Every other way this call can fail —
+   * carrier 403, blocked destination, trunk out of credit — only shows up at
+   * INVITE time, and those are the failures that actually happen on a live
+   * floor. One recovery path covering all of them beats a check that covers
+   * the easiest one.
+   */
+  async connect(tenantId: string, agentId: string, callId: string): Promise<{ ok: true }> {
+    const call = await this.loadOwnedCall(tenantId, agentId, callId);
+    const lead = await this.leadModel.findById(call.leadId).lean().exec();
+    if (!lead) throw new NotFoundException('Lead not found for this call.');
+
+    // Recording starts BEFORE the INVITE. The room already exists and the
+    // agent is already in it, so starting here is the only way to capture the
+    // customer's first words — an egress started after "hello" misses the
+    // disclosure, which is the one part of the call compliance cares about.
+    // `startRecording` returns null (never throws) when recording is off.
+    const recording = await this.livekit.startRecording(callId, tenantId);
+    if (recording) {
+      call.recordingEgressId = recording.egressId;
+      call.recordingUri = recording.uri;
+      await call.save();
+    }
+
+    try {
+      await this.livekit.dialOut(callId, lead.phone, { from: call.cli });
+    } catch (err) {
+      await this.rollbackFailedConnect(tenantId, agentId, call, err as Error);
+      throw new BadRequestException(`Could not place the call: ${(err as Error).message}`);
+    }
+
+    call.state = 'RINGING';
+    await call.save();
+    return { ok: true };
+  }
+
+  /**
+   * Undo everything `dial()` optimistically did, so a trunk failure costs the
+   * agent a click rather than a lead and a stuck seat.
+   *
+   * `lastContactedAt` is intentionally NOT restored — we cannot know its
+   * previous value, and leaving it slightly fresh only delays a retry, whereas
+   * leaving `attempts` inflated permanently shortens the lead's life.
+   */
+  private async rollbackFailedConnect(
+    tenantId: string,
+    agentId: string,
+    call: CallDocument,
+    err: Error,
+  ): Promise<void> {
+    const callId = call._id.toString();
+    this.logger.error(`Manual connect failed for call ${callId}: ${err.message}`);
+
+    if (call.recordingEgressId) {
+      await this.livekit.stopRecording(call.recordingEgressId);
+      call.recordingEgressId = undefined;
+      call.recordingUri = undefined;
+    }
+    // Tear down the room the agent's browser joined in `dial()`, otherwise it
+    // sits there publishing into nothing until the empty timeout.
+    await this.livekit.hangup(callId);
+
+    call.state = 'FAILED';
+    call.outcome = 'FAILED';
+    // TRUNK_ERROR rather than a SIP-derived reason: we never got far enough to
+    // see a SIP response, so the failure is ours (or the carrier's), not the
+    // callee's — and it must not feed the retry matrix as a NO_ANSWER.
+    call.endReason = 'TRUNK_ERROR';
+    call.endedAt = new Date();
+    await call.save();
+
+    await this.leadModel
+      .updateOne(
+        { _id: call.leadId },
+        {
+          $inc: { attempts: -1 },
+          $unset: { lockedAt: '' },
+          $push: {
+            timeline: { at: new Date(), kind: 'MANUAL_DIAL', detail: `Dial failed before ringing: ${err.message}` },
+          },
+        },
+      )
+      .exec();
+
+    await this.presence.release(agentId, 'AVAILABLE');
+    this.gateway.emitToTenant(tenantId, 'presence.updated', { userId: agentId, state: 'AVAILABLE' });
+    this.gateway.emitToTenant(tenantId, 'call.state.changed', {
+      callId,
+      state: 'FAILED',
+      endReason: 'TRUNK_ERROR',
+    });
+    this.gateway.emitToUser(agentId, 'call.ended', { callId, reason: err.message, outcome: 'FAILED' });
+  }
+
+  /**
+   * Agent-initiated hangup: drops the SIP leg and tears down the room. The
+   * call record stays open for disposition — hanging up is a call-control
+   * action, not the end of the workflow (see manual-dial.controller.ts).
+   *
+   * Hanging up now also *starts the clock*: the agent is released from ON_CALL
+   * into WRAP_UP with a deadline the sweep enforces. Before this, hanging up
+   * left the agent pinned ON_CALL until they dispositioned — so an agent who
+   * forgot took themselves off the floor indefinitely, and no dial or transfer
+   * could reach them.
+   */
+  async hangup(tenantId: string, agentId: string, callId: string): Promise<{ ok: true }> {
+    const call = await this.loadOwnedCall(tenantId, agentId, callId);
+    if (call.recordingEgressId) await this.livekit.stopRecording(call.recordingEgressId);
+    await this.livekit.hangup(callId);
+
+    if (call.state !== 'COMPLETED' && call.state !== 'FAILED') {
+      // Hanging up while parked would otherwise lose the open hold interval.
+      if (call.heldSince) {
+        call.heldMs += Math.max(0, Date.now() - call.heldSince.getTime());
+        call.heldSince = undefined;
+      }
+      const deadline = new Date(Date.now() + config.floor.wrapUpMaxSeconds * 1000);
+      call.state = 'WRAP_UP';
+      call.wrapUpDeadline = deadline;
+      if (!call.endReason) call.endReason = 'AGENT_HANGUP';
+      if (!call.endedAt) call.endedAt = new Date();
+      await call.save();
+
+      await this.presence.release(agentId, 'WRAP_UP');
+      this.gateway.emitToTenant(tenantId, 'presence.updated', { userId: agentId, state: 'WRAP_UP' });
+      this.gateway.emitToTenant(tenantId, 'call.state.changed', { callId, state: 'WRAP_UP' });
+      this.gateway.emitToUser(agentId, 'wrapup.started', { callId, deadline: deadline.getTime() });
+    }
+    return { ok: true };
   }
 }

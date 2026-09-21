@@ -17,6 +17,8 @@ import { DncWashRecord, DncWashRecordSchema, SuppressionEntry, SuppressionEntryS
 import { AuditModule } from '../audit/audit.module';
 import { CountryPacksModule } from '../country-packs/country-packs.module';
 import { AssignmentService } from './assignment.service';
+import { DncrController } from './dncr.controller';
+import { DncrWashService } from './dncr-wash.service';
 import { LeadsController } from './leads.controller';
 import { LeadsService } from './leads.service';
 import { SchedulingService } from './scheduling.service';
@@ -39,8 +41,8 @@ import { SuppressionService } from './suppression.service';
     AuditModule,
     CountryPacksModule,
   ],
-  controllers: [LeadsController],
-  providers: [LeadsService, SuppressionService, AssignmentService, SchedulingService],
-  exports: [LeadsService, SuppressionService, AssignmentService, SchedulingService],
+  controllers: [LeadsController, DncrController],
+  providers: [LeadsService, SuppressionService, AssignmentService, SchedulingService, DncrWashService],
+  exports: [LeadsService, SuppressionService, AssignmentService, SchedulingService, DncrWashService],
 })
 export class LeadsModule {}

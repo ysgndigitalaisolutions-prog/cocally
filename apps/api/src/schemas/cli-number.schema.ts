@@ -34,6 +34,19 @@ export class CliNumber {
   @Prop()
   restingUntil?: Date;
 
+  /** Set when auto-quarantined on sustained 7-day answer-rate decay — requires an explicit `reinstate()` audit trail to clear, unlike RESTING which auto-wakes. */
+  @Prop()
+  quarantinedAt?: Date;
+
+  @Prop()
+  quarantineReason?: string;
+
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  reinstatedBy?: Types.ObjectId;
+
+  @Prop()
+  reinstatedAt?: Date;
+
   /** STIR/SHAKEN attestation level where required. */
   @Prop()
   attestation?: string;

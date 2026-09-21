@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { redactPii, type AmdClass, type CallOutcome } from '@cocally/shared';
 import { Model, Types } from 'mongoose';
-import { config } from '../../common/config';
+import { config, isLiveTelephony } from '../../common/config';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { CampaignDocument } from '../../schemas/campaign.schema';
 import { LeadDocument } from '../../schemas/lead.schema';
@@ -16,6 +16,8 @@ import { RecordingsService } from '../recordings/recordings.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { TransfersService } from '../workspace/transfers.service';
+import { CallProgressService } from './call-progress.service';
+import { LiveCallDriver } from './live-call.driver';
 
 /**
  * Runs one outbound call end-to-end: AMD → campaign voicemail/IVR policy →
@@ -23,6 +25,15 @@ import { TransfersService } from '../workspace/transfers.service';
  * matrix, recordings, webhooks, floor feed. The runtime is simulation in
  * dev (TELEPHONY_DRIVER=SIMULATION); the SIP runtime slots in behind the
  * same CallRuntime interface.
+ *
+ * `placeCall` now branches on `isLiveTelephony()`. Before that branch existed
+ * this service always constructed `SimulationRuntime`, which meant
+ * `TELEPHONY_DRIVER` was validated at boot and then never read — the auto
+ * dialer placed zero real calls no matter how the trunk was configured. The
+ * two paths are shaped very differently and that is inherent, not incidental:
+ * the simulation runs the whole conversation inside this method, whereas a
+ * live call is handed to the carrier and to the Python worker and reports back
+ * asynchronously by webhook (see `LiveCallDriver` / `CallProgressService`).
  */
 @Injectable()
 export class CallOrchestratorService {
@@ -40,14 +51,26 @@ export class CallOrchestratorService {
     private readonly packs: CountryPacksService,
     private readonly gateway: RealtimeGateway,
     private readonly pal: PalService,
+    private readonly liveDriver: LiveCallDriver,
+    private readonly progress: CallProgressService,
   ) {}
 
+  // Concurrency is the sum of both paths. A simulated call is live for the
+  // duration of `placeCall`; a live call outlives it and is tracked by the
+  // driver until the terminal webhook lands — counting only the local map
+  // would report zero on a real trunk and let pacing dial without limit.
   activeCallCount(campaignId: string): number {
-    return [...this.activeCalls.values()].filter((c) => c.campaignId === campaignId).length;
+    return (
+      [...this.activeCalls.values()].filter((c) => c.campaignId === campaignId).length +
+      this.liveDriver.activeCount(campaignId)
+    );
   }
 
   totalActiveForTenant(tenantId: string): number {
-    return [...this.activeCalls.values()].filter((c) => c.tenantId === tenantId).length;
+    return (
+      [...this.activeCalls.values()].filter((c) => c.tenantId === tenantId).length +
+      this.liveDriver.totalActiveForTenant(tenantId)
+    );
   }
 
   /**
@@ -59,6 +82,10 @@ export class CallOrchestratorService {
    * never fire no matter how badly a number was performing.
    */
   async placeCall(campaign: CampaignDocument, lead: LeadDocument, cli: string | undefined, options?: { personaPrompt?: string; scriptedReplies?: string[]; amdClass?: AmdClass }): Promise<{ answered: boolean }> {
+    // Live trunk configured → place a real call and return; everything below
+    // this line is the simulation path, unchanged.
+    if (isLiveTelephony()) return this.placeLiveCall(campaign, lead, cli);
+
     const pack = await this.packs.getByCode(campaign.countryPackCode);
     const flowVersionId = this.pickFlowVersion(campaign);
     if (!flowVersionId) {
@@ -106,6 +133,44 @@ export class CallOrchestratorService {
       this.activeCalls.delete(callId);
       this.gateway.removeFloorCall(campaign.tenantId.toString(), callId);
     }
+  }
+
+  /**
+   * Real outbound call. Returns as soon as the INVITE is away.
+   *
+   * `answered` is always `false` here and the caller must not treat it as an
+   * answer signal — on a real trunk nothing is knowable at INVITE time. The
+   * customer's answer, the outcome, CLI health and the retry-matrix decision
+   * all happen later in `CallProgressService`, driven by LiveKit webhooks.
+   */
+  private async placeLiveCall(
+    campaign: CampaignDocument,
+    lead: LeadDocument,
+    cli: string | undefined,
+  ): Promise<{ answered: boolean }> {
+    const flowVersionId = this.pickFlowVersion(campaign);
+    if (!flowVersionId) {
+      this.logger.warn(`Campaign ${campaign.name} has no active flow version`);
+      return { answered: false };
+    }
+
+    // Captured through the driver's callback rather than the return value:
+    // when the INVITE throws there IS no return value, and without the callId
+    // the Call would be stranded in DIALING with its lead locked.
+    const created: { callId: string | null } = { callId: null };
+    try {
+      await this.liveDriver.placeCall(campaign, lead, cli, {
+        flowVersionId,
+        onCallCreated: (callId) => {
+          created.callId = callId;
+        },
+      });
+    } catch (err) {
+      const message = (err as Error).message;
+      this.logger.error(`live call to ${lead.phone} failed: ${message}`);
+      if (created.callId) await this.progress.failCall(created.callId, 'TRUNK_ERROR', message);
+    }
+    return { answered: false };
   }
 
   private pickFlowVersion(campaign: CampaignDocument): Types.ObjectId | null {

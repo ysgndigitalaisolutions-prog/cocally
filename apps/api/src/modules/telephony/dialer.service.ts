@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Interval } from '@nestjs/schedule';
 import { FilterQuery, Model, Types } from 'mongoose';
+import { isLiveTelephony } from '../../common/config';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
@@ -24,7 +25,8 @@ export type DialBlockReason =
   | 'NO_AGENTS_AVAILABLE'
   | 'AT_PACING_CAP'
   | 'NO_DIALABLE_LEADS'
-  | 'OUTSIDE_CALLING_WINDOW';
+  | 'OUTSIDE_CALLING_WINDOW'
+  | 'PREDICTIVE_MODE_ACTIVE';
 
 export interface DialStatus {
   campaignId: string;
@@ -140,6 +142,13 @@ export class DialerService {
 
     if (campaign.status !== 'ACTIVE') {
       return blocked('CAMPAIGN_NOT_ACTIVE', `Campaign is ${campaign.status} — press Start to begin dialing.`);
+    }
+
+    // A campaign is either AI-fronted (this dialer) or human-predictive
+    // (PredictiveDialerService) — never both, or the same lead pool gets
+    // double-dialed by two independent lock-and-place loops.
+    if (campaign.predictiveDialing?.enabled) {
+      return blocked('PREDICTIVE_MODE_ACTIVE', 'This campaign is in predictive (human-agent) dialing mode.');
     }
 
     const tenant = await this.tenantModel.findById(campaign.tenantId).lean().exec();
@@ -366,15 +375,22 @@ export class DialerService {
         geoMatch: campaign.cliRules.geoMatch,
       });
 
-      // Fire the call without blocking the tick loop.
+      // Fire the call without blocking the tick loop. The orchestrator picks
+      // the simulation or the live-carrier path itself (isLiveTelephony), so
+      // nothing here needs to know which one ran — except for CLI health.
       void this.orchestrator
         .placeCall(campaign, lead, cli?.number)
         // Feed the real answer result into CLI health so a number whose answer
         // rate collapses actually gets rested.
-        .then((result) => cli && this.cli.recordDial(cli._id, result.answered))
+        //
+        // On the live path `answered` is not knowable yet (placeCall returns at
+        // INVITE time), so recording it here would book a non-answer against
+        // every real dial AND double-count the dial itself. CallProgressService
+        // records it once, from the carrier's own answer/hangup webhook.
+        .then((result) => (cli && !isLiveTelephony() ? this.cli.recordDial(cli._id, result.answered) : undefined))
         .catch(async (err) => {
           this.logger.error(`call failed: ${(err as Error).message}`);
-          if (cli) await this.cli.recordDial(cli._id, false);
+          if (cli && !isLiveTelephony()) await this.cli.recordDial(cli._id, false);
         });
     }
   }

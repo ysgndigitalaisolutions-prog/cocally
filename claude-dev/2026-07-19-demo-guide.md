@@ -6,7 +6,7 @@
 
 ```bash
 ./start.sh                                  # Mongo + API + web, seeds on first run
-pnpm --filter @cocally/api demo-data        # 30 days of realistic history
+# demo-data generator removed 2026-09-21 (fake history must not reach a client tenant)
 ```
 
 `demo-data` is **idempotent and deterministic** — it only replaces documents tagged `demoSeed: true`, and uses a fixed PRNG seed, so your rehearsal and your live demo show identical numbers. Re-run it any time to reset.

@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectModel } from '@nestjs/mongoose';
 import { DEFAULT_SCORING_CONFIG } from '@cocally/shared';
 import { Model, Types } from 'mongoose';
-import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
+import { Campaign, CampaignDocument, DEFAULT_PREDICTIVE_DIALING } from '../../schemas/campaign.schema';
 import { Client, ClientDocument } from '../../schemas/tenant.schema';
 import { FlowVersion, FlowVersionDocument } from '../../schemas/flow.schema';
 import { User, UserDocument } from '../../schemas/user.schema';
@@ -53,8 +53,19 @@ export class CampaignsService {
     return campaign;
   }
 
+  /**
+   * `.lean()` returns the raw stored document — a campaign created before
+   * `predictiveDialing` existed has no such field at all in Mongo, so a lean
+   * read gives back `undefined`, not the schema default. Backfill it here
+   * rather than trust every caller (and the frontend) to null-check.
+   */
+  private withDefaults<T extends { predictiveDialing?: unknown }>(campaign: T): T {
+    return { ...campaign, predictiveDialing: campaign.predictiveDialing ?? DEFAULT_PREDICTIVE_DIALING };
+  }
+
   async list(tenantId: string) {
-    return this.campaignModel.find({ tenantId: new Types.ObjectId(tenantId) }).lean().exec();
+    const campaigns = await this.campaignModel.find({ tenantId: new Types.ObjectId(tenantId) }).lean().exec();
+    return campaigns.map((c) => this.withDefaults(c));
   }
 
   async get(tenantId: string, campaignId: string) {
@@ -63,7 +74,7 @@ export class CampaignsService {
       .lean()
       .exec();
     if (!campaign) throw new NotFoundException('Campaign not found');
-    return campaign;
+    return this.withDefaults(campaign);
   }
 
   /**
@@ -136,6 +147,7 @@ export class CampaignsService {
       .findOne({ _id: new Types.ObjectId(campaignId), tenantId: new Types.ObjectId(tenantId) })
       .exec();
     if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.predictiveDialing) campaign.predictiveDialing = DEFAULT_PREDICTIVE_DIALING;
 
     const editable = [
       'name',
@@ -160,6 +172,8 @@ export class CampaignsService {
       'sttKeywords',
       'summaryTemplate',
       'abSplits',
+      'predictiveDialing',
+      'cliPool',
     ] as const;
 
     const before: Record<string, unknown> = {};

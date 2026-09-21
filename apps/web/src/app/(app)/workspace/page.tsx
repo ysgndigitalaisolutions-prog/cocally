@@ -1,13 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import type { FloorCallCard, TransferCard } from '@cocally/shared';
-import { Room, RoomEvent, Track } from 'livekit-client';
-import { api } from '@/lib/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { AgentShiftState, FloorCallCard, PauseCode, PredictiveBridgeCard, TransferCard } from '@cocally/shared';
+import { api, secondsSince, secondsUntil, serverNow } from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAppStore } from '@/lib/store';
-
-const PRESENCE_OPTIONS = ['AVAILABLE', 'WRAP_UP', 'BREAK', 'OFFLINE'] as const;
+import PauseCodeMenu from '@/components/PauseCodeMenu';
 
 interface TeamMember {
   id: string;
@@ -26,121 +24,72 @@ const PRESENCE_META: Record<string, { dot: string; label: string; hint: string }
   BREAK: { dot: 'var(--text-dim)', label: 'On break', hint: 'No offers while on break.' },
   OFFLINE: { dot: 'var(--bad)', label: 'Offline', hint: 'Go Available to start receiving transfers.' },
 };
-const DISPOSITIONS = [
-  ['BOOKED', 'Booked'],
-  ['CALLBACK', 'Callback'],
-  ['NOT_INTERESTED', 'Not interested'],
-  ['NOT_QUALIFIED', 'Not qualified'],
-  ['WRONG_NUMBER', 'Wrong number'],
-  ['DO_NOT_CALL', 'Do not call'],
-  ['FOLLOW_UP', 'Follow up'],
-] as const;
 
-interface CallBriefing {
-  callId: string;
-  leadName: string;
-  location: string;
-  score: number;
-  summary: string;
-  facts: Array<{ label: string; value: string; confirmed: boolean }>;
-  objection: string | null;
-  campaignName: string;
-  rebuttals: Array<{ objection: string; rebuttal: string }>;
+function formatClock(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+    : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function errorMessage(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { message?: string | string[] } } }).response?.data?.message;
+  if (Array.isArray(detail)) return detail.join(', ');
+  return typeof detail === 'string' ? detail : fallback;
 }
 
 export default function WorkspacePage() {
-  const { presence, setPresence, transferOffer, setTransferOffer, activeCallId, setActiveCallId } = useAppStore();
+  const {
+    presence,
+    setPresence,
+    shift,
+    setShift,
+    transferOffer,
+    setTransferOffer,
+    setActiveCall,
+    activeCall,
+    wrapUp,
+  } = useAppStore();
   const [floor, setFloor] = useState<Record<string, FloorCallCard>>({});
-  const [transcript, setTranscript] = useState<Array<{ speaker: string; text: string }>>([]);
-  const [summary, setSummary] = useState('');
-  const [briefing, setBriefing] = useState<CallBriefing | null>(null);
   const [countdown, setCountdown] = useState(0);
-  const [notes, setNotes] = useState('');
   const [team, setTeam] = useState<TeamMember[]>([]);
+  const [shiftError, setShiftError] = useState('');
+  const [busy, setBusy] = useState(false);
+  /** Forces a re-render once a second so the shift clocks tick. */
+  const [, setTick] = useState(0);
   const offerRef = useRef<TransferCard | null>(null);
+  /** serverNow() at the moment `shift` was fetched — the origin the clocks tick from. */
+  const shiftFetchedAt = useRef(0);
 
-  // Real LiveKit audio bridge for a bridged transfer (the live-voice-demo
-  // dial trigger itself lives on the admin-only /live-demo page — an agent
-  // only ever sees the resulting transfer offer + on-call audio here). See
-  // claude-dev/2026-07-22-live-voice-build-progress.md.
-  const liveKitRoomRef = useRef<Room | null>(null);
-  const liveKitAudioRef = useRef<HTMLDivElement | null>(null);
-  const [audioStatus, setAudioStatus] = useState<'idle' | 'connecting' | 'live' | 'blocked' | 'error'>('idle');
-  const [audioError, setAudioError] = useState('');
-  const [audioRetryCount, setAudioRetryCount] = useState(0);
-  const [micMuted, setMicMuted] = useState(false);
+  const loadShift = useCallback(async () => {
+    const r = await api.get('/workspace/me/shift');
+    const state: AgentShiftState = r.data;
+    shiftFetchedAt.current = serverNow();
+    setShift(state);
+    setPresence(state.presence);
+    return state;
+  }, [setShift, setPresence]);
 
-  // Server truth on load: own presence + team roster. The buttons and banner
-  // always reflect what the SERVER believes, never a stale local default.
+  // Server truth on load: own presence + shift + team roster. The buttons and
+  // banner always reflect what the SERVER believes, never a stale local default.
   useEffect(() => {
-    api.get('/workspace/me').then((r) => setPresence(r.data.presence)).catch(() => undefined);
+    loadShift().catch(() => undefined);
     api.get('/workspace/team').then((r) => setTeam(r.data)).catch(() => undefined);
     const timer = setInterval(() => {
       api.get('/workspace/team').then((r) => setTeam(r.data)).catch(() => undefined);
     }, 15_000);
     return () => clearInterval(timer);
-  }, [setPresence]);
+  }, [loadShift]);
 
-  // Bridge real audio into a live-voice-demo call: when this agent gets
-  // bridged (activeCallId set), join the same LiveKit room the AI worker and
-  // the browser "lead" are in, publish mic, and play back what they hear —
-  // the human takes over the mic where the AI worker leaves off.
+  // Shift and pause durations are ticked client-side off the server's counters
+  // rather than re-fetched every second: one request on every change, then pure
+  // arithmetic, so the numbers move smoothly and the API is left alone.
   useEffect(() => {
-    if (!activeCallId) {
-      liveKitRoomRef.current?.disconnect();
-      liveKitRoomRef.current = null;
-      setAudioStatus('idle');
-      setMicMuted(false);
-      return;
-    }
-    let cancelled = false;
-    setAudioStatus('connecting');
-    setAudioError('');
-    api
-      .get(`/calls/${activeCallId}/agent-token`)
-      .then(async (r) => {
-        if (cancelled) return;
-        const room = new Room();
-        room.on(RoomEvent.TrackSubscribed, (track) => {
-          if (track.kind !== Track.Kind.Audio) return;
-          const el = track.attach();
-          liveKitAudioRef.current?.appendChild(el);
-          // Autoplay can still be blocked even after an earlier page
-          // interaction (this connect is triggered by a socket event, not a
-          // click) — surface a one-click "Enable audio" fallback instead of
-          // silently failing.
-          el.play().catch(() => setAudioStatus('blocked'));
-        });
-        await room.connect(r.data.url, r.data.token);
-        await room.localParticipant.setMicrophoneEnabled(true);
-        liveKitRoomRef.current = room;
-        setAudioStatus((prev) => (prev === 'blocked' ? prev : 'live'));
-      })
-      // Not every bridged call is a live-voice-demo call (simulation-path
-      // transfers have no LiveKit room), but a real failure (denied mic
-      // permission, LiveKit connect error, etc.) must be visible — silently
-      // swallowing it left agents with no audio and no explanation at all.
-      .catch((e) => {
-        setAudioError(e instanceof Error ? e.message : 'Could not connect call audio.');
-        setAudioStatus('error');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeCallId, audioRetryCount]);
-
-  function enableAudio() {
-    liveKitAudioRef.current?.querySelectorAll('audio').forEach((el) => void (el as HTMLAudioElement).play());
-    setAudioStatus('live');
-  }
-
-  function toggleMic() {
-    const room = liveKitRoomRef.current;
-    if (!room) return;
-    const next = !micMuted;
-    void room.localParticipant.setMicrophoneEnabled(!next);
-    setMicMuted(next);
-  }
+    const timer = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const socket = getSocket();
@@ -149,14 +98,14 @@ export default function WorkspacePage() {
     socket.on('presence.updated', ({ userId, state }: { userId: string; state: string }) => {
       setTeam((prev) => prev.map((m) => (m.id === userId ? { ...m, presence: state } : m)));
       const me = JSON.parse(localStorage.getItem('cocally.user') ?? '{}') as { id?: string };
-      if (me.id === userId) setPresence(state as (typeof PRESENCE_OPTIONS)[number]);
+      // Re-read the shift rather than trusting the broadcast alone: pause code,
+      // paused total and clock-in time all move with it.
+      if (me.id === userId) void loadShift().catch(() => undefined);
     });
 
     socket.on('transfer.offer', (card: TransferCard) => {
       offerRef.current = card;
       setTransferOffer(card);
-      setTranscript([]);
-      setSummary('');
     });
     socket.on('transfer.cancelled', ({ transferId }: { transferId: string }) => {
       if (offerRef.current?.transferId === transferId) {
@@ -164,9 +113,16 @@ export default function WorkspacePage() {
         setTransferOffer(null);
       }
     });
+    // The GlobalCallBar (mounted once in the app layout) owns everything
+    // from here on — audio, mute, DTMF, briefing, disposition — so it stays
+    // on screen even if the agent navigates off /workspace mid-call.
     socket.on('transfer.bridged', ({ callId }: { callId: string }) => {
-      setActiveCallId(callId);
+      const offer = offerRef.current;
+      setActiveCall({ callId, source: 'transfer', leadName: offer?.name ?? '', phone: '' });
       setTransferOffer(null);
+    });
+    socket.on('predictive.call.bridged', (card: PredictiveBridgeCard) => {
+      setActiveCall({ callId: card.callId, source: 'predictive', leadName: card.leadName, phone: card.phone });
     });
     socket.on('floor.call.updated', (card: FloorCallCard) => {
       setFloor((prev) => ({ ...prev, [card.callId]: card }));
@@ -178,51 +134,66 @@ export default function WorkspacePage() {
         return next;
       });
     });
-    socket.on('transcript.segment', (segment: { speaker: string; text: string }) => {
-      setTranscript((prev) => [...prev, segment]);
-    });
-    socket.on('call.summary.updated', ({ summary: s }: { summary: string }) => setSummary(s));
 
     return () => {
       socket.off('presence.updated');
       socket.off('transfer.offer');
       socket.off('transfer.cancelled');
       socket.off('transfer.bridged');
+      socket.off('predictive.call.bridged');
       socket.off('floor.call.updated');
       socket.off('floor.call.removed');
-      socket.off('transcript.segment');
-      socket.off('call.summary.updated');
     };
-  }, [setActiveCallId, setTransferOffer, setPresence]);
+  }, [setActiveCall, setTransferOffer, loadShift]);
 
   // Countdown ring per WS-03.
   useEffect(() => {
     if (!transferOffer) return;
     const timer = setInterval(() => {
-      const remaining = Math.max(0, Math.round((transferOffer.acceptDeadline - Date.now()) / 1000));
+      const remaining = secondsUntil(transferOffer.acceptDeadline);
       setCountdown(remaining);
       if (remaining === 0) setTransferOffer(null);
     }, 250);
     return () => clearInterval(timer);
   }, [transferOffer, setTransferOffer]);
 
-  // On bridge, pull the call briefing (summary + campaign playbook). The summary
-  // socket event fires during the AI leg — before this agent is assigned — so a
-  // fetch is what reliably gives a just-bridged agent the context and script.
-  useEffect(() => {
-    if (!activeCallId) {
-      setBriefing(null);
-      return;
+  async function changePresence(state: 'AVAILABLE' | 'WRAP_UP' | 'OFFLINE', pauseCode?: PauseCode) {
+    setBusy(true);
+    setShiftError('');
+    try {
+      await api.post('/workspace/presence', { state, pauseCode });
+      await loadShift();
+    } catch (err) {
+      setShiftError(errorMessage(err, 'Could not change your status.'));
+    } finally {
+      setBusy(false);
     }
-    api
-      .get(`/calls/${activeCallId}/briefing`)
-      .then((r) => setBriefing(r.data))
-      .catch(() => undefined);
-  }, [activeCallId]);
+  }
 
-  async function changePresence(state: (typeof PRESENCE_OPTIONS)[number]) {
-    await api.post('/workspace/presence', { state });
-    setPresence(state);
+  async function goOnBreak(pauseCode: PauseCode) {
+    setBusy(true);
+    setShiftError('');
+    try {
+      await api.post('/workspace/presence', { state: 'BREAK', pauseCode });
+      await loadShift();
+    } catch (err) {
+      setShiftError(errorMessage(err, 'Could not start your break.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clock(direction: 'in' | 'out') {
+    setBusy(true);
+    setShiftError('');
+    try {
+      await api.post(`/workspace/clock-${direction}`);
+      await loadShift();
+    } catch (err) {
+      setShiftError(errorMessage(err, `Could not clock ${direction}.`));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function acceptOffer() {
@@ -249,44 +220,124 @@ export default function WorkspacePage() {
     setTransferOffer(null);
   }
 
-  async function setDisposition(disposition: string) {
-    if (!activeCallId) return;
-    await api.post(`/calls/${activeCallId}/disposition`, { disposition, notes: notes || undefined });
-    liveKitRoomRef.current?.disconnect();
-    liveKitRoomRef.current = null;
-    setAudioStatus('idle');
-    setMicMuted(false);
-    setActiveCallId(null);
-    setTranscript([]);
-    setSummary('');
-    setBriefing(null);
-    setNotes('');
-    setPresence('WRAP_UP');
-  }
-
   const meta = PRESENCE_META[presence] ?? PRESENCE_META.OFFLINE!;
+  const clockedIn = Boolean(shift?.clockedInAt);
+  // The API refuses AVAILABLE for an agent who is not on shift, because the
+  // dialer would otherwise pace calls at an empty chair. Disable the button and
+  // say why rather than letting the agent discover it through a 400.
+  const availableBlockedReason = clockedIn ? '' : 'Clock in first — you are not on shift yet.';
+
+  // Both counters tick from the server's snapshot plus the time since we took
+  // it. `pausedSeconds` only advances while actually paused; the server already
+  // counts the open segment, so this just keeps it moving between fetches.
+  const elapsedSinceFetch = shiftFetchedAt.current ? secondsSince(shiftFetchedAt.current) : 0;
+  const shiftSeconds = shift ? shift.shiftSeconds + (clockedIn ? elapsedSinceFetch : 0) : 0;
+  const pausedSeconds = shift ? shift.pausedSeconds + (shift.presence === 'BREAK' ? elapsedSinceFetch : 0) : 0;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Agent workspace</h1>
-        <div className="flex gap-2">
-          {PRESENCE_OPTIONS.map((option) => (
-            <button
-              key={option}
-              onClick={() => changePresence(option)}
-              className="btn text-sm"
-              style={
-                presence === option
-                  ? { background: option === 'AVAILABLE' ? 'var(--good)' : 'var(--accent)', color: '#0b1220' }
-                  : { background: 'var(--surface-2)', color: 'var(--text-dim)', border: '1px solid var(--border)' }
-              }
-            >
-              {option.replace('_', ' ')}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => changePresence('AVAILABLE')}
+            className="btn text-sm"
+            disabled={busy || !clockedIn}
+            title={availableBlockedReason || undefined}
+            style={
+              presence === 'AVAILABLE'
+                ? { background: 'var(--good)', color: '#0b1220' }
+                : {
+                    background: 'var(--surface-2)',
+                    color: 'var(--text-dim)',
+                    border: '1px solid var(--border)',
+                    opacity: clockedIn ? 1 : 0.5,
+                  }
+            }
+          >
+            Available
+          </button>
+          <button
+            onClick={() => changePresence('WRAP_UP')}
+            className="btn text-sm"
+            disabled={busy}
+            style={
+              presence === 'WRAP_UP'
+                ? { background: 'var(--accent)', color: '#0b1220' }
+                : { background: 'var(--surface-2)', color: 'var(--text-dim)', border: '1px solid var(--border)' }
+            }
+          >
+            Wrap up
+          </button>
+          <PauseCodeMenu
+            activeCode={shift?.pauseCode ?? null}
+            onBreak={presence === 'BREAK'}
+            disabled={busy}
+            onSelect={goOnBreak}
+          />
+          <button
+            onClick={() => changePresence('OFFLINE')}
+            className="btn text-sm"
+            disabled={busy}
+            style={
+              presence === 'OFFLINE'
+                ? { background: 'var(--accent)', color: '#0b1220' }
+                : { background: 'var(--surface-2)', color: 'var(--text-dim)', border: '1px solid var(--border)' }
+            }
+          >
+            Offline
+          </button>
         </div>
       </div>
+
+      {/* Time clock. Clocking in and going available are deliberately two
+          separate decisions — see PresenceService.clockIn. */}
+      <div
+        className="flex flex-wrap items-center justify-between gap-4 rounded-xl border px-4 py-3"
+        style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}
+      >
+        <div className="flex flex-wrap items-center gap-6">
+          <div>
+            <p className="text-xs uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+              Shift
+            </p>
+            <p className="font-mono text-lg font-bold tabular-nums">
+              {clockedIn ? formatClock(shiftSeconds) : '—'}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+              Paused
+            </p>
+            <p className="font-mono text-lg font-bold tabular-nums" style={{ color: 'var(--text-dim)' }}>
+              {clockedIn ? formatClock(pausedSeconds) : '—'}
+            </p>
+          </div>
+          {shift?.pauseCode && presence === 'BREAK' && (
+            <div>
+              <p className="text-xs uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+                Reason
+              </p>
+              <p className="text-sm font-semibold" style={{ color: 'var(--accent)' }}>
+                {shift.pauseCode.replace(/_/g, ' ').toLowerCase()}
+              </p>
+            </div>
+          )}
+        </div>
+        <button
+          onClick={() => clock(clockedIn ? 'out' : 'in')}
+          className={clockedIn ? 'btn btn-ghost text-sm' : 'btn btn-primary text-sm'}
+          disabled={busy}
+        >
+          {clockedIn ? 'Clock out' : 'Clock in'}
+        </button>
+      </div>
+
+      {shiftError && (
+        <p className="text-sm" style={{ color: 'var(--bad)' }} role="alert">
+          {shiftError}
+        </p>
+      )}
 
       {/* Status banner: always shows the server-truth state, unambiguously */}
       <div
@@ -300,10 +351,27 @@ export default function WorkspacePage() {
         <div>
           <p className="text-sm font-bold">You are {meta.label}</p>
           <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-            {meta.hint}
+            {availableBlockedReason && presence !== 'AVAILABLE' ? availableBlockedReason : meta.hint}
           </p>
         </div>
       </div>
+
+      {/* Wrap-up countdown for an agent with nothing docked at the bottom — a
+          blind transfer leaves them wrapping up with no call bar on screen. */}
+      {wrapUp && !activeCall && (
+        <div
+          className="flex items-center justify-between rounded-xl border px-4 py-3"
+          style={{ borderColor: 'var(--accent)', background: 'var(--surface)' }}
+          role="status"
+        >
+          <p className="text-sm">
+            Wrap-up in progress. You return to Available automatically when the timer runs out.
+          </p>
+          <span className="font-mono text-xl font-bold tabular-nums" style={{ color: 'var(--accent)' }}>
+            {formatClock(secondsUntil(wrapUp.deadline))}
+          </span>
+        </div>
+      )}
 
       {transferOffer && (
         <div className="card border-2 p-6" style={{ borderColor: 'var(--accent)' }}>
@@ -347,144 +415,6 @@ export default function WorkspacePage() {
               Decline
             </button>
           </div>
-        </div>
-      )}
-
-      {activeCallId && (
-        <div className="card p-6">
-          <div className="mb-3 flex items-baseline justify-between">
-            <h2 className="font-semibold" style={{ color: 'var(--good)' }}>
-              On call{briefing ? ` · ${briefing.leadName}` : ''}
-            </h2>
-            {briefing && (
-              <span className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                {briefing.campaignName}
-                {briefing.location ? ` · ${briefing.location}` : ''}
-                {' · score '}
-                <span className="font-bold" style={{ color: 'var(--good)' }}>{briefing.score}</span>
-              </span>
-            )}
-          </div>
-
-          {/* Real LiveKit audio status for the live-voice-demo path. Absent
-              (idle) for simulation-path transfers, which have no LiveKit
-              room — but a real failure (denied mic, bad token, etc.) must
-              always be visible, never silently hidden like "error" used to be. */}
-          {audioStatus !== 'idle' && (
-            <div
-              className="mb-4 flex items-center justify-between rounded-lg p-3 text-sm"
-              style={{ background: 'var(--surface-2)' }}
-            >
-              {audioStatus === 'connecting' && <span>Connecting call audio…</span>}
-              {audioStatus === 'live' && (
-                <span style={{ color: 'var(--good)' }}>🎙 Live audio connected — talk normally, your mic is on.</span>
-              )}
-              {audioStatus === 'blocked' && (
-                <span style={{ color: 'var(--accent)' }}>Audio is connected but your browser blocked autoplay.</span>
-              )}
-              {audioStatus === 'error' && (
-                <span style={{ color: 'var(--bad)' }}>
-                  Could not connect call audio{audioError ? ` — ${audioError}` : ''}. Check your mic permission for
-                  this site.
-                </span>
-              )}
-              <div className="flex gap-2">
-                {audioStatus === 'blocked' && (
-                  <button onClick={enableAudio} className="btn btn-primary text-xs">
-                    Enable audio
-                  </button>
-                )}
-                {audioStatus === 'live' && (
-                  <button onClick={toggleMic} className="btn btn-ghost text-xs">
-                    {micMuted ? 'Unmute' : 'Mute'}
-                  </button>
-                )}
-                {audioStatus === 'error' && (
-                  <button onClick={() => setAudioRetryCount((n) => n + 1)} className="btn btn-primary text-xs">
-                    Retry
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Summary + campaign script, side by side, so the agent has both in view */}
-          <div className="mb-4 grid gap-4 md:grid-cols-2">
-            <div className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
-                AI summary
-              </p>
-              <p>{briefing?.summary || summary || 'No summary captured yet.'}</p>
-              {briefing && briefing.facts.length > 0 && (
-                <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5">
-                  {briefing.facts.map((fact) => (
-                    <li key={fact.label} style={{ color: fact.confirmed ? 'var(--good)' : 'var(--text-dim)' }}>
-                      {fact.confirmed ? '✓' : '·'} {fact.label}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            <div className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
-                Script &amp; rebuttals
-              </p>
-              {briefing && briefing.objection && (
-                <p className="mb-2" style={{ color: 'var(--accent)' }}>
-                  Flagged objection: <span className="font-semibold">{briefing.objection.replace(/_/g, ' ')}</span>
-                </p>
-              )}
-              {briefing && briefing.rebuttals.length > 0 ? (
-                <ul className="space-y-2">
-                  {briefing.rebuttals.map((r) => {
-                    const active = briefing.objection === r.objection;
-                    return (
-                      <li
-                        key={r.objection}
-                        className="rounded p-2"
-                        style={active ? { background: 'var(--surface)', border: '1px solid var(--accent)' } : undefined}
-                      >
-                        <p className="font-semibold capitalize">{r.objection.replace(/_/g, ' ')}</p>
-                        <p style={{ color: 'var(--text-dim)' }}>{r.rebuttal}</p>
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : (
-                <p style={{ color: 'var(--text-dim)' }}>No rebuttal playbook configured for this campaign.</p>
-              )}
-            </div>
-          </div>
-
-          {transcript.length > 0 && (
-            <div className="mb-4 max-h-48 space-y-1 overflow-y-auto text-sm">
-              {transcript.map((line, i) => (
-                <p key={i}>
-                  <span style={{ color: 'var(--text-dim)' }}>{line.speaker}: </span>
-                  {line.text}
-                </p>
-              ))}
-            </div>
-          )}
-          <input
-            className="input mb-3"
-            placeholder="Disposition notes…"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-          />
-          <div className="flex flex-wrap gap-2">
-            {DISPOSITIONS.map(([value, label]) => (
-              <button
-                key={value}
-                onClick={() => setDisposition(value)}
-                className={value === 'BOOKED' ? 'btn btn-primary' : value === 'DO_NOT_CALL' ? 'btn btn-danger' : 'btn btn-ghost'}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div ref={liveKitAudioRef} style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden' }} />
         </div>
       )}
 

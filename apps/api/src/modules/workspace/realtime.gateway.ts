@@ -7,7 +7,7 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import type { FloorCallCard, PresenceState, Role, TransferCard, TranscriptSegment } from '@cocally/shared';
+import type { FloorCallCard, PauseCode, PresenceState, Role, TransferCard, TranscriptSegment } from '@cocally/shared';
 import type { Server, Socket } from 'socket.io';
 import { PresenceService } from './presence.service';
 
@@ -64,13 +64,32 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   }
 
   @SubscribeMessage('presence.set')
-  async onPresenceSet(socket: Socket, body: { state: PresenceState }): Promise<void> {
+  async onPresenceSet(socket: Socket, body: { state: PresenceState; pauseCode?: PauseCode }): Promise<void> {
     const user = this.users.get(socket.id);
     if (!user) return;
+    // BREAK is deliberately NOT settable over the socket without a reason
+    // code: a pause with no code is exactly the hole that makes adherence
+    // reporting impossible, so it is rejected rather than silently defaulted.
     const allowed: PresenceState[] = ['AVAILABLE', 'WRAP_UP', 'BREAK', 'OFFLINE'];
     if (!allowed.includes(body.state)) return;
-    await this.presence.setPresence(user.userId, body.state);
-    this.emitToTenant(user.tenantId, 'presence.updated', { userId: user.userId, state: body.state });
+    if (body.state === 'BREAK' && !body.pauseCode) {
+      socket.emit('presence.rejected', {
+        state: body.state,
+        reason: 'A pause reason is required to go on break.',
+      });
+      return;
+    }
+    try {
+      await this.presence.setPresence(user.userId, body.state, body.pauseCode);
+    } catch (err) {
+      socket.emit('presence.rejected', { state: body.state, reason: (err as Error).message });
+      return;
+    }
+    this.emitToTenant(user.tenantId, 'presence.updated', {
+      userId: user.userId,
+      state: body.state,
+      pauseCode: body.pauseCode ?? null,
+    });
   }
 
   /** Server-side emit helpers used by orchestrators. */
@@ -80,6 +99,20 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   emitToUser(userId: string, event: string, payload: unknown): void {
     this.server.to(`user:${userId}`).emit(event, payload);
+  }
+
+  /**
+   * Tenant broadcast that deliberately skips one user.
+   *
+   * Needed for silent supervision: a monitoring supervisor is hidden from the
+   * LiveKit participant list, so the monitored agent must not receive the
+   * `supervision.changed` event either. Filtering it client-side would not be
+   * a control — the payload would still be on their socket.
+   */
+  emitToTenantExcept(tenantId: string, exceptUserId: string | null, event: string, payload: unknown): void {
+    const channel = this.server.to(`tenant:${tenantId}`);
+    if (exceptUserId) channel.except(`user:${exceptUserId}`).emit(event, payload);
+    else channel.emit(event, payload);
   }
 
   offerTransfer(agentId: string, card: TransferCard): void {

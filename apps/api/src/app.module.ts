@@ -17,6 +17,7 @@ import { LeadsModule } from './modules/leads/leads.module';
 import { OpsModule } from './modules/ops/ops.module';
 import { ProvidersModule } from './modules/providers/providers.module';
 import { RecordingsModule } from './modules/recordings/recordings.module';
+import { ReportsModule } from './modules/reports/reports.module';
 import { TelephonyModule } from './modules/telephony/telephony.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { UsersModule } from './modules/users/users.module';
@@ -48,6 +49,7 @@ import { WorkspaceModule } from './modules/workspace/workspace.module';
     TelephonyModule,
     AnalyticsModule,
     OpsModule,
+    ReportsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

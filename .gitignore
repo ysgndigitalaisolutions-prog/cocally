@@ -11,3 +11,8 @@ coverage/
 apps/api/prisma/*.db
 recordings-data/
 .seeded
+
+# Python
+.venv/
+__pycache__/
+*.pyc

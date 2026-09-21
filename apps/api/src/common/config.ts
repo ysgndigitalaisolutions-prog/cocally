@@ -47,6 +47,49 @@ const envSchema = z.object({
   /** Twilio account backing the SIP trunk / numbers. */
   TWILIO_ACCOUNT_SID: optionalString(),
   TWILIO_AUTH_TOKEN: optionalString(),
+
+  // --- Floor operations -------------------------------------------------
+  /** Seconds an agent may stay in WRAP_UP before being returned to AVAILABLE. */
+  WRAP_UP_MAX_SECONDS: z.coerce.number().min(5).default(90),
+  /** Seconds a receiving agent has to accept an agent-to-agent transfer. */
+  AGENT_TRANSFER_ACCEPT_SECONDS: z.coerce.number().min(5).max(120).default(20),
+  /**
+   * Audio played to a parked customer (hold) and during transfer hand-off.
+   * Without this the customer hears dead silence through the accept window —
+   * the single most demo-breaking defect in the transfer flow.
+   */
+  HOLD_MUSIC_URL: optionalString(),
+  /** Campaign worklist size below which supervisors get a hopper-low alert. */
+  HOPPER_LOW_THRESHOLD: z.coerce.number().min(0).default(50),
+
+  // --- Recording --------------------------------------------------------
+  /** Turn on real dual-leg audio capture via LiveKit Egress. */
+  RECORDING_ENABLED: z.coerce.boolean().default(false),
+  /** S3/GCS bucket for finished recordings; falls back to local RECORDINGS_DIR. */
+  RECORDING_BUCKET: optionalString(),
+  RECORDING_S3_REGION: optionalString(),
+  RECORDING_S3_ACCESS_KEY: optionalString(),
+  RECORDING_S3_SECRET: optionalString(),
+  RECORDING_S3_ENDPOINT: optionalString(),
+
+  // --- ACMA Do Not Call Register ---------------------------------------
+  /**
+   * Real-time washing web service. Without these the AU country pack blocks
+   * every lead with DNC_WASH_STALE and the floor sits idle — which is the
+   * correct fail-closed behaviour, and exactly why this must be configured
+   * before go-live rather than after.
+   */
+  DNCR_ENABLED: z.coerce.boolean().default(false),
+  DNCR_ACCOUNT_ID: optionalString(),
+  DNCR_PASSPHRASE: optionalString(),
+  DNCR_ENDPOINT: z.string().default('https://www.donotcall.gov.au/dncrtelem/rtw/washing.cfc'),
+  /** Numbers per SOAP request. The service recommends 200; 500 is the hard ceiling. */
+  DNCR_BATCH_SIZE: z.coerce.number().min(1).max(500).default(200),
+  /**
+   * Re-wash anything older than this. The safe-harbour is 30 days, so 25
+   * leaves five days of margin for a scheduler outage.
+   */
+  DNCR_REWASH_AFTER_DAYS: z.coerce.number().min(1).max(30).default(25),
 });
 
 const parsed = envSchema.parse(process.env);
@@ -81,6 +124,33 @@ export const config = {
     accountSid: parsed.TWILIO_ACCOUNT_SID,
     authToken: parsed.TWILIO_AUTH_TOKEN,
   },
+  floor: {
+    wrapUpMaxSeconds: parsed.WRAP_UP_MAX_SECONDS,
+    agentTransferAcceptSeconds: parsed.AGENT_TRANSFER_ACCEPT_SECONDS,
+    holdMusicUrl: parsed.HOLD_MUSIC_URL,
+    hopperLowThreshold: parsed.HOPPER_LOW_THRESHOLD,
+  },
+  recording: {
+    enabled: parsed.RECORDING_ENABLED,
+    bucket: parsed.RECORDING_BUCKET,
+    s3Region: parsed.RECORDING_S3_REGION,
+    s3AccessKey: parsed.RECORDING_S3_ACCESS_KEY,
+    s3Secret: parsed.RECORDING_S3_SECRET,
+    s3Endpoint: parsed.RECORDING_S3_ENDPOINT,
+  },
+  dncr: {
+    enabled: parsed.DNCR_ENABLED,
+    accountId: parsed.DNCR_ACCOUNT_ID,
+    passphrase: parsed.DNCR_PASSPHRASE,
+    endpoint: parsed.DNCR_ENDPOINT,
+    batchSize: parsed.DNCR_BATCH_SIZE,
+    rewashAfterDays: parsed.DNCR_REWASH_AFTER_DAYS,
+  },
 } as const;
+
+/** True when the live media plane is configured well enough to place real calls. */
+export const isLiveTelephony = (): boolean =>
+  config.telephonyDriver === 'SIP' &&
+  Boolean(config.livekit.url && config.livekit.apiKey && config.livekit.apiSecret && config.livekit.sipTrunkId);
 
 export type AppConfig = typeof config;

@@ -36,4 +36,17 @@ export class ManualDialController {
   dial(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.manual.dial(user.tenantId, { id: user.userId, email: user.email }, id);
   }
+
+  /** Step 2: agent's browser has joined the LiveKit room — actually ring the customer. */
+  @Post('calls/:id/connect')
+  @Roles('AGENT', 'SUPERVISOR', 'ADMIN')
+  connect(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.manual.connect(user.tenantId, user.userId, id);
+  }
+
+  @Post('calls/:id/hangup')
+  @Roles('AGENT', 'SUPERVISOR', 'ADMIN')
+  hangup(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.manual.hangup(user.tenantId, user.userId, id);
+  }
 }

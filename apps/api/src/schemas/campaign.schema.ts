@@ -3,6 +3,7 @@ import {
   ROUTING_STRATEGIES,
   TRANSCRIPTION_MODES,
   VOICEMAIL_POLICIES,
+  type PredictiveDialingConfig,
   type RoutingStrategy,
   type ScoringConfig,
   type TranscriptionMode,
@@ -17,6 +18,23 @@ export interface RetryRule {
   shiftTimeBand: boolean;
   maxAttempts: number;
 }
+
+/**
+ * Shared with `CampaignsService`'s read paths: `.lean()` queries return the
+ * raw stored document with NO schema defaults applied, so a campaign created
+ * before this field existed comes back with `predictiveDialing: undefined`
+ * — not the default object. Exported so both the schema default and the
+ * backfill-on-read use the exact same values instead of two copies drifting.
+ */
+export const DEFAULT_PREDICTIVE_DIALING: PredictiveDialingConfig = {
+  enabled: false,
+  method: 'ADAPT_HARD_LIMIT',
+  ratio: 1.2,
+  minRatio: 1.0,
+  maxRatio: 4.0,
+  maxAbandonRatePercent: 3,
+  abandonTimeoutSeconds: 2,
+};
 
 @Schema({ timestamps: true })
 export class Campaign {
@@ -55,6 +73,15 @@ export class Campaign {
   /** Availability-aware pacing per XFER-03: max concurrent dials per free agent. */
   @Prop({ default: 3 })
   dialsPerAvailableAgent: number;
+
+  /**
+   * Ratio/adaptive dialing for a human-agent floor (ViciDial-style
+   * predictive/auto-dial), separate from the AI-fronted auto-dialer above.
+   * `ratio` is read AND written by PredictiveDialerService — it is the live
+   * auto-adjusted dial level, not just a static setting.
+   */
+  @Prop({ type: Object, default: DEFAULT_PREDICTIVE_DIALING })
+  predictiveDialing: PredictiveDialingConfig;
 
   /** Behaviour when no closer is free: AI books instead of transferring. */
   @Prop({ type: String, enum: ['BOOK', 'HOLD', 'AI_CLOSE'], default: 'BOOK' })
