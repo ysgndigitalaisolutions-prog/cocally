@@ -21,9 +21,11 @@ const NAV = [
   { href: '/calls', label: 'Calls', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/providers', label: 'Providers', roles: ['OWNER', 'ADMIN'] },
   { href: '/cli-numbers', label: 'CLI numbers', roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
+  { href: '/users', label: 'Users & access', roles: ['OWNER', 'ADMIN'] },
   { href: '/audit', label: 'Audit log', roles: ['OWNER', 'ADMIN', 'QA'] },
   { href: '/reports', label: 'Reports', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
   { href: '/live-demo', label: 'Live demo', roles: ['OWNER', 'ADMIN'] },
+  { href: '/security', label: 'My security', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'AGENT', 'QA'] },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {

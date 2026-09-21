@@ -59,6 +59,15 @@ api.interceptors.response.use(
     return response;
   },
   (error) => {
+    if (
+      error.response?.status === 403 &&
+      error.response?.data?.code === 'TWO_FACTOR_REQUIRED' &&
+      typeof window !== 'undefined' &&
+      !window.location.pathname.startsWith('/security')
+    ) {
+      window.location.href = '/security';
+      return Promise.reject(error);
+    }
     if (error.response?.status === 401 && typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
       localStorage.removeItem('cocally.token');
       window.location.href = '/login';

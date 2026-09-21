@@ -7,15 +7,45 @@ export class User {
   @Prop({ type: Types.ObjectId, ref: 'Tenant', required: true, index: true })
   tenantId: Types.ObjectId;
 
-  @Prop({ required: true, lowercase: true, trim: true })
-  email: string;
+  /**
+   * Login identifier: the user's mobile in E.164 (e.g. +61412000104). Required
+   * for every account created through the invite flow; legacy/seeded accounts
+   * may carry only an email.
+   */
+  @Prop({ trim: true })
+  phone?: string;
+
+  /** Contact address, also accepted as a login identifier for legacy accounts. */
+  @Prop({ lowercase: true, trim: true })
+  email?: string;
 
   @Prop({ required: true })
   name: string;
 
-  /** argon2 hash. */
-  @Prop({ required: true, select: false })
-  passwordHash: string;
+  /**
+   * argon2 hash. Absent until the user accepts their invite and sets a
+   * password, during which time login is refused.
+   */
+  @Prop({ select: false })
+  passwordHash?: string;
+
+  @Prop()
+  passwordSetAt?: Date;
+
+  /**
+   * Bumped on password change, invite acceptance and deactivation. Every JWT
+   * carries the version it was minted with; a mismatch rejects the token, so
+   * "sign out everywhere" and "deactivate now" take effect immediately instead
+   * of at JWT expiry.
+   */
+  @Prop({ default: 0 })
+  tokenVersion: number;
+
+  @Prop()
+  lastLoginAt?: Date;
+
+  @Prop()
+  lastLoginIp?: string;
 
   @Prop({ type: [String], enum: ROLES, required: true })
   roles: Role[];
@@ -81,5 +111,12 @@ export class User {
 
 export type UserDocument = HydratedDocument<User>;
 export const UserSchema = SchemaFactory.createForClass(User);
-UserSchema.index({ tenantId: 1, email: 1 }, { unique: true });
+UserSchema.index(
+  { tenantId: 1, email: 1 },
+  { unique: true, partialFilterExpression: { email: { $type: 'string' } }, name: 'tenant_email_unique' },
+);
+UserSchema.index(
+  { tenantId: 1, phone: 1 },
+  { unique: true, partialFilterExpression: { phone: { $type: 'string' } }, name: 'tenant_phone_unique' },
+);
 UserSchema.index({ tenantId: 1, presence: 1 });

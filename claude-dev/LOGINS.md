@@ -16,16 +16,18 @@ Fastest for walkthroughs — no typing full email addresses.
 
 ## Full pilot accounts
 
-All six share the password **`CoCally!Pilot2026`**.
+All six share the password **`CoCally!Pilot2026`**. Sign in with the **phone number** (any spelling: `0400 000 001` or `+61400000001`); the email still works as a legacy identifier.
 
-| Email | Name | Role | Can see |
-|---|---|---|---|
-| `owner@cocally.dev` | Olivia Owner | Owner | Everything, incl. team insights + kill switch |
-| `admin@cocally.dev` | Andre Admin | Admin | Campaigns, flows, providers, team insights, audit log |
-| `supervisor@cocally.dev` | Sana Supervisor | Supervisor | Floor feed, team insights, can pause campaigns |
-| `agent1@cocally.dev` | Alex Agent | Agent | Workspace + own insights only (403 on team endpoints) |
-| `agent2@cocally.dev` | Amelia Agent | Agent | Same as agent1 |
-| `qa@cocally.dev` | Quinn QA | QA | Calls, recordings, QA scores, team insights |
+| Phone | Email | Name | Role | Can see |
+|---|---|---|---|---|
+| `0400 000 001` | `owner@cocally.dev` | Olivia Owner | Owner | Everything, incl. team insights + kill switch |
+| `0400 000 002` | `admin@cocally.dev` | Andre Admin | Admin | Campaigns, flows, providers, users, audit log |
+| `0400 000 003` | `supervisor@cocally.dev` | Sana Supervisor | Supervisor | Floor feed, team insights, can pause campaigns |
+| `0400 000 004` | `agent1@cocally.dev` | Alex Agent | Agent | Workspace + own insights only (403 on team endpoints) |
+| `0400 000 005` | `agent2@cocally.dev` | Amelia Agent | Agent | Same as agent1 |
+| `0400 000 006` | `qa@cocally.dev` | Quinn QA | QA | Calls, recordings, QA scores, team insights |
+
+**Owner, Admin, Supervisor and QA must enrol an authenticator app at first sign-in** (My security page). Until then every other route returns `403 TWO_FACTOR_REQUIRED`. Agents may enrol but are not forced to. If you lose a dev authenticator, clear it in Mongo: `db.users.updateOne({email:"owner@cocally.dev"},{$set:{totpEnabled:false},$unset:{totpSecret:1}})`.
 
 ## Quick pilot loop
 

@@ -2,7 +2,7 @@
 #   docker compose --env-file .env.prod -f docker-compose.prod.yml pull
 #   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 # Images are built by .github/workflows/deploy.yml and pushed to GHCR.
-name: cocally
+name: cocally-prod
 
 x-logging: &logging
   logging:

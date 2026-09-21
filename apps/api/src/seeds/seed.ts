@@ -97,18 +97,19 @@ async function main(): Promise<void> {
     updatedAt: now,
   });
 
-  const roles: Array<[string, string, string[]]> = [
-    ['owner@cocally.dev', 'Olivia Owner', ['OWNER']],
-    ['admin@cocally.dev', 'Andre Admin', ['ADMIN']],
-    ['supervisor@cocally.dev', 'Sana Supervisor', ['SUPERVISOR']],
-    ['agent1@cocally.dev', 'Alex Agent', ['AGENT']],
-    ['agent2@cocally.dev', 'Amelia Agent', ['AGENT']],
-    ['qa@cocally.dev', 'Quinn QA', ['QA']],
+  const roles: Array<[string, string, string[], string]> = [
+    ['owner@cocally.dev', 'Olivia Owner', ['OWNER'], '+61400000001'],
+    ['admin@cocally.dev', 'Andre Admin', ['ADMIN'], '+61400000002'],
+    ['supervisor@cocally.dev', 'Sana Supervisor', ['SUPERVISOR'], '+61400000003'],
+    ['agent1@cocally.dev', 'Alex Agent', ['AGENT'], '+61400000004'],
+    ['agent2@cocally.dev', 'Amelia Agent', ['AGENT'], '+61400000005'],
+    ['qa@cocally.dev', 'Quinn QA', ['QA'], '+61400000006'],
   ];
   await db.collection('users').insertMany(
-    roles.map(([email, name, userRoles]) => ({
+    roles.map(([email, name, userRoles, phone]) => ({
       tenantId,
       email,
+      phone,
       name,
       passwordHash,
       roles: userRoles,
@@ -118,6 +119,7 @@ async function main(): Promise<void> {
       talkTimeTodaySeconds: 0,
       adminIpAllowlist: [],
       totpEnabled: false,
+      tokenVersion: 0,
       active: true,
       createdAt: now,
       updatedAt: now,

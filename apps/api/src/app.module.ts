@@ -3,6 +3,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
+import { UserStateModule } from './common/auth/user-state.service';
 import { ScheduleModule } from '@nestjs/schedule';
 import { config } from './common/config';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
@@ -28,6 +29,8 @@ import { WorkspaceModule } from './modules/workspace/workspace.module';
 @Module({
   imports: [
     MongooseModule.forRoot(config.mongoUri),
+    // JwtAuthGuard (global) checks live user state on every request.
+    UserStateModule,
     JwtModule.register({
       global: true,
       secret: config.jwtSecret,

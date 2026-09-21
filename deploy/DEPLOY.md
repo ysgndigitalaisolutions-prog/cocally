@@ -50,13 +50,17 @@ GHCR packages are private by default. The deploy step logs the VM into GHCR with
 
 Push to `prod` (or run the Deploy workflow manually). The workflow ends with a health gate on `/api/v1/ops/ready`.
 
-Then seed the tenant and users once:
+Then provision the client's tenant and first owner. No password is created; the command prints a one-time link:
 
 ```bash
-docker compose --env-file .env.prod -f docker-compose.prod.yml exec api node apps/api/dist/seeds/seed.js
+docker compose --env-file .env.prod -f docker-compose.prod.yml exec api \
+  node apps/api/dist/seeds/provision-tenant.js \
+  --name "Acme BPO" --slug acme --owner-name "Jane Citizen" --owner-phone "+61412000104"
 ```
 
-The seed refuses the `admin/1234` demo logins when `NODE_ENV=production`. Change the pilot password immediately after first login.
+Send the link to the owner over WhatsApp or SMS. It works once and expires in 48 hours. The owner sets a password, signs in with their phone number, and is required to enrol an authenticator app (TOTP) before anything else loads. They then invite everyone else from **Users & access**, which hands them a one-time link per person the same way.
+
+Do not run `seed.js` in production. It creates the demo tenant with a shared password.
 
 ## 4. Day-to-day
 
@@ -69,14 +73,22 @@ The seed refuses the `admin/1234` demo logins when `NODE_ENV=production`. Change
 | Restore | `docker compose ... exec -T mongo mongorestore --archive --gzip --drop < backups/<file>` |
 | Rotate a secret | edit `.env.prod`, then `up -d api worker` |
 
-## 5. What the API refuses in production
+## 5. Access model
+
+- Login is phone number + password. Owner, Admin, Supervisor and QA must have TOTP enrolled; the API returns `403 TWO_FACTOR_REQUIRED` on every route except enrolment until they do.
+- Passwords are never issued by an admin. Invites and resets are single-use links whose token is stored hashed and expires in 48 hours.
+- Deactivating a user, changing a password, resetting an authenticator or changing roles bumps the user's token version, which signs out every existing session immediately.
+- Every sign-in, failed attempt, invite, reset and authenticator event is in the append-only audit log, visible to the Owner and Admin under Users & access.
+- Login is limited to 10 attempts per minute per IP.
+
+## 6. What the API refuses in production
 
 With `NODE_ENV=production` the API exits at boot if any of these hold: `JWT_SECRET` or `VAULT_KEY` are the dev defaults, `JWT_SECRET` or `ENGINE_SERVICE_TOKEN` are under 32 characters, `MONGODB_URI` or `CORS_ORIGIN` mention localhost, or `DEMO_LEAD_TOKEN_ENABLED` is set. Booleans are strict: only `true`, `1`, `yes`, `on` enable a flag. `RECORDING_ENABLED=false` now means off.
 
-## 6. Known single-instance limits
+## 7. Known single-instance limits
 
 Run exactly one `api` container. Dialer ticks, pending transfer offers and wrap-up timers are in-process. A restart keeps live calls (they live in LiveKit) but drops in-flight transfer offers. Deploys therefore restart the API in a few seconds; schedule them outside calling hours.
 
-## 7. Moving to Cloud Run later
+## 8. Moving to Cloud Run later
 
 The same images run on Cloud Run with `min-instances=1 max-instances=1` and CPU always allocated for `api` and `worker`. Swap the deploy job's ssh step for `gcloud run deploy` and point `MONGODB_URI` at Atlas. Nothing in the images changes.

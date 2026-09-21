@@ -28,9 +28,13 @@ export class AuditService {
     });
   }
 
-  async list(tenantId: string, options: { limit?: number; action?: string; entityType?: string } = {}) {
+  async list(
+    tenantId: string,
+    options: { limit?: number; action?: string; actions?: string[]; entityType?: string } = {},
+  ) {
     const filter: Record<string, unknown> = { tenantId: new Types.ObjectId(tenantId) };
     if (options.action) filter.action = options.action;
+    else if (options.actions?.length) filter.action = { $in: options.actions };
     if (options.entityType) filter.entityType = options.entityType;
     return this.auditModel
       .find(filter)

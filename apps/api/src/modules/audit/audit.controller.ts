@@ -9,15 +9,17 @@ export class AuditController {
   constructor(private readonly auditService: AuditService) {}
 
   @Get()
-  @Roles('ADMIN', 'QA')
+  @Roles('OWNER', 'ADMIN', 'QA')
   list(
     @CurrentUser() user: AuthenticatedUser,
     @Query('action') action?: string,
+    @Query('actions') actions?: string,
     @Query('entityType') entityType?: string,
     @Query('limit') limit?: string,
   ) {
     return this.auditService.list(user.tenantId, {
       action,
+      actions: actions ? actions.split(',').map((a) => a.trim()).filter(Boolean) : undefined,
       entityType,
       limit: limit ? Number(limit) : undefined,
     });

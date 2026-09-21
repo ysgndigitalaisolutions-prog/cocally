@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState('');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [requires2fa, setRequires2fa] = useState(false);
@@ -19,7 +19,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const { data } = await api.post('/auth/login', {
-        email,
+        identifier,
         password,
         ...(totpCode ? { totpCode } : {}),
       });
@@ -29,7 +29,7 @@ export default function LoginPage() {
       }
       localStorage.setItem('cocally.token', data.token);
       localStorage.setItem('cocally.user', JSON.stringify(data.user));
-      router.push('/dashboard');
+      router.push(data.user?.twoFactorSetupRequired ? '/security' : '/dashboard');
     } catch (err) {
       const message =
         (err as { response?: { data?: { message?: string } } }).response?.data?.message ?? 'Login failed';
@@ -52,8 +52,17 @@ export default function LoginPage() {
         </div>
         <form onSubmit={submit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium">Email or username</label>
-            <input className="input" type="text" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            <label className="mb-1 block text-sm font-medium">Phone number</label>
+            <input
+              className="input"
+              type="text"
+              inputMode="tel"
+              autoComplete="username"
+              placeholder="04xx xxx xxx"
+              value={identifier}
+              onChange={(e) => setIdentifier(e.target.value)}
+              required
+            />
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium">Password</label>
@@ -63,12 +72,12 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              minLength={4}
+              autoComplete="current-password"
             />
           </div>
           {requires2fa && (
             <div>
-              <label className="mb-1 block text-sm font-medium">2FA code</label>
+              <label className="mb-1 block text-sm font-medium">Authenticator code</label>
               <input
                 className="input"
                 inputMode="numeric"
