@@ -1,3 +1,4 @@
+import { config } from '../../common/config';
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import {
@@ -22,7 +23,7 @@ interface SocketUser {
  * transfer offers, transcript streaming. Auth is the same JWT as REST,
  * passed as socket handshake auth.token.
  */
-@WebSocketGateway({ cors: { origin: true, credentials: true }, namespace: '/ws' })
+@WebSocketGateway({ cors: { origin: config.corsOrigins, credentials: true }, namespace: '/ws' })
 export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(RealtimeGateway.name);
 

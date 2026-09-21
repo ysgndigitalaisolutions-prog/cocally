@@ -1,4 +1,5 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
 import { config } from '../config';
 
@@ -17,7 +18,9 @@ export class ServiceTokenGuard implements CanActivate {
     if (!expected) throw new UnauthorizedException('Engine service token not configured');
     const header = ctx.switchToHttp().getRequest<Request>().headers['authorization'];
     const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : '';
-    if (token !== expected) throw new UnauthorizedException('Invalid engine service token');
+    const a = Buffer.from(token);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) throw new UnauthorizedException('Invalid engine service token');
     return true;
   }
 }

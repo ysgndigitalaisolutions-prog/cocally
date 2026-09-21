@@ -70,3 +70,7 @@ pnpm typecheck
 ## PRD coverage
 
 Phase-1 (pilot) requirements are implemented end-to-end in simulation: TEL (dialer, AMD policy, CLI pools, concurrency), PAL (registries, hierarchy, fallback, vault), FLOW (graph, validation, versioning, simulator), LEAD (import, E.164, dedup, retry matrix, suppression stack, calling windows), AI (conversation loop, scoring, structured capture, objection memory, safety rails), XFER (eligibility, pre-reservation, accept-window cascade, summary card), WS (presence, floor feed, transfer card, dispositions), REC (dual-leg stitched timeline, redaction, retention, legal hold), DASH (KPIs, funnel, objections, heatmap, deep-dive), ADM (RBAC, immutable audit, campaign controls, pause-everything), CP (AU pack: ACMA wash expiry, calling hours, disclosures), PLAT (multi-tenancy, webhooks with HMAC + retry, quotas/kill switch, health).
+
+## Deployment
+
+Images for the API, web and Python worker are built by GitHub Actions on every push and shipped to a single VM on pushes to `prod` (`.github/workflows/deploy.yml`). The production Compose stack, Caddyfile, env template and runbook live in [`deploy/`](deploy/DEPLOY.md). In production the API refuses to boot with dev secrets, localhost URLs or the demo lead-token flag.

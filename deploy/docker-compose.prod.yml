@@ -1,0 +1,78 @@
+# Production stack for one VM. Usage (on the VM, in /opt/cocally):
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml pull
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+# Images are built by .github/workflows/deploy.yml and pushed to GHCR.
+name: cocally
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, web]
+    <<: *logging
+
+  api:
+    image: ${IMAGE_REGISTRY}/cocally-api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      TRUST_PROXY: "true"
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/cocally}
+      CORS_ORIGIN: https://${DOMAIN}
+      PUBLIC_BASE_URL: https://${DOMAIN}
+      RECORDINGS_DIR: /app/recordings-data
+    volumes:
+      - recordings:/app/recordings-data
+    depends_on:
+      mongo: { condition: service_healthy }
+    <<: *logging
+
+  web:
+    image: ${IMAGE_REGISTRY}/cocally-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on: [api]
+    <<: *logging
+
+  worker:
+    image: ${IMAGE_REGISTRY}/cocally-worker:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      ENGINE_BASE_URL: http://api:4000
+    depends_on:
+      api: { condition: service_healthy }
+    <<: *logging
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "1"]
+    volumes:
+      - mongo_data:/data/db
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    <<: *logging
+
+volumes:
+  mongo_data:
+  recordings:
+  caddy_data:
+  caddy_config:

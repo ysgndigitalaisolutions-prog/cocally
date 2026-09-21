@@ -10,20 +10,41 @@ loadDotenv();
  * empty string should mean "unset", not fail `.url()`/other validators. */
 const optionalString = () => z.preprocess((v) => (v === '' ? undefined : v), z.string().optional());
 const optionalUrl = () => z.preprocess((v) => (v === '' ? undefined : v), z.string().url().optional());
+/**
+ * Strict boolean. `z.coerce.boolean()` is `Boolean(value)`, so the literal
+ * string "false" was TRUE — a footgun that silently enabled recording and DNC
+ * washing. Only "true", "1", "yes", "on" (any case) are true; anything else,
+ * including blank and "false", is false.
+ */
+const envBool = () =>
+  z.preprocess((v) => {
+    if (typeof v === 'boolean') return v;
+    if (v === undefined || v === null) return false;
+    return ['true', '1', 'yes', 'on'].includes(String(v).trim().toLowerCase());
+  }, z.boolean());
+
+const DEV_JWT_SECRET = 'dev-secret-do-not-use-in-production';
+const DEV_VAULT_KEY = '0'.repeat(64);
 
 const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   MONGODB_URI: z.string().default('mongodb://localhost:27017/cocally'),
-  JWT_SECRET: z.string().default('dev-secret-do-not-use-in-production'),
+  JWT_SECRET: z.string().default(DEV_JWT_SECRET),
   JWT_EXPIRES_IN: z.string().default('8h'),
   VAULT_KEY: z
     .string()
     .regex(/^[0-9a-f]{64}$/i, 'VAULT_KEY must be 32 bytes hex')
-    .default('0'.repeat(64)),
+    .default(DEV_VAULT_KEY),
   TELEPHONY_DRIVER: z.enum(['SIMULATION', 'SIP']).default('SIMULATION'),
   /** Minutes without a client heartbeat before a staffed agent is auto-signed-out. */
   PRESENCE_TIMEOUT_MINUTES: z.coerce.number().min(1).default(5),
   PORT: z.coerce.number().default(4000),
+  /** Comma-separated allowed browser origins. Required in production. */
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
+  /** Set when the API sits behind a reverse proxy (Caddy, LB) so client IPs and HTTPS are read from X-Forwarded-*. */
+  TRUST_PROXY: envBool(),
+  /** Allows the unauthenticated browser "lead" join token used by the live-voice demo. Never enable on a client tenant. */
+  DEMO_LEAD_TOKEN_ENABLED: envBool(),
   RECORDINGS_DIR: z.string().default('./recordings-data'),
   ELEVENLABS_API_KEY: optionalString(),
   DEEPGRAM_API_KEY: optionalString(),
@@ -64,7 +85,7 @@ const envSchema = z.object({
 
   // --- Recording --------------------------------------------------------
   /** Turn on real dual-leg audio capture via LiveKit Egress. */
-  RECORDING_ENABLED: z.coerce.boolean().default(false),
+  RECORDING_ENABLED: envBool(),
   /** S3/GCS bucket for finished recordings; falls back to local RECORDINGS_DIR. */
   RECORDING_BUCKET: optionalString(),
   RECORDING_S3_REGION: optionalString(),
@@ -79,7 +100,7 @@ const envSchema = z.object({
    * correct fail-closed behaviour, and exactly why this must be configured
    * before go-live rather than after.
    */
-  DNCR_ENABLED: z.coerce.boolean().default(false),
+  DNCR_ENABLED: envBool(),
   DNCR_ACCOUNT_ID: optionalString(),
   DNCR_PASSPHRASE: optionalString(),
   DNCR_ENDPOINT: z.string().default('https://www.donotcall.gov.au/dncrtelem/rtw/washing.cfc'),
@@ -92,9 +113,24 @@ const envSchema = z.object({
   DNCR_REWASH_AFTER_DAYS: z.coerce.number().min(1).max(30).default(25),
 });
 
-const parsed = envSchema.parse(process.env);
+const parsed = envSchema
+  .superRefine((env, ctx) => {
+    if (env.NODE_ENV !== 'production') return;
+    const fail = (path: string, message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    if (env.JWT_SECRET === DEV_JWT_SECRET || env.JWT_SECRET.length < 32)
+      fail('JWT_SECRET', 'must be set to a random value of at least 32 characters in production');
+    if (env.VAULT_KEY === DEV_VAULT_KEY) fail('VAULT_KEY', 'must be a random 32-byte hex key in production');
+    if (env.MONGODB_URI.includes('localhost')) fail('MONGODB_URI', 'points at localhost in production');
+    if (env.CORS_ORIGIN.includes('localhost')) fail('CORS_ORIGIN', 'must list the real browser origin(s) in production');
+    if (!env.ENGINE_SERVICE_TOKEN || env.ENGINE_SERVICE_TOKEN.length < 32)
+      fail('ENGINE_SERVICE_TOKEN', 'must be a random value of at least 32 characters in production');
+    if (env.DEMO_LEAD_TOKEN_ENABLED) fail('DEMO_LEAD_TOKEN_ENABLED', 'must not be enabled in production');
+  })
+  .parse(process.env);
 
 export const config = {
+  nodeEnv: parsed.NODE_ENV,
+  isProduction: parsed.NODE_ENV === 'production',
   mongoUri: parsed.MONGODB_URI,
   jwtSecret: parsed.JWT_SECRET,
   jwtExpiresIn: parsed.JWT_EXPIRES_IN,
@@ -103,6 +139,9 @@ export const config = {
   presenceTimeoutMinutes: parsed.PRESENCE_TIMEOUT_MINUTES,
   port: parsed.PORT,
   corsOrigin: parsed.CORS_ORIGIN,
+  corsOrigins: parsed.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean),
+  trustProxy: parsed.TRUST_PROXY,
+  demoLeadTokenEnabled: parsed.DEMO_LEAD_TOKEN_ENABLED,
   recordingsDir: parsed.RECORDINGS_DIR,
   providerKeys: {
     elevenlabs: parsed.ELEVENLABS_API_KEY,

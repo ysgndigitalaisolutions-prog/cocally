@@ -12,7 +12,8 @@ import { config } from './common/config';
  * so every genuine import failed with a bare 413. Raised to cover a ~500k-row
  * file with headroom.
  */
-const BODY_LIMIT = '64mb';
+const IMPORT_BODY_LIMIT = '64mb';
+const DEFAULT_BODY_LIMIT = '1mb';
 
 async function bootstrap(): Promise<void> {
   // `rawBody: true` is required by the LiveKit webhook receiver: it verifies a
@@ -21,20 +22,17 @@ async function bootstrap(): Promise<void> {
   // rejected and live calls never advance past RINGING.
   const app = await NestFactory.create(AppModule, { rawBody: true });
 
-  app.use(
-    express.json({
-      limit: BODY_LIMIT,
-      // Nest's own rawBody capture only applies to its internal parser; this
-      // explicit `verify` hook keeps the raw bytes available even though we
-      // install our own json parser above it for the 64 MB CSV import limit.
-      verify: (req, _res, buf) => {
-        (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
-      },
-    }),
-  );
-  app.use(express.urlencoded({ limit: BODY_LIMIT, extended: true }));
+  const rawBodyVerify = (req: express.Request, _res: express.Response, buf: Buffer) => {
+    (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+  };
+  // The large limit applies to the CSV import route only; everything else,
+  // including the unauthenticated login route, gets the 1 MB default.
+  app.use('/api/v1/leads/import', express.json({ limit: IMPORT_BODY_LIMIT, verify: rawBodyVerify }));
+  app.use(express.json({ limit: DEFAULT_BODY_LIMIT, verify: rawBodyVerify }));
+  app.use(express.urlencoded({ limit: DEFAULT_BODY_LIMIT, extended: true }));
+  if (config.trustProxy) app.getHttpAdapter().getInstance().set('trust proxy', 1);
   app.use(helmet());
-  app.enableCors({ origin: config.corsOrigin, credentials: true });
+  app.enableCors({ origin: config.corsOrigins, credentials: true });
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(
     new ValidationPipe({

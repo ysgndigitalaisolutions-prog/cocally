@@ -1,0 +1,125 @@
+# Ships the prod branch: test -> build and push images to GHCR -> deploy to the VM -> health gate.
+#
+# Repository secrets required:
+#   DEPLOY_HOST      VM public IP or hostname
+#   DEPLOY_USER      SSH user with docker access (e.g. deploy)
+#   DEPLOY_SSH_KEY   private key for that user (ed25519)
+# Repository variables required:
+#   APP_DOMAIN       public hostname, e.g. app.cocally.com.au (baked into the web image)
+#
+# The VM needs: Docker + compose plugin, /opt/cocally/{docker-compose.prod.yml,Caddyfile,.env.prod}.
+# See deploy/DEPLOY.md.
+name: Deploy
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  test:
+    name: Typecheck and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @cocally/shared build
+      - run: pnpm typecheck
+      - run: pnpm --filter @cocally/shared test && pnpm --filter @cocally/api test
+
+  build:
+    name: Build and push (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: api,    file: apps/api/Dockerfile,     context: . }
+          - { name: web,    file: apps/web/Dockerfile,     context: . }
+          - { name: worker, file: agent-worker/Dockerfile, context: agent-worker }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/cocally-${{ matrix.name }}:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/cocally-${{ matrix.name }}:latest
+          build-args: |
+            NEXT_PUBLIC_API_URL=https://${{ vars.APP_DOMAIN || 'app.example.com' }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+  deploy:
+    name: Deploy to VM
+    runs-on: ubuntu-latest
+    needs: build
+    # Skipped until the VM is provisioned and APP_DOMAIN + DEPLOY_* are configured.
+    if: ${{ vars.APP_DOMAIN != '' }}
+    environment:
+      name: production
+      url: https://${{ vars.APP_DOMAIN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy compose files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "deploy/docker-compose.prod.yml,deploy/Caddyfile,deploy/backup-mongo.sh"
+          target: /opt/cocally
+          strip_components: 1
+      - name: Pull and restart
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: IMAGE_TAG,GHCR_TOKEN,GHCR_USER
+          script: |
+            set -euo pipefail
+            cd /opt/cocally
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            export IMAGE_TAG
+            docker compose --env-file .env.prod -f docker-compose.prod.yml pull
+            docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --remove-orphans
+            docker logout ghcr.io
+            docker image prune -f >/dev/null
+      - name: Health gate
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "https://${{ vars.APP_DOMAIN }}/api/v1/ops/ready"; then echo; echo "ready"; exit 0; fi
+            sleep 5
+          done
+          echo "API did not become ready"; exit 1

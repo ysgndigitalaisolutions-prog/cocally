@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { DISPOSITIONS, redactPii, type Disposition } from '@cocally/shared';
 import { IsIn, IsNotEmpty, IsNumber, IsOptional, IsString } from 'class-validator';
 import { Model, Types } from 'mongoose';
+import { config } from '../../common/config';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/auth/jwt-auth.guard';
 import { Public } from '../../common/auth/public.decorator';
@@ -436,13 +437,22 @@ export class CallsController {
     return { callId, leadJoinPath: `/demo/lead/${callId}` };
   }
 
-  /** Public join token for the browser-simulated "lead" side (no login). */
+  /**
+   * Public join token for the browser-simulated "lead" side of the live-voice
+   * demo (no login). Disabled unless DEMO_LEAD_TOKEN_ENABLED is set (refused in
+   * production by config), and only for a call that is still live and less
+   * than 30 minutes old, so a leaked or guessed id cannot join a real customer
+   * conversation.
+   */
   @Public()
   @Get(':id/lead-token')
   async leadToken(@Param('id') id: string) {
+    if (!config.demoLeadTokenEnabled) throw new NotFoundException('Not found');
     if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
     const call = await this.callModel.findById(new Types.ObjectId(id)).lean().exec();
     if (!call) throw new NotFoundException('Call not found');
+    const ageMs = Date.now() - new Date(call.startedAt).getTime();
+    if (call.endedAt || ageMs > 30 * 60_000) throw new NotFoundException('Call not found');
     await this.livekit.ensureRoom(id);
     return this.livekit.mintToken(id, `lead-${id}`, 'Lead');
   }

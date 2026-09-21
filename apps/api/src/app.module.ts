@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -48,10 +49,14 @@ import { WorkspaceModule } from './modules/workspace/workspace.module';
     WebhooksModule,
     TelephonyModule,
     AnalyticsModule,
+    // Global ceiling per client IP; the login route carries a much tighter
+    // limit of its own (see AuthController). Reads X-Forwarded-For when TRUST_PROXY is set.
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 600 }]),
     OpsModule,
     ReportsModule,
   ],
   providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
   ],
