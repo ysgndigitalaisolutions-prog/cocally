@@ -16,3 +16,7 @@ recordings-data/
 .venv/
 __pycache__/
 *.pyc
+
+# Deployment inputs and generated secrets (never commit)
+deploy/gcp/.env
+deploy/gcp/.state/

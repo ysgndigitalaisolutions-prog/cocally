@@ -4,8 +4,8 @@
 # One-time setup: deploy/gcp/setup.sh (creates the service accounts, Workload
 # Identity Federation and secrets, and prints the repository variables below).
 #
-# Repository variables: GCP_PROJECT_ID, GCP_PROJECT_NUMBER, GCP_REGION,
-#   GCP_WIF_PROVIDER, GCP_DEPLOYER_SA, GCP_RUNTIME_SA, TELEPHONY_DRIVER
+# Repository variables (set by setup.sh): DEPLOY_TARGET=cloudrun, GCP_PROJECT_ID,
+#   GCP_PROJECT_NUMBER, GCP_REGION, GCP_WIF_PROVIDER, GCP_DEPLOYER_SA, GCP_RUNTIME_SA, TELEPHONY_DRIVER
 # No repository secrets: auth is keyless (WIF) and app secrets live in Secret Manager.
 name: Deploy (Cloud Run)
 
@@ -32,7 +32,7 @@ env:
 jobs:
   test:
     name: Typecheck and test
-    if: ${{ vars.GCP_PROJECT_ID != '' }}
+    if: ${{ vars.DEPLOY_TARGET == 'cloudrun' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

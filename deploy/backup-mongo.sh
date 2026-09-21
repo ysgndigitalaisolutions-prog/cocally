@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p backups
-docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T mongo \
+sudo docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T mongo \
   mongodump --archive --gzip --db cocally > "backups/cocally-${stamp}.archive.gz"
 find backups -name 'cocally-*.archive.gz' -mtime +14 -delete
 if [ -n "${BACKUP_BUCKET:-}" ] && command -v rclone >/dev/null; then

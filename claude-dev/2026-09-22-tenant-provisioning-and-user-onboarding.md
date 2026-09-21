@@ -50,3 +50,11 @@ Bug found and fixed on the way: `PATCH /users/:id` blanked required fields becau
 - Recovery codes for TOTP are not implemented; an admin resets a lost authenticator instead.
 - Agents are not forced onto TOTP (by design for the pilot); one flag in `TWO_FACTOR_REQUIRED_ROLES` changes that.
 - Session length is still the 8 h JWT; there is no idle timeout.
+
+## Later the same day: deployment readied from one .env
+
+- `deploy/gcp/.env.example` → `deploy/gcp/.env` (gitignored) holds every deployment input: target (`vm` default, `cloudrun` optional), project, VM size, optional domain, telephony, provider keys, DNCR, recording bucket, first tenant.
+- `deploy/gcp/setup.sh` (idempotent) readies the project from that file: APIs, runtime + deployer service accounts, keyless GitHub auth via Workload Identity Federation, generated secrets kept in `deploy/gcp/.state/`. VM target: static IP, firewall (80/443 public, SSH via IAP only), Ubuntu VM with Docker from a startup script, `.env.prod` generated and copied with the Compose stack, backup cron. Cloud Run target: Artifact Registry + Secret Manager. Then sets the GitHub repository variables with `gh` if present, else prints them. `deploy/gcp/provision-tenant.sh` runs the tenant command on the VM.
+- `deploy.yml` (VM) rewritten to deploy through IAP SSH with WIF, no SSH keys or GitHub secrets, gated on `DEPLOY_TARGET=vm`; `deploy-cloudrun.yml` gated on `DEPLOY_TARGET=cloudrun`. Both fire on push to `prod`.
+- Cost note recorded in DEPLOY.md: Cloud Run with api + worker always on is ~USD 240/mo plus Atlas; a single e2-standard-2 VM is ~USD 55/mo with Mongo on the box. VM chosen for the pilot.
+- Not yet run against the real project: the script needs an Owner login to `cocally-509318`.
