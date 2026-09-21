@@ -980,4 +980,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
 
 if __name__ == "__main__":
-    agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
+    # Health/HTTP port. Cloud Run injects PORT and requires the container to
+    # listen on it; locally the library default (8081 in `start`, random in `dev`) applies.
+    _port = int(os.environ["PORT"]) if os.environ.get("PORT") else None
+    agents.cli.run_app(
+        agents.WorkerOptions(entrypoint_fnc=entrypoint, **({"port": _port} if _port else {}))
+    )

@@ -73,4 +73,4 @@ Phase-1 (pilot) requirements are implemented end-to-end in simulation: TEL (dial
 
 ## Deployment
 
-Images for the API, web and Python worker are built by GitHub Actions on every push and shipped to a single VM on pushes to `prod` (`.github/workflows/deploy.yml`). The production Compose stack, Caddyfile, env template and runbook live in [`deploy/`](deploy/DEPLOY.md). In production the API refuses to boot with dev secrets, localhost URLs or the demo lead-token flag.
+Images for the API, web and Python worker are built by GitHub Actions on every push and deployed to Google Cloud Run on pushes to `prod` (`.github/workflows/deploy-cloudrun.yml`); a single-VM Compose path is available as a manual workflow. The production Compose stack, Caddyfile, env template and runbook live in [`deploy/`](deploy/DEPLOY.md). In production the API refuses to boot with dev secrets, localhost URLs or the demo lead-token flag.

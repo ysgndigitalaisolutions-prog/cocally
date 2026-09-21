@@ -9,11 +9,10 @@
 #
 # The VM needs: Docker + compose plugin, /opt/cocally/{docker-compose.prod.yml,Caddyfile,.env.prod}.
 # See deploy/DEPLOY.md.
-name: Deploy
+name: Deploy (VM)
 
+# Manual alternative to deploy-cloudrun.yml for a single Docker Compose VM.
 on:
-  push:
-    branches: [prod]
   workflow_dispatch:
 
 concurrency:

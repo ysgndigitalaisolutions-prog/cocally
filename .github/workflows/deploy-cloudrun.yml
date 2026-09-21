@@ -1,0 +1,144 @@
+# Ships the prod branch to Cloud Run: test -> build and push images to Artifact
+# Registry -> deploy api, worker, web -> readiness gate.
+#
+# One-time setup: deploy/gcp/setup.sh (creates the service accounts, Workload
+# Identity Federation and secrets, and prints the repository variables below).
+#
+# Repository variables: GCP_PROJECT_ID, GCP_PROJECT_NUMBER, GCP_REGION,
+#   GCP_WIF_PROVIDER, GCP_DEPLOYER_SA, GCP_RUNTIME_SA, TELEPHONY_DRIVER
+# No repository secrets: auth is keyless (WIF) and app secrets live in Secret Manager.
+name: Deploy (Cloud Run)
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloudrun
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION || 'australia-southeast1' }}
+  AR: ${{ vars.GCP_REGION || 'australia-southeast1' }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/cocally
+  API_URL: https://cocally-api-${{ vars.GCP_PROJECT_NUMBER }}.${{ vars.GCP_REGION || 'australia-southeast1' }}.run.app
+  WEB_URL: https://cocally-web-${{ vars.GCP_PROJECT_NUMBER }}.${{ vars.GCP_REGION || 'australia-southeast1' }}.run.app
+
+jobs:
+  test:
+    name: Typecheck and test
+    if: ${{ vars.GCP_PROJECT_ID != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @cocally/shared build
+      - run: pnpm typecheck
+      - run: pnpm --filter @cocally/shared test && pnpm --filter @cocally/api test
+
+  build:
+    name: Build and push (${{ matrix.name }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { name: api,    file: apps/api/Dockerfile,     context: . }
+          - { name: web,    file: apps/web/Dockerfile,     context: . }
+          - { name: worker, file: agent-worker/Dockerfile, context: agent-worker }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: |
+            ${{ env.AR }}/${{ matrix.name }}:${{ github.sha }}
+            ${{ env.AR }}/${{ matrix.name }}:latest
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ env.API_URL }}
+          cache-from: type=gha,scope=cr-${{ matrix.name }}
+          cache-to: type=gha,scope=cr-${{ matrix.name }},mode=max
+
+  deploy:
+    name: Deploy services
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ env.WEB_URL }}
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # Exactly one API instance, never scaled to zero, CPU always on: the dialer
+      # ticks and transfer offers are in-process (see DEPLOY.md, single-instance limits).
+      - name: Deploy api
+        run: |
+          gcloud run deploy cocally-api \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --image "$AR/api:${{ github.sha }}" \
+            --service-account "${{ vars.GCP_RUNTIME_SA }}" \
+            --port 4000 --cpu 1 --memory 1Gi \
+            --min-instances 1 --max-instances 1 --no-cpu-throttling \
+            --timeout 3600 --session-affinity --allow-unauthenticated \
+            --set-env-vars "NODE_ENV=production,TRUST_PROXY=true,CORS_ORIGIN=$WEB_URL,PUBLIC_BASE_URL=$API_URL,RECORDINGS_DIR=/tmp/recordings,TELEPHONY_DRIVER=${{ vars.TELEPHONY_DRIVER || 'SIMULATION' }}" \
+            --set-secrets "JWT_SECRET=JWT_SECRET:latest,VAULT_KEY=VAULT_KEY:latest,ENGINE_SERVICE_TOKEN=ENGINE_SERVICE_TOKEN:latest,MONGODB_URI=MONGODB_URI:latest,LIVEKIT_URL=LIVEKIT_URL:latest,LIVEKIT_API_KEY=LIVEKIT_API_KEY:latest,LIVEKIT_API_SECRET=LIVEKIT_API_SECRET:latest,LIVEKIT_SIP_TRUNK_ID=LIVEKIT_SIP_TRUNK_ID:latest,DEEPGRAM_API_KEY=DEEPGRAM_API_KEY:latest,GROQ_API_KEY=GROQ_API_KEY:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,DNCR_ACCOUNT_ID=DNCR_ACCOUNT_ID:latest,DNCR_PASSPHRASE=DNCR_PASSPHRASE:latest" \
+            --quiet
+
+      # The worker dials out to LiveKit Cloud; nothing calls into it, so ingress is internal.
+      - name: Deploy worker
+        run: |
+          gcloud run deploy cocally-worker \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --image "$AR/worker:${{ github.sha }}" \
+            --service-account "${{ vars.GCP_RUNTIME_SA }}" \
+            --port 8081 --cpu 2 --memory 4Gi \
+            --min-instances 1 --max-instances 1 --no-cpu-throttling \
+            --ingress internal --no-allow-unauthenticated \
+            --set-env-vars "ENGINE_BASE_URL=$API_URL" \
+            --set-secrets "ENGINE_SERVICE_TOKEN=ENGINE_SERVICE_TOKEN:latest,LIVEKIT_URL=LIVEKIT_URL:latest,LIVEKIT_API_KEY=LIVEKIT_API_KEY:latest,LIVEKIT_API_SECRET=LIVEKIT_API_SECRET:latest,DEEPGRAM_API_KEY=DEEPGRAM_API_KEY:latest,GROQ_API_KEY=GROQ_API_KEY:latest" \
+            --quiet
+
+      - name: Deploy web
+        run: |
+          gcloud run deploy cocally-web \
+            --project "$PROJECT_ID" --region "$REGION" \
+            --image "$AR/web:${{ github.sha }}" \
+            --service-account "${{ vars.GCP_RUNTIME_SA }}" \
+            --port 3000 --cpu 1 --memory 512Mi \
+            --min-instances 0 --max-instances 3 \
+            --allow-unauthenticated \
+            --quiet
+
+      - name: Readiness gate
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "$API_URL/api/v1/ops/ready"; then echo; echo "api ready"; break; fi
+            [ "$i" = 30 ] && { echo "api not ready"; exit 1; }
+            sleep 5
+          done
+          curl -fsS -o /dev/null "$WEB_URL/login" && echo "web ready"
+          echo "Web: $WEB_URL"
