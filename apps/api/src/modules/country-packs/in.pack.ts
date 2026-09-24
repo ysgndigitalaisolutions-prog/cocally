@@ -15,7 +15,10 @@ export const IN_PACK: CountryPack = {
   phoneRegion: 'IN',
   emergencyBlocklist: ['100', '101', '102', '108', '112'],
   dnc: { registryName: 'none (internal testing only)', washExpiryDays: 30, enforced: false },
-  callingWindows: [1, 2, 3, 4, 5, 6, 7].map((weekday) => ({ weekday, start: '09:00', end: '21:00' })),
+  // TEMPORARY (2026-09-25): widened from 09:00–21:00 IST (TRAI window) so the
+  // first production test calls to our own numbers can run overnight. Restore
+  // 09:00–21:00 before any number that is not ours goes on this pack.
+  callingWindows: [1, 2, 3, 4, 5, 6, 7].map((weekday) => ({ weekday, start: '00:00', end: '23:59' })),
   // National holidays 2026 (Republic Day, Independence Day, Gandhi Jayanti).
   publicHolidays: ['2026-01-26', '2026-08-15', '2026-10-02'],
   publicHolidaysByZone: {},

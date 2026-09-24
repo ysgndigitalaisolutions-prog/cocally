@@ -29,6 +29,7 @@ export class CountryPacksService implements OnModuleInit {
         },
       )
       .exec();
+    await this.packModel.updateOne({ code: 'IN' }, { $set: { callingWindows: IN_PACK.callingWindows } }).exec();
   }
 
   async list() {

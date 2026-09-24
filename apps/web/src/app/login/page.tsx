@@ -58,11 +58,12 @@ export default function LoginPage() {
               type="text"
               inputMode="tel"
               autoComplete="username"
-              placeholder="04xx xxx xxx"
+              placeholder="04xx xxx xxx or +91 …"
               value={identifier}
               onChange={(e) => setIdentifier(e.target.value)}
               required
             />
+            <p className="mt-1 text-xs text-slate-400">Australian mobiles as 04xx…; any other country with its + code.</p>
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium">Password</label>
