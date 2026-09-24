@@ -1,0 +1,19 @@
+# GitHub Actions repository VARIABLES for ysgndigitalaisolutions-prog/cocally
+# Set at: https://github.com/ysgndigitalaisolutions-prog/cocally/settings/variables/actions
+# These are the Variables tab, not Secrets. None of them are secret.
+# Keep this file in sync whenever a variable is added or changed; setup.sh rewrites it on every run.
+# Last updated: 2026-09-24
+
+DEPLOY_TARGET      = vm
+GCP_PROJECT_ID     = cocally-509318
+GCP_PROJECT_NUMBER = 1041761530506
+GCP_REGION         = australia-southeast1
+GCP_ZONE           = australia-southeast1-b
+GCP_WIF_PROVIDER   = projects/1041761530506/locations/global/workloadIdentityPools/github/providers/github
+GCP_DEPLOYER_SA    = cocally-deployer@cocally-509318.iam.gserviceaccount.com
+GCP_RUNTIME_SA     = cocally-runtime@cocally-509318.iam.gserviceaccount.com
+VM_NAME            = cocally-app
+APP_DOMAIN         = 35.244.108.69.sslip.io   # baked into the web image as the API URL; must equal DOMAIN on the VM. Change to app.co-cally.com after DNS is set.
+TELEPHONY_DRIVER   = SIMULATION               # switch to SIP once LIVEKIT_SIP_TRUNK_ID is provisioned
+
+# Changing APP_DOMAIN requires "Re-run all jobs" (the web image is rebuilt), not just the deploy job.

@@ -204,6 +204,12 @@ fi
 
 # ---------------------------------------------------------------- GitHub
 log "GitHub repository variables"
+{ echo "# GitHub Actions repository VARIABLES for ${GITHUB_REPO} (Variables tab, not Secrets)."
+  echo "# Set at: https://github.com/${GITHUB_REPO}/settings/variables/actions"
+  echo "# Written by deploy/gcp/setup.sh on $(date -u +%FT%TZ); rewritten on every run."
+  echo; for kv in "${VARS[@]}"; do printf '%-18s = %s\n' "${kv%%=*}" "${kv#*=}"; done
+  echo; echo "# Changing APP_DOMAIN needs 'Re-run all jobs' (web image is rebuilt with it)."; } > git_variables.txt
+echo "  written to deploy/gcp/git_variables.txt"
 if have gh && gh auth status >/dev/null 2>&1; then
   for kv in "${VARS[@]}"; do gh variable set "${kv%%=*}" --repo "$GITHUB_REPO" --body "${kv#*=}" >/dev/null && echo "  set ${kv%%=*}"; done
   GH_DONE=1
