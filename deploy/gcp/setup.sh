@@ -166,10 +166,16 @@ ENV
   chmod 600 "$STATE_DIR/.env.prod"
   SSH=(gcloud compute ssh "$VM_NAME" --zone="$GCP_ZONE" --tunnel-through-iap --quiet --command)
   for i in 1 2 3 4 5 6; do "${SSH[@]}" "sudo test -d /opt/cocally" 2>/dev/null && break; echo "  waiting for VM ssh…"; sleep 15; done
-  "${SSH[@]}" "sudo chown \$(whoami) /opt/cocally && sudo usermod -aG docker \$(whoami)"
+  # Files under /opt/cocally end up root-owned (the deploy workflow installs them with
+  # sudo), so stage in the login user's home and move into place with sudo.
   gcloud compute scp --zone="$GCP_ZONE" --tunnel-through-iap --quiet \
-    ../docker-compose.prod.yml ../Caddyfile ../backup-mongo.sh "$STATE_DIR/.env.prod" "$VM_NAME":/opt/cocally/ >/dev/null
-  "${SSH[@]}" "chmod 600 /opt/cocally/.env.prod && chmod +x /opt/cocally/backup-mongo.sh && (crontab -l 2>/dev/null | grep -q backup-mongo || (crontab -l 2>/dev/null; echo '15 16 * * * /opt/cocally/backup-mongo.sh >> /opt/cocally/backups/backup.log 2>&1') | crontab -)"
+    ../docker-compose.prod.yml ../Caddyfile ../backup-mongo.sh "$STATE_DIR/.env.prod" "$VM_NAME":~/ >/dev/null
+  "${SSH[@]}" "set -e; sudo usermod -aG docker \$(whoami); \
+    sudo install -o root -g root -m 0644 ~/docker-compose.prod.yml ~/Caddyfile /opt/cocally/; \
+    sudo install -o root -g root -m 0755 ~/backup-mongo.sh /opt/cocally/; \
+    sudo install -o root -g root -m 0600 ~/.env.prod /opt/cocally/.env.prod; \
+    rm -f ~/docker-compose.prod.yml ~/Caddyfile ~/backup-mongo.sh ~/.env.prod; \
+    (sudo crontab -l 2>/dev/null | grep -q backup-mongo || (sudo crontab -l 2>/dev/null; echo '15 16 * * * /opt/cocally/backup-mongo.sh >> /opt/cocally/backups/backup.log 2>&1') | sudo crontab -)"
 
   set_var VM_NAME "$VM_NAME"
   set_var GCP_ZONE "$GCP_ZONE"
