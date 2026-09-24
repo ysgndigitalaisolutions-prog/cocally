@@ -37,6 +37,8 @@ import { VaultService } from './vault.service';
  * country pack → tenant → platform default) and executes with automatic
  * fallback on failure, tracking which provider actually served the call.
  */
+import { config, isLiveTelephony } from '../../common/config';
+
 @Injectable()
 export class PalService {
   private readonly logger = new Logger(PalService.name);
@@ -185,7 +187,12 @@ export class PalService {
     });
   }
 
-  private async executeChain<T>(chain: ResolvedChainEntry[], run: (entry: ResolvedChainEntry) => Promise<T>): Promise<T> {
+  private async executeChain<T>(chainIn: ResolvedChainEntry[], run: (entry: ResolvedChainEntry) => Promise<T>): Promise<T> {
+    // A real customer must never be handed to the keyword-matching simulation
+    // adapter because a provider had a bad minute: on a live floor the sim-*
+    // entries are dropped from the chain and the turn fails loudly instead.
+    const chain =
+      config.isProduction || isLiveTelephony() ? chainIn.filter((e) => !e.providerId.startsWith('sim-')) : chainIn;
     const errors: string[] = [];
     for (const entry of chain) {
       if (this.isCoolingDown(entry.providerId)) continue;

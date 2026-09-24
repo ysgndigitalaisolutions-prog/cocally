@@ -4,6 +4,8 @@ export interface NormalizedPhone {
   e164: string;
   lineType: 'MOBILE' | 'LANDLINE' | 'UNKNOWN';
   areaHint: string;
+  /** National-format digits (e.g. 0412345678) for blocklist equality checks. */
+  national: string;
 }
 
 /**
@@ -17,14 +19,17 @@ export function normalizePhone(raw: string, region: string): { ok: true; value: 
   const parsed = parsePhoneNumberFromString(cleaned, region as never);
   if (!parsed) return { ok: false, reason: 'unparseable number' };
   if (!parsed.isValid()) return { ok: false, reason: 'invalid number for region' };
+  // A valid NZ/UK number is still not dialable under an AU pack: it would pass
+  // import, fail every DNC wash and sit DNC_WASH_STALE forever.
+  if (parsed.country && parsed.country !== region) return { ok: false, reason: `number is not in region ${region}` };
+  const national = parsed.formatNational().replace(/\D/g, '');
 
   const type = parsed.getType();
   const lineType = type === 'MOBILE' ? 'MOBILE' : type === 'FIXED_LINE' ? 'LANDLINE' : 'UNKNOWN';
 
   // National area hint for geo CLI matching and timezone inference:
   // AU landlines → "02"/"03"/"07"/"08"; mobiles → "04".
-  const national = parsed.formatNational().replace(/\D/g, '');
   const areaHint = national.slice(0, 2);
 
-  return { ok: true, value: { e164: parsed.number, lineType, areaHint } };
+  return { ok: true, value: { e164: parsed.number, lineType, areaHint, national } };
 }

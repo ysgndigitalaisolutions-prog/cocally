@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsString, IsBoolean } from 'class-validator';
 import { Model, Types } from 'mongoose';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/auth/jwt-auth.guard';
@@ -12,6 +12,11 @@ class CreateClientDto {
   @IsString()
   @IsNotEmpty()
   name: string;
+}
+
+class PauseDto {
+  @IsBoolean()
+  paused: boolean;
 }
 
 @Controller('tenants')
@@ -31,8 +36,8 @@ export class TenantsController {
   /** Global pause-everything control per ADM-03 / kill switch per PLAT-08. */
   @Post('pause')
   @Roles('OWNER', 'ADMIN')
-  async pause(@CurrentUser() user: AuthenticatedUser, @Body() body: { paused: boolean }) {
-    await this.tenantModel.updateOne({ _id: new Types.ObjectId(user.tenantId) }, { paused: Boolean(body.paused) }).exec();
+  async pause(@CurrentUser() user: AuthenticatedUser, @Body() body: PauseDto) {
+    await this.tenantModel.updateOne({ _id: new Types.ObjectId(user.tenantId) }, { paused: body.paused }).exec();
     await this.audit.record({
       tenantId: user.tenantId,
       actorId: user.userId,

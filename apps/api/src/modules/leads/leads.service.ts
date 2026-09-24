@@ -12,6 +12,7 @@ import { SuppressionEntry, SuppressionEntryDocument } from '../../schemas/suppre
 import { AuditService } from '../audit/audit.service';
 import { CountryPacksService } from '../country-packs/country-packs.service';
 import { normalizePhone } from './phone.util';
+import { normaliseAuState, timezoneFromAuPostcode } from './au-geo';
 
 export interface ColumnMapping {
   phone: string;
@@ -114,7 +115,11 @@ export class LeadsService {
 
     let rows: Record<string, string>[];
     try {
-      rows = parse(input.csvContent, { columns: true, skip_empty_lines: true, trim: true });
+      // `bom`: Excel's "CSV UTF-8" prefixes a BOM that would otherwise turn the
+      // first header into '\uFEFFphone' and reject every row as 'empty number'.
+      // `relax_column_count`: one ragged row (a trailing "Total: 500" line) must
+      // not abort a 100k import; short rows are simply missing fields.
+      rows = parse(input.csvContent, { columns: true, skip_empty_lines: true, trim: true, bom: true, relax_column_count: true });
     } catch (err) {
       throw new BadRequestException(`CSV parse failed: ${(err as Error).message}`);
     }
@@ -147,9 +152,11 @@ export class LeadsService {
         rejects.push({ row: i + 1, reason: normalized.reason, raw });
         continue;
       }
-      const { e164, lineType, areaHint } = normalized.value;
+      const { e164, lineType, areaHint, national } = normalized.value;
 
-      if (pack.emergencyBlocklist.some((b) => e164.endsWith(b))) {
+      // Equality on the national number: `endsWith` rejected every valid number
+      // that happened to end in 000/112/106.
+      if (pack.emergencyBlocklist.some((b) => national === b || e164 === b)) {
         rejects.push({ row: i + 1, reason: 'blocked number', raw });
         continue;
       }
@@ -161,8 +168,9 @@ export class LeadsService {
       }
       seenInFile.add(e164);
 
-      const state = (raw[input.mapping.state ?? ''] ?? '').toUpperCase() || undefined;
-      const timezone = this.inferTimezone(pack.timezoneHints, pack.timezones, areaHint, state);
+      const state = normaliseAuState(raw[input.mapping.state ?? ''] ?? '');
+      const postcode = (raw[input.mapping.postcode ?? ''] ?? '').trim() || undefined;
+      const timezone = this.inferTimezone(pack.timezoneHints, pack.timezones, areaHint, state, postcode);
 
       // Keep only genuinely custom columns — storing the whole raw row duplicated
       // every mapped field on every document, which is real money at 100k leads.
@@ -262,6 +270,7 @@ export class LeadsService {
     zones: string[],
     areaHint: string,
     state?: string,
+    postcode?: string,
   ): string {
     const stateZones: Record<string, string> = {
       NSW: 'Australia/Sydney',
@@ -274,9 +283,13 @@ export class LeadsService {
       NT: 'Australia/Darwin',
     };
     if (state && stateZones[state]) return stateZones[state]!;
+    // Postcode beats the area code: 08 covers SA, WA and NT, and every mobile is 04.
+    const byPostcode = timezoneFromAuPostcode(postcode);
+    if (byPostcode) return byPostcode;
     if (hints[areaHint]) return hints[areaHint]!;
     return zones[0] ?? 'UTC';
   }
+
 
   /**
    * Outcome-driven retry matrix per LEAD-04: apply the campaign's rule for
@@ -289,7 +302,9 @@ export class LeadsService {
     const campaign = lead.campaignId ? await this.campaignModel.findById(lead.campaignId).lean().exec() : null;
     const matrix = campaign?.retryMatrix?.length ? campaign.retryMatrix : DEFAULT_RETRY_MATRIX;
 
-    lead.attempts += 1;
+    // A FAILED outcome is our problem (trunk/congestion), not the lead's:
+    // it must not shorten the lead's life the way a genuine miss does.
+    if (outcome !== 'FAILED') lead.attempts += 1;
     lead.lockedAt = undefined;
     lead.timeline.push({ at: new Date(), kind: 'CALL', detail: `Call outcome: ${outcome}`, callId });
 

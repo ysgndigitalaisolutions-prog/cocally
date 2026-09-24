@@ -21,7 +21,7 @@ export class AuditController {
       action,
       actions: actions ? actions.split(',').map((a) => a.trim()).filter(Boolean) : undefined,
       entityType,
-      limit: limit ? Number(limit) : undefined,
+      limit: limit && Number.isFinite(Number(limit)) && Number(limit) > 0 ? Number(limit) : undefined,
     });
   }
 }

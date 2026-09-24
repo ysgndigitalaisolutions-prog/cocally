@@ -55,6 +55,10 @@ async function seedDemoLogins(db: Db, tenantId: Types.ObjectId): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (config.isProduction && !process.argv.includes('--force')) {
+    console.error('Refusing to seed demo data in production (use provision-tenant, or pass --force).');
+    process.exit(2);
+  }
   await mongoose.connect(config.mongoUri);
   const db = mongoose.connection.db!;
 

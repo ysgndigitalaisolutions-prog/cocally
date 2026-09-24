@@ -186,7 +186,12 @@ LeadSchema.pre('save', function capTimeline(next) {
 });
 
 // Dedup on import and cross-list per LEAD-02.
-LeadSchema.index({ tenantId: 1, campaignId: 1, phone: 1 });
+// Unique per campaign so two overlapping imports (double-clicked Import) cannot
+// both insert the same number; the import's race handler counts the loser as a duplicate.
+LeadSchema.index(
+  { tenantId: 1, campaignId: 1, phone: 1 },
+  { unique: true, partialFilterExpression: { campaignId: { $type: 'objectId' } } },
+);
 LeadSchema.index({ tenantId: 1, phone: 1 });
 // Dialer scan: dialable leads by campaign. `manualClaimedBy` is in the dialer's
 // filter, so include it to keep the scan covered at 100k+ leads.

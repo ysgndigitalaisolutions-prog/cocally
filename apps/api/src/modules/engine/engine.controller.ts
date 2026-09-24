@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Logger, NotFoundException, Param, Post, UseGuards } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { AMD_CLASSES, computeScore, redactPii, scoreAction, type AmdClass } from '@cocally/shared';
-import { IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Matches, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { Model, Types } from 'mongoose';
 import { Public } from '../../common/auth/public.decorator';
 import { ServiceTokenGuard } from '../../common/auth/service-token.guard';
@@ -14,6 +14,8 @@ import { SuppressionService } from '../leads/suppression.service';
 import { PalService } from '../providers/pal.service';
 import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { TransfersService } from '../workspace/transfers.service';
+import { SchedulingService } from '../leads/scheduling.service';
+import { WebhooksService } from '../webhooks/webhooks.service';
 import { interpolate } from './runtime';
 
 /**
@@ -27,7 +29,8 @@ import { interpolate } from './runtime';
  * polite about it. A prompt is not a compliance control — it is a suggestion
  * with a temperature setting. This is the control.
  */
-const OPT_OUT_PATTERN = /\b(don'?t call|do not call|stop calling|remove me|take me off|unsubscribe)\b/i;
+const OPT_OUT_PATTERN =
+  /\b(don'?t (call|ring|contact|phone)( me)?( again| back)?|do not (call|ring|contact)|stop (calling|ringing)|remove me|take me off|unsubscribe|no more calls|delete my (number|details)|do[ -]not[ -]call (list|register)|not interested in (any|being) call)/i;
 
 /** Spoken when an opt-out rail fires. Matches the simulation path's wording. */
 const OPT_OUT_CLOSING_LINE =
@@ -50,6 +53,25 @@ class TranscriptTurnDto {
   @IsString()
   @IsNotEmpty()
   text: string;
+}
+
+class TurnMetricsDto {
+  @IsInt() @Min(0) eouDelayMs: number;
+  @IsInt() @Min(0) transcriptionDelayMs: number;
+  @IsInt() @Min(0) llmTtftMs: number;
+  @IsInt() @Min(0) ttsTtfbMs: number;
+  @IsInt() @Min(0) totalMs: number;
+  @IsOptional() @IsString() @MaxLength(80) llmModel?: string;
+  @IsOptional() @IsString() @MaxLength(40) ttsProvider?: string;
+}
+
+class ComplianceEventDto {
+  @IsIn(['RECORDING_DISCLOSURE', 'AI_IDENTIFICATION', 'OPT_OUT_OFFERED', 'CONSENT'])
+  kind: 'RECORDING_DISCLOSURE' | 'AI_IDENTIFICATION' | 'OPT_OUT_OFFERED' | 'CONSENT';
+
+  @IsString()
+  @MaxLength(500)
+  detail: string;
 }
 
 class TransferRequestDto {
@@ -102,6 +124,8 @@ export class EngineController {
     private readonly transfers: TransfersService,
     private readonly pal: PalService,
     private readonly suppression: SuppressionService,
+    private readonly scheduling: SchedulingService,
+    private readonly webhooks: WebhooksService,
   ) {}
 
   @Public()
@@ -111,6 +135,12 @@ export class EngineController {
     if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
     const call = await this.callModel.findById(new Types.ObjectId(id)).lean().exec();
     if (!call) throw new NotFoundException('Call not found');
+    // A manual (human) dial or a predictive bridge has no AI leg. The worker
+    // auto-joins every room LiveKit creates, so it must be told to leave
+    // rather than speak its disclosure over a human agent's call.
+    if (call.manual || call.agentId || !call.flowVersionId) {
+      return { callId: id, manual: true, instructions: null };
+    }
 
     const [campaign, lead, flowVersion] = await Promise.all([
       this.campaignModel.findById(call.campaignId).lean().exec(),
@@ -165,8 +195,60 @@ export class EngineController {
       transcriptionMode: campaign.transcriptionMode,
       transferAcceptWindowSeconds: campaign.transferAcceptWindowSeconds,
       firstTurnHint: `Greet ${vars.firstName || 'them'}, give the AI + recording disclosure in one sentence, and ask if now is a good moment.`,
+      /** Spoken verbatim by the worker before the LLM's first turn, and logged as a compliance event. */
+      disclosureLine: `${campaign.aiSelfIdentification ? `Hi ${vars.firstName || 'there'}. ${aiDisclosure} ${recordingDisclosure}` : `Hi ${vars.firstName || 'there'}. ${recordingDisclosure}`} Is now a good moment for a quick chat?`,
       instructions,
     };
+  }
+
+  /**
+   * Per-turn voice latency from the worker: end-of-utterance → LLM first
+   * token → TTS first byte. Stored on the call so p50/p95 show on the
+   * dashboard and a slow call can be found from the Calls page.
+   */
+  @Public()
+  @UseGuards(ServiceTokenGuard)
+  @Post('calls/:id/metrics')
+  async metrics(@Param('id') id: string, @Body() dto: TurnMetricsDto) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
+    const res = await this.callModel
+      .updateOne(
+        { _id: new Types.ObjectId(id) },
+        {
+          $push: {
+            'timings.turnLatencies': dto.totalMs,
+            'timings.turns': {
+              $each: [{ at: new Date(), eou: dto.eouDelayMs, stt: dto.transcriptionDelayMs, llm: dto.llmTtftMs, tts: dto.ttsTtfbMs, total: dto.totalMs }],
+              $slice: -200,
+            },
+          },
+          $min: { 'timings.ttsFirstByte': dto.ttsTtfbMs, 'timings.sttFirstPartial': dto.transcriptionDelayMs },
+          ...(dto.llmModel || dto.ttsProvider
+            ? { $set: { ...(dto.llmModel ? { 'providersUsed.llm': dto.llmModel } : {}), ...(dto.ttsProvider ? { 'providersUsed.tts': dto.ttsProvider } : {}) } }
+            : {}),
+        },
+      )
+      .exec();
+    if (res.matchedCount === 0) throw new NotFoundException('Call not found');
+    if (dto.totalMs > 1500) this.logger.warn(`slow AI turn on call ${id}: ${dto.totalMs} ms (eou ${dto.eouDelayMs}, llm ${dto.llmTtftMs}, tts ${dto.ttsTtfbMs})`);
+    return { ok: true };
+  }
+
+  /** Worker-reported compliance events (the scripted disclosure, an IVR opt-out prompt…). */
+  @Public()
+  @UseGuards(ServiceTokenGuard)
+  @Post('calls/:id/compliance')
+  async compliance(@Param('id') id: string, @Body() dto: ComplianceEventDto) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
+    const call = await this.callModel.findById(new Types.ObjectId(id)).select('startedAt').lean().exec();
+    if (!call) throw new NotFoundException('Call not found');
+    await this.callModel
+      .updateOne(
+        { _id: call._id },
+        { $push: { complianceEvents: { atMs: Date.now() - call.startedAt.getTime(), kind: dto.kind, detail: dto.detail } } },
+      )
+      .exec();
+    return { ok: true };
   }
 
   /**
@@ -184,15 +266,19 @@ export class EngineController {
     if (!call) throw new NotFoundException('Call not found');
 
     const atMs = Date.now() - call.startedAt.getTime();
-    call.transcript.push({
-      leg: call.agentId ? 'HUMAN' : 'AI',
+    const turn = {
+      leg: call.agentId ? ('HUMAN' as const) : ('AI' as const),
       speaker: dto.speaker,
       text: dto.text,
       redactedText: redactPii(dto.text),
       startMs: atMs,
       endMs: atMs,
-    });
-    await call.save();
+    };
+    // Atomic append: the AI's and the customer's turns arrive concurrently,
+    // and a load-modify-save on the same document raced into VersionErrors
+    // that dropped turns (and the opt-out check for them).
+    await this.callModel.updateOne({ _id: call._id }, { $push: { transcript: turn } }).exec();
+    call.transcript.push(turn);
 
     const tenantId = call.tenantId.toString();
     const agentId = call.agentId?.toString() ?? null;
@@ -377,6 +463,9 @@ export class EngineController {
           jsonMode: true,
           temperature: 0,
           maxTokens: 300,
+          // Structured extraction, not conversation: the small/fast model is
+          // plenty and keeps the big model's rate limit for the live voice turn.
+          speedTier: 'fast',
         },
       );
       extracted = JSON.parse(completion.text);
@@ -481,6 +570,26 @@ export class EngineController {
       whisperEnabled: campaign.whisperEnabled,
       acceptWindowSeconds: campaign.transferAcceptWindowSeconds,
     });
+    const tenantId = call.tenantId.toString();
+    if (result === 'BRIDGED') {
+      await this.webhooks.dispatch(tenantId, 'lead.qualified', { leadId: call.leadId.toString(), callId: id, score: call.finalScore });
+      await this.webhooks.dispatch(tenantId, 'transfer.accepted', { leadId: call.leadId.toString(), callId: id });
+    } else {
+      // Nobody free: the AI promises a callback, so make it a real one the
+      // closer worklist will surface, and put the call back in conversation
+      // so the floor card stops showing a pending transfer.
+      await this.callModel.updateOne({ _id: call._id, state: 'TRANSFER_PENDING' }, { state: 'IN_CONVERSATION' }).exec();
+      await this.scheduling
+        .scheduleCallback({
+          tenantId,
+          leadId: call.leadId.toString(),
+          campaignId: call.campaignId.toString(),
+          dueAt: new Date(Date.now() + 10 * 60_000),
+          handler: 'HUMAN',
+          notes: `AI-qualified (score ${call.finalScore}); no closer free at transfer time.`,
+        })
+        .catch((err: Error) => this.logger.warn(`could not schedule callback for call ${id}: ${err.message}`));
+    }
     return { result };
   }
 }

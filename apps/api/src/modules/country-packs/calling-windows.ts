@@ -4,6 +4,12 @@ import type { CallingWindow } from '../../schemas/country-pack.schema';
 export interface WindowRules {
   callingWindows: CallingWindow[];
   publicHolidays: string[];
+  publicHolidaysByZone?: Record<string, string[]>;
+}
+
+function isHoliday(rules: WindowRules, timezone: string, isoDate: string): boolean {
+  if (rules.publicHolidays.includes(isoDate)) return true;
+  return (rules.publicHolidaysByZone?.[timezone] ?? []).includes(isoDate);
 }
 
 /**
@@ -15,7 +21,7 @@ export function isWithinCallingWindow(rules: WindowRules, timezone: string, at: 
   const local = DateTime.fromJSDate(at, { zone: timezone });
   if (!local.isValid) return false;
 
-  if (rules.publicHolidays.includes(local.toISODate() ?? '')) return false;
+  if (isHoliday(rules, timezone, local.toISODate() ?? '')) return false;
 
   const windows = rules.callingWindows.filter((w) => w.weekday === local.weekday);
   if (windows.length === 0) return false;
@@ -38,7 +44,7 @@ export function nextWindowOpen(rules: WindowRules, timezone: string, from: Date 
 
   for (let day = 0; day < 14; day += 1) {
     const date = cursor.plus({ days: day }).startOf('day');
-    if (rules.publicHolidays.includes(date.toISODate() ?? '')) continue;
+    if (isHoliday(rules, timezone, date.toISODate() ?? '')) continue;
     const windows = rules.callingWindows
       .filter((w) => w.weekday === date.weekday)
       .sort((a, b) => a.start.localeCompare(b.start));

@@ -26,6 +26,8 @@ RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
 
 FROM node:${NODE_VERSION}-alpine AS runtime
 ENV NODE_ENV=production
+# Business-day boundaries (budgets, daily counters, bare-date filters) are local, not UTC.
+ENV TZ=Australia/Sydney
 WORKDIR /app
 RUN apk add --no-cache curl
 COPY --from=prod-deps /app/node_modules ./node_modules

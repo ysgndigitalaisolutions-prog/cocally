@@ -65,3 +65,21 @@ That's the whole demo. Stop the worker with Ctrl-C.
    the media plane — no self-hosting for demos.
 3. **Warm transfer** — a human joins the same LiveKit room (browser WebRTC via the
    LiveKit client SDK) and the AI worker disconnects on accept.
+
+
+## Latency: how the voice loop is tuned (pilot 2026-09)
+
+Voice-to-voice latency = end-of-turn detection → LLM first token → TTS first byte, plus network. Every turn is measured by the worker (`metrics_collected`) and posted to `POST /engine/calls/:id/metrics`; the dashboard shows p50/p95 and each call's deep-dive shows the breakdown. Budget per stage is logged as a warning when exceeded (`LATENCY_BUDGET_S`).
+
+What is in place:
+
+- **Prewarmed processes** (`prewarm_fnc`, `WORKER_IDLE_PROCESSES`): Silero VAD and the end-of-turn model are loaded once per process, not per call.
+- **Word-level end-of-turn model** (`turn_detector` English) with dynamic endpointing `min_delay 0.3 s / max 2.0 s`, adaptive interruption (backchannels do not cut the agent off), **preemptive LLM + TTS** (generation starts before the turn is confirmed).
+- **Pre-rendered disclosure**: the mandatory first line is synthesised while the phone is still ringing and played the instant the customer picks up; it already ends with "is now a good moment?", so no LLM round trip happens at the most sensitive moment.
+- **Short spoken turns** (`LLM_MAX_TOKENS=160`) so TTS starts sooner; Groq `llama-3.3-70b-versatile` by default, `llama-3.1-8b-instant` available via `LLM_MODEL` when raw speed beats nuance.
+- **TTS choice by env**: Deepgram Aura-2 (default), ElevenLabs Flash v2.5 (~75 ms TTFB) or Cartesia Sonic-2 (~90 ms) via `TTS_PROVIDER`.
+- **PSTN noise cancellation** (`NOISE_CANCELLATION=1`, LiveKit BVCTelephony) so the STT hears words, not line hiss.
+- **Nothing on the speech path waits on the engine**: transcript/scoring posts are fire-and-forget; the engine's per-turn fact extraction runs on the fast model tier and every provider call is time-boxed.
+- **No dead air**: comfort audio/hold music plays from the moment a transfer is requested until the human agent's audio track appears.
+
+Where the milliseconds go from Sydney (worker + LiveKit `aus`): Deepgram and Groq are US-hosted, so expect ~150 ms RTT on each of STT-final, LLM and TTS. Realistic target is 700–900 ms p50 voice-to-voice; the dashboard tile tells you what you actually get. Run the worker in `australia-southeast1` next to the LiveKit AU SIP region; do not run it in a US region "because the AI providers are there" — the customer's audio path matters more than the model's.

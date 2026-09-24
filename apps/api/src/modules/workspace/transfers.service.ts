@@ -43,6 +43,8 @@ export class TransfersService {
     callId: string;
     whisperEnabled: boolean;
     acceptWindowSeconds: number;
+    /** Facts captured so far in this conversation (not yet persisted on the lead in simulation). */
+    facts?: Record<string, unknown>;
   }): Promise<'BRIDGED' | 'NO_AGENT' | 'FAILED'> {
     const call = await this.callModel.findById(input.callId).exec();
     if (!call) return 'FAILED';
@@ -81,7 +83,7 @@ export class TransfersService {
         continue;
       }
 
-      const card = this.buildCard(transfer._id.toString(), call, lead, campaign.name, input.acceptWindowSeconds);
+      const card = this.buildCard(transfer._id.toString(), call, lead, campaign.name, input.acceptWindowSeconds, input.facts);
       transfer.state = 'OFFERED';
       transfer.attempts.push({ agentId: agent._id.toString(), offeredAt: new Date(), result: 'PENDING' });
       transfer.card = card as unknown as Record<string, unknown>;
@@ -101,21 +103,47 @@ export class TransfersService {
       }
 
       if (accepted) {
+        // The customer may have hung up inside the accept window (live path:
+        // CallProgressService already finalised the call). Bridging must be a
+        // conditional write against a still-live call, otherwise the accept
+        // resurrects a COMPLETED call, pins the agent ON_CALL in an empty
+        // room and the record shows as live forever.
+        const bridgedAt = new Date();
+        const deadAirMs = Date.now() - handoffStarted;
+        const bridgedCall = await this.callModel
+          .findOneAndUpdate(
+            { _id: call._id, state: { $in: ['TRANSFER_PENDING', 'IN_CONVERSATION', 'ON_HOLD', 'AMD_CLASSIFYING'] } },
+            { $set: { agentId: agent._id, state: 'BRIDGED', bridgedAt, 'timings.transferDeadAirMs': deadAirMs } },
+            { new: true },
+          )
+          .exec();
+        if (!bridgedCall) {
+          this.logger.warn(`transfer ${transfer._id} accepted by ${agent.name} but call ${call._id} is no longer live`);
+          transfer.state = 'FALLBACK';
+          await transfer.save();
+          await this.presence.release(agent._id.toString());
+          this.gateway.cancelTransferOffer(agent._id.toString(), transfer._id.toString(), 'the customer hung up');
+          return 'FAILED';
+        }
         transfer.state = 'BRIDGED';
         transfer.acceptedAgentId = agent._id;
-        transfer.bridgedAt = new Date();
-        transfer.bridgeDeadAirMs = Date.now() - handoffStarted;
+        transfer.bridgedAt = bridgedAt;
+        transfer.bridgeDeadAirMs = deadAirMs;
         await transfer.save();
 
         await this.presence.markOnCall(agent._id.toString());
+        // Keep the caller's in-memory document in step with what was committed.
         call.agentId = agent._id;
         call.state = 'BRIDGED';
-        call.bridgedAt = new Date();
-        call.timings.transferDeadAirMs = transfer.bridgeDeadAirMs;
-        await call.save();
+        call.bridgedAt = bridgedAt;
+        call.timings.transferDeadAirMs = deadAirMs;
 
-        // Sticky preference for future callbacks per XFER-01.
+        // Sticky preference for future callbacks per XFER-01. The lead-state
+        // transition lives here so the live (worker) path records TRANSFERRED
+        // exactly like the simulation path does.
         lead.preferredAgentId = agent._id;
+        lead.state_ = 'TRANSFERRED';
+        lead.lastContactedAt = new Date();
         lead.timeline.push({ at: new Date(), kind: 'TRANSFER', detail: `Bridged to agent ${agent.name}`, callId: call._id.toString() });
         await lead.save();
 
@@ -128,7 +156,11 @@ export class TransfersService {
 
       // Release the reserved agent back to the pool and cascade.
       await this.presence.release(agent._id.toString());
-      this.gateway.cancelTransferOffer(agent._id.toString(), transfer._id.toString(), 'offer window elapsed');
+      this.gateway.cancelTransferOffer(
+        agent._id.toString(),
+        transfer._id.toString(),
+        attempt?.result === 'DECLINED' ? 'declined' : 'offer window elapsed',
+      );
       excludeIds.push(agent._id.toString());
       await transfer.save();
     }
@@ -153,6 +185,33 @@ export class TransfersService {
         },
       });
     });
+  }
+
+  /**
+   * The call ended while an offer was still out (customer hung up during the
+   * accept window): resolve it as not accepted so the cascade stops and the
+   * reserved agent is released, and take the card off their screen.
+   */
+  async cancelOffersForCall(callId: string, reason: string): Promise<void> {
+    for (const [transferId, pending] of this.pendingOffers) {
+      const transfer = await this.transferModel.findById(transferId).select('callId').lean().exec();
+      if (transfer?.callId?.toString() !== callId) continue;
+      this.gateway.cancelTransferOffer(pending.agentId, transferId, reason);
+      pending.resolve(false);
+    }
+  }
+
+  /**
+   * The offer currently waiting on this agent, if any — so a reloaded browser
+   * can re-render the card instead of sitting RESERVED with nothing to click.
+   */
+  async pendingOfferFor(agentId: string): Promise<TransferCard | null> {
+    for (const [transferId, pending] of this.pendingOffers) {
+      if (pending.agentId !== agentId) continue;
+      const transfer = await this.transferModel.findById(transferId).select('card').lean().exec();
+      return (transfer?.card as unknown as TransferCard) ?? null;
+    }
+    return null;
   }
 
   /** Agent one-click accept per WS-03. */
@@ -180,6 +239,7 @@ export class TransfersService {
     lead: LeadDocument,
     campaignName: string,
     acceptWindowSeconds: number,
+    liveFacts?: Record<string, unknown>,
   ): TransferCard {
     const factLabels: Record<string, string> = {
       owner: 'Owns home',
@@ -189,7 +249,8 @@ export class TransfersService {
       roofSuitable: 'Roof suitable',
       appointmentInterest: 'Wants appointment',
     };
-    const facts = Object.entries(lead.facts ?? {}).map(([key, value]) => ({
+    const merged = { ...(lead.facts ?? {}), ...(liveFacts ?? {}) };
+    const facts = Object.entries(merged).map(([key, value]) => ({
       label: factLabels[key] ?? key,
       value: String(value),
       confirmed: Boolean(value),
@@ -207,8 +268,8 @@ export class TransfersService {
       score: call.finalScore,
       facts,
       flaggedObjection: openObjection,
-      proposedAppointment: (lead.facts?.['appointmentSlot'] as string) ?? null,
-      suggestedOpener: this.buildOpener(lead, openObjection),
+      proposedAppointment: (merged['appointmentSlot'] as string) ?? null,
+      suggestedOpener: this.buildOpener(lead, openObjection, merged),
       acceptDeadline: Date.now() + acceptWindowSeconds * 1000,
     };
   }
@@ -218,12 +279,12 @@ export class TransfersService {
    * raw summary blob (name/score/facts already render structurally on the card);
    * it reflects the lead's context — an open objection or appointment intent.
    */
-  private buildOpener(lead: LeadDocument, openObjection: string | null): string {
+  private buildOpener(lead: LeadDocument, openObjection: string | null, facts?: Record<string, unknown>): string {
     const name = lead.firstName ?? 'there';
     if (openObjection) {
       return `Hi ${name}, thanks for holding — I know you mentioned ${openObjection.replace(/_/g, ' ')}, let me help sort that out.`;
     }
-    if (lead.facts?.['appointmentInterest']) {
+    if ((facts ?? lead.facts)?.['appointmentInterest']) {
       return `Hi ${name}, thanks for holding — I understand you're keen on a free solar assessment. Let me lock in a time that suits you.`;
     }
     return `Hi ${name}, thanks for chatting with our assistant — let me confirm a couple of details and see how we can help.`;

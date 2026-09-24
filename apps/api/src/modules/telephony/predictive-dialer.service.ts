@@ -18,6 +18,7 @@ import { SuppressionService } from '../leads/suppression.service';
 import { PresenceService } from '../workspace/presence.service';
 import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { CliService } from './cli.service';
+import { startOfToday } from './dialer.service';
 
 export type PredictiveBlockReason =
   | 'DISABLED'
@@ -53,11 +54,6 @@ type CapacityVerdict =
   | { blocked: PredictiveBlockReason; detail: string; capacity: 0 }
   | { blocked: null; detail: string; capacity: number };
 
-function startOfToday(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
 
 /**
  * Ratio / adaptive dialing for the HUMAN-agent floor — ViciDial's actual
@@ -265,6 +261,14 @@ export class PredictiveDialerService {
 
     if (verdict.blocked) {
       return { ...base, dialing: false, reason: verdict.blocked, detail: verdict.detail };
+    }
+    if (isLiveTelephony()) {
+      return {
+        ...base,
+        dialing: false,
+        reason: 'LIVE_TRUNK_UNSUPPORTED' as never,
+        detail: 'Predictive (human-agent) dialing is not available on the live trunk yet — use manual dial or an AI-fronted campaign.',
+      };
     }
     if (dialableLeads === 0) {
       return { ...base, dialing: false, reason: 'NO_DIALABLE_LEADS', detail: 'No leads left to dial right now.' };

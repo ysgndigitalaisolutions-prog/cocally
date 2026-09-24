@@ -2,7 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Interval } from '@nestjs/schedule';
 import { FilterQuery, Model, Types } from 'mongoose';
-import { isLiveTelephony } from '../../common/config';
+import { DateTime } from 'luxon';
+import { LIVE_CALL_STATES } from '@cocally/shared';
+import { config, isLiveTelephony } from '../../common/config';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
@@ -56,16 +58,13 @@ type CapacityVerdict =
   | { blocked: DialBlockReason; detail: string; resumesAt: Date | null; capacity: 0 }
   | { blocked: null; detail: string; resumesAt: null; capacity: number };
 
-function startOfToday(): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d;
+/** Start of the business day in the configured business timezone (not the server's). */
+export function startOfToday(): Date {
+  return DateTime.now().setZone(config.businessTimezone).startOf('day').toJSDate();
 }
 
-function nextMidnight(): Date {
-  const d = new Date();
-  d.setHours(24, 0, 0, 0);
-  return d;
+export function nextMidnight(): Date {
+  return DateTime.now().setZone(config.businessTimezone).plus({ days: 1 }).startOf('day').toJSDate();
 }
 
 /**
@@ -329,10 +328,23 @@ export class DialerService {
             ],
           },
           { lockedAt: new Date() },
-          { sort: { nextAttemptAt: 1 }, new: true },
+          { sort: { nextAttemptAt: 1 }, new: false },
         )
         .exec();
       if (!lead) break;
+      // A stale lock is reclaimed after 10 minutes — but a conversation can
+      // legitimately run longer than that. If the lead still has a live call,
+      // leave it alone (the lock is now refreshed, so it is not reconsidered
+      // for another 10 minutes).
+      if (lead.lockedAt) {
+        const live = await this.callModel
+          .findOne({ leadId: lead._id, state: { $in: [...LIVE_CALL_STATES] } })
+          .select('_id')
+          .lean()
+          .exec();
+        if (live) continue;
+      }
+      lead.lockedAt = new Date();
 
       // Legal calling window in the lead's local timezone per LEAD-06.
       if (!isWithinCallingWindow(pack, lead.timezone)) {
@@ -350,6 +362,7 @@ export class DialerService {
         countryPackCode: campaign.countryPackCode,
         dncEnforced: pack.dnc.enforced,
         frequencyCapDays: campaign.frequencyCapDays,
+        skipFrequencyCap: lead.state_ === 'CALLBACK',
       });
       if (!verdictSuppression.allowed) {
         lead.lockedAt = undefined;

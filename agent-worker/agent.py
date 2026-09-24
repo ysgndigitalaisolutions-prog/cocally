@@ -41,11 +41,43 @@ from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, RoomInputOptions, function_tool
 from livekit.plugins import deepgram, openai, silero
 
+# Local end-of-turn model: decides "they finished speaking" from the words, not
+# from a fixed silence gap, so `min_delay` can be short without cutting people
+# off mid-sentence. Loaded once per process in `prewarm`.
+import warnings
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    from livekit.plugins.turn_detector.english import EnglishModel
+
+try:  # optional: LiveKit Cloud background-voice cancellation tuned for PSTN audio
+    from livekit.plugins import noise_cancellation as _nc
+except Exception:  # noqa: BLE001
+    _nc = None
+
 load_dotenv()
 logger = logging.getLogger("cocally-agent")
 
-ENGINE_BASE_URL = os.getenv("ENGINE_BASE_URL")
+def _engine_base_url() -> str | None:
+    """Accept both `http://api:4000` and `http://api:4000/api/v1` — the compose
+    file set the former while every route here expects the versioned prefix,
+    which would have made every brief fetch a 404 in production."""
+    raw = (os.getenv("ENGINE_BASE_URL") or "").rstrip("/")
+    if not raw:
+        return None
+    return raw if raw.endswith("/api/v1") else f"{raw}/api/v1"
+
+
+ENGINE_BASE_URL = _engine_base_url()
 ENGINE_SERVICE_TOKEN = os.getenv("ENGINE_SERVICE_TOKEN")
+
+# ── Speech stack selection (env-driven so the floor can A/B without a deploy) ──
+LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "160"))  # short spoken turns → TTS starts sooner
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | elevenlabs | cartesia
+TTS_VOICE = os.getenv("TTS_VOICE")  # provider-specific voice/model id; sensible default per provider
+NOISE_CANCELLATION = os.getenv("NOISE_CANCELLATION", "1") not in ("0", "false", "no")
+WORKER_IDLE_PROCESSES = int(os.getenv("WORKER_IDLE_PROCESSES", "2"))
 
 # Same variable the API reads (`config.floor.holdMusicUrl`). Set it in BOTH
 # environments: the API hands it to the agent's browser for hold, this worker
@@ -236,19 +268,43 @@ class Qualifier(Agent):
         if not self._call_id:
             return "Give me just a moment."
 
+        # The cascade can take a while (accept window × hops). Say so, then
+        # keep the line audibly alive with hold music for the whole wait —
+        # dead air here is where customers decide the call dropped.
+        stop = asyncio.Event()
+        handle = None
+        session = self.session_ref
+        if session is not None:
+            try:
+                await asyncio.wait_for(
+                    session.say("Great — let me get a specialist on the line for you, one moment.", allow_interruptions=False),
+                    timeout=15.0,
+                )
+                handle = session.say(
+                    "",
+                    audio=_comfort_audio(stop, self.output_sample_rate, self.hold_music_pcm),
+                    allow_interruptions=False,
+                    add_to_chat_ctx=False,
+                )
+            except Exception as e:  # noqa: BLE001 — silence is bad, a crashed worker is worse
+                logger.warning("could not start pre-transfer comfort audio: %s", e)
+
         result = await _post_transfer(self._call_id, reason)
         if result == "BRIDGED":
             # The human's browser is about to join this same room and take
-            # over the mic; the AI leg ends so there's only one voice. Kept
-            # deliberately vague ("give me a moment", not "connecting you to
-            # a specialist") — the handoff itself should feel invisible.
+            # over the mic; the AI leg ends so there's only one voice. The
+            # comfort audio keeps playing until their audio track appears.
             self.spawn(
-                _handoff(self._ctx, self.session_ref, self.hold_music_pcm, self.output_sample_rate)
+                _handoff(
+                    self._ctx, self.session_ref, self.hold_music_pcm, self.output_sample_rate,
+                    running=(stop, handle),
+                )
             )
-            return "Great, give me just one moment."
-        # NO_AGENT or FAILED: no one is free — be honest and close warmly
-        # instead of leaving the lead on hold indefinitely.
-        self.spawn(_no_agent_close(self._ctx))
+            return "One moment."
+        stop.set()
+        # NO_AGENT or FAILED: no one is free — be honest, close warmly, and
+        # actually hang up (the server has already booked the callback).
+        self.spawn(_no_agent_close(self._ctx, self._call_id, self.session_ref))
         return (
             "I'm sorry, everyone's a little busy right now — "
             "I'll have someone call you back shortly. Thanks for your time today."
@@ -433,13 +489,46 @@ async def _post_amd(call_id: str, amd_class: str, latency_ms: int | None) -> Non
         logger.warning("amd post failed: %s", e)
 
 
+async def _post_metrics(call_id: str, payload: dict) -> None:
+    if not (ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
+        return
+    url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/metrics"
+    headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
+    try:
+        async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json=payload, timeout=10) as r:
+            if not r.ok:
+                logger.debug("metrics post %s -> HTTP %s", call_id, r.status)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("metrics post failed: %s", e)
+
+
+async def _post_compliance(call_id: str, kind: str, detail: str) -> None:
+    if not (ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
+        return
+    url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/compliance"
+    headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
+    try:
+        async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json={"kind": kind, "detail": detail}, timeout=10) as r:
+            if not r.ok:
+                logger.warning("compliance post %s -> HTTP %s", call_id, r.status)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("compliance post failed: %s", e)
+
+
+# The server-side cascade offers the transfer to up to 10 agents for the
+# campaign's accept window each (13 s default, up to 120 s), so the request can
+# legitimately take minutes. A 30 s timeout used to report FAILED while the
+# server went on to bridge an agent into a room the AI had already left.
+TRANSFER_TIMEOUT_S = 10 * 120 + 15
+
+
 async def _post_transfer(call_id: str, reason: str) -> str:
     if not (ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
         return "FAILED"
     url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/transfer"
     headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
     try:
-        async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json={"reason": reason}, timeout=30) as r:
+        async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json={"reason": reason}, timeout=TRANSFER_TIMEOUT_S) as r:
             # Same 200-vs-201 mistake as _post_transcript — this was silently
             # turning every real BRIDGED result into a reported "FAILED".
             if r.ok:
@@ -732,6 +821,7 @@ async def _handoff(
     session: AgentSession | None,
     hold_music_pcm: bytes | None,
     sample_rate: int,
+    running: tuple[asyncio.Event, object | None] | None = None,
 ) -> None:
     """Cover the transfer hand-off with audio instead of silence.
 
@@ -752,11 +842,14 @@ async def _handoff(
     """
     stop = asyncio.Event()
     handle = None
+    if running is not None:
+        # Comfort audio is already playing from the transfer request; keep it.
+        stop, handle = running[0], running[1]
+    else:
+        # Don't step on the "give me just one moment" line we just returned.
+        await _wait_until_quiet(session)
 
-    # Don't step on the "give me just one moment" line we just returned.
-    await _wait_until_quiet(session)
-
-    if session is not None:
+    if session is not None and handle is None:
         try:
             handle = session.say(
                 "",
@@ -782,9 +875,72 @@ async def _handoff(
     )
 
 
-async def _no_agent_close(ctx: agents.JobContext) -> None:
-    await asyncio.sleep(4)
+async def _no_agent_close(ctx: agents.JobContext, call_id: str | None = None, session: AgentSession | None = None) -> None:
+    # Let the apology line finish, then hang up: leaving the SIP leg up left
+    # the customer on a silent line until they gave up.
+    await _wait_until_quiet(session)
+    await asyncio.sleep(1.5)
+    await _drop_customer_leg(ctx, call_id)
     ctx.shutdown(reason="no agent available")  # sync — not awaitable
+
+
+def _build_tts():  # noqa: ANN202 — plugin TTS types differ
+    """Pick the TTS by env. Time-to-first-byte is the single biggest lever on
+    how "instant" the agent feels, so the fastest streaming voices are first-class:
+      deepgram   aura-2  (~200 ms TTFB, default; same vendor as STT)
+      elevenlabs eleven_flash_v2_5 (~75 ms TTFB)
+      cartesia   sonic-2 (~90 ms TTFB)
+    A missing plugin/key falls back to Deepgram with a log line, never a crash."""
+    if TTS_PROVIDER == "elevenlabs" and os.environ.get("ELEVENLABS_API_KEY"):
+        try:
+            from livekit.plugins import elevenlabs
+
+            return elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=TTS_VOICE or "EXAVITQu4vr4xnSDxMaL")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("elevenlabs TTS unavailable (%s) — using Deepgram", e)
+    if TTS_PROVIDER == "cartesia" and os.environ.get("CARTESIA_API_KEY"):
+        try:
+            from livekit.plugins import cartesia
+
+            return cartesia.TTS(model="sonic-2", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("cartesia TTS unavailable (%s) — using Deepgram", e)
+    # Aura-1 (asteria) was tuned for lowest-latency demo speed and reads as
+    # fast/clipped on a real call. Aura-2 luna is calmer; hera/orpheus are
+    # alternatives. Deepgram has no speech-rate knob — pick the voice instead.
+    return deepgram.TTS(model=TTS_VOICE or "aura-2-luna-en")
+
+
+def prewarm(proc: agents.JobProcess) -> None:
+    """Load the VAD and end-of-turn models once per worker process, not once
+    per call: ~1 s of model loading used to sit between "customer answered" and
+    the first word on every single dial."""
+    proc.userdata["vad"] = silero.VAD.load(
+        # Phone audio: a slightly higher threshold ignores line hiss without
+        # missing a quiet speaker; short min-silence lets endpointing be fast.
+        activation_threshold=0.55,
+        min_speech_duration=0.05,
+        min_silence_duration=0.35,
+    )
+    proc.userdata["turn_detector"] = EnglishModel()
+
+
+async def _presynthesize(tts, text: str) -> list[rtc.AudioFrame]:  # noqa: ANN001
+    """Render a fixed line to audio ahead of time so it can play the instant
+    the customer picks up, instead of paying a TTS round trip on "hello"."""
+    frames: list[rtc.AudioFrame] = []
+    try:
+        async for chunk in tts.synthesize(text):
+            frames.append(chunk.frame)
+    except Exception as e:  # noqa: BLE001 — fall back to live synthesis
+        logger.warning("pre-synthesis failed (%s); the disclosure will be synthesised live", e)
+        return []
+    return frames
+
+
+async def _replay(frames: list[rtc.AudioFrame]) -> AsyncIterator[rtc.AudioFrame]:
+    for f in frames:
+        yield f
 
 
 async def entrypoint(ctx: agents.JobContext) -> None:
@@ -799,13 +955,31 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         pass
 
     brief = await _fetch_brief(call_id) if call_id else None
+    # A manual (human) dial or a predictive bridge has no AI leg. The worker is
+    # dispatched into every room LiveKit creates, so it has to leave on its own
+    # — otherwise it speaks its disclosure over the human agent's call.
+    if brief and brief.get("manual"):
+        logger.info("human-fronted call %s — AI leg not needed, leaving the room", call_id)
+        ctx.shutdown(reason="human-fronted call")
+        return
+    if call_id and brief is None:
+        # The engine is the source of the script AND of the opt-out/transfer
+        # rails. Without it this would be an unscripted, uncontrolled call.
+        logger.error("no brief for call %s (engine unreachable?) — leaving the room rather than ad-libbing", call_id)
+        ctx.shutdown(reason="engine brief unavailable")
+        return
     instructions = brief["instructions"] if brief else DEFAULT_INSTRUCTIONS
     first_turn = (
         brief["firstTurnHint"]
         if brief
         else "Greet the person, give the AI + recording disclosure in one sentence, and ask if now is a good moment."
     )
-    logger.info("starting agent (call=%s, brief=%s)", call_id, bool(brief))
+    logger.info("starting agent (call=%s, brief=%s, llm=%s, tts=%s)", call_id, bool(brief), LLM_MODEL, TTS_PROVIDER)
+
+    tts_engine = _build_tts()
+    # Render the disclosure while the phone is still ringing.
+    disclosure = (brief or {}).get("disclosureLine")
+    disclosure_task = asyncio.create_task(_presynthesize(tts_engine, disclosure)) if disclosure else None
 
     session = AgentSession(
         # Groq (OpenAI-compatible endpoint) for low-latency LLM; Deepgram for
@@ -823,23 +997,23 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # endpointing's raw-silence VAD, which is exactly what stalled.
         stt=deepgram.STT(model="nova-2-phonecall", utterance_end_ms=1000, endpointing_ms=25),
         llm=openai.LLM(
-            model="llama-3.3-70b-versatile",
+            model=LLM_MODEL,
             base_url="https://api.groq.com/openai/v1",
             api_key=os.environ["GROQ_API_KEY"],
+            max_completion_tokens=LLM_MAX_TOKENS,
+            timeout=20.0,
         ),
-        # Aura-1 (asteria) was tuned for lowest-latency demo speed and reads
-        # as fast/clipped on a real call. Deepgram's Aura TTS has no direct
-        # speech-rate knob, so "slower" means picking a calmer-cadence Aura-2
-        # voice, not a rate parameter. Other options to try: aura-2-hera-en
-        # (warm/measured), aura-2-orpheus-en (smooth), aura-2-andromeda-en.
-        tts=deepgram.TTS(model="aura-2-luna-en"),
-        vad=silero.VAD.load(),
+        tts=tts_engine,
+        vad=ctx.proc.userdata["vad"],
         # Uncompromising-on-latency tuning. The framework already implements
         # the full VAD-barge-in / cancellable-generation / adaptive-backchannel
         # pattern internally (confirmed: "adaptive interruption detector" and
         # "using preemptive generation" already fire per-turn) — these knobs
         # tune it, not reimplement it.
         turn_handling={
+            # Word-level end-of-turn model (prewarmed): "they have finished"
+            # comes from the sentence, not from a silence timer.
+            "turn_detection": ctx.proc.userdata["turn_detector"],
             "endpointing": {
                 "mode": "dynamic",  # adapts to this caller's pace instead of one fixed wait
                 "min_delay": 0.3,  # framework default 0.5s — snappier turn-taking
@@ -860,6 +1034,27 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # target so a slow call is visible in the worker log immediately, not
     # discovered later by re-reading a transcript's timestamps by hand.
     LATENCY_BUDGET_S = {"eou": 1.0, "llm_ttft": 1.0, "tts_ttfb": 0.5, "interruption_detect": 0.3}
+    # One customer turn = EOU → LLM first token → TTS first byte. The three
+    # metrics arrive in that order; they are stitched into one voice-to-voice
+    # figure and posted to the engine so latency is a number on the dashboard,
+    # not something dug out of worker logs after the fact.
+    turn: dict[str, float] = {}
+
+    async def _flush_turn() -> None:
+        if not call_id or "eou" not in turn or "tts" not in turn:
+            turn.clear()
+            return
+        payload = {
+            "eouDelayMs": round(turn.get("eou", 0) * 1000),
+            "transcriptionDelayMs": round(turn.get("transcription", 0) * 1000),
+            "llmTtftMs": round(turn.get("llm", 0) * 1000),
+            "ttsTtfbMs": round(turn.get("tts", 0) * 1000),
+            "totalMs": round((turn.get("eou", 0) + turn.get("llm", 0) + turn.get("tts", 0)) * 1000),
+            "llmModel": LLM_MODEL,
+            "ttsProvider": TTS_PROVIDER,
+        }
+        turn.clear()
+        await _post_metrics(call_id, payload)
 
     @session.on("metrics_collected")
     def _on_metrics(event) -> None:  # noqa: ANN001 — livekit-agents event type
@@ -871,12 +1066,20 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 "eou_delay=%.2fs transcription_delay=%.2fs (call=%s)",
                 m.end_of_utterance_delay, m.transcription_delay, call_id,
             )
+            turn.clear()
+            turn["eou"] = m.end_of_utterance_delay
+            turn["transcription"] = m.transcription_delay
         elif kind == "llm_metrics":
             over = m.ttft > LATENCY_BUDGET_S["llm_ttft"]
             (logger.warning if over else logger.debug)("llm_ttft=%.2fs cancelled=%s (call=%s)", m.ttft, m.cancelled, call_id)
+            if not m.cancelled:
+                turn["llm"] = m.ttft
         elif kind == "tts_metrics":
             over = m.ttfb > LATENCY_BUDGET_S["tts_ttfb"]
             (logger.warning if over else logger.debug)("tts_ttfb=%.2fs cancelled=%s (call=%s)", m.ttfb, m.cancelled, call_id)
+            if not m.cancelled:
+                turn["tts"] = m.ttfb
+                qualifier.spawn(_flush_turn())
         elif kind == "interruption_metrics":
             over = m.detection_delay > LATENCY_BUDGET_S["interruption_detect"]
             (logger.warning if over else logger.debug)(
@@ -959,10 +1162,19 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             logger.info("DTMF %r (call=%s)", digit, call_id)
             qualifier.spawn(_forward_dtmf(digit))
 
+    room_input = RoomInputOptions()
+    if NOISE_CANCELLATION and _nc is not None:
+        try:
+            # BVCTelephony is tuned for narrowband PSTN audio: cleaner STT input
+            # means fewer mis-hears and fewer "sorry, could you repeat that" turns.
+            room_input = RoomInputOptions(noise_cancellation=_nc.BVCTelephony())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("noise cancellation unavailable (%s)", e)
+
     await session.start(
         agent=qualifier,
         room=ctx.room,
-        room_input_options=RoomInputOptions(),
+        room_input_options=room_input,
     )
 
     # Don't speak until someone can actually hear it — see
@@ -976,13 +1188,53 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # a customer who speaks first turns this into a no-op.
         qualifier.spawn(qualifier.amd_silence_watchdog())
 
+    # The disclosure is law, not style: speak it verbatim, uninterruptible,
+    # and record a compliance event — instead of trusting the LLM's first turn.
+    if disclosure:
+        try:
+            frames: list[rtc.AudioFrame] = []
+            if disclosure_task is not None:
+                try:
+                    frames = await asyncio.wait_for(disclosure_task, timeout=2.0)
+                except Exception:  # noqa: BLE001 — not ready in time: synthesise live
+                    frames = []
+            t0 = time.monotonic()
+            handle = (
+                session.say(disclosure, audio=_replay(frames), allow_interruptions=False)
+                if frames
+                else session.say(disclosure, allow_interruptions=False)
+            )
+            await asyncio.wait_for(handle, timeout=20.0)
+            logger.info("disclosure spoken (%s, %.2fs)", "pre-rendered" if frames else "live", time.monotonic() - t0)
+            if call_id:
+                qualifier.spawn(_post_compliance(call_id, "RECORDING_DISCLOSURE", disclosure))
+            # The scripted line already ends with "is now a good moment?" — so
+            # the next thing that happens is the customer answering. No LLM
+            # round trip at the most latency-sensitive moment of the call.
+            return
+        except Exception as e:  # noqa: BLE001 — fall back to the prompted disclosure
+            logger.warning("scripted disclosure failed (%s); relying on the prompt", e)
+
     await session.generate_reply(instructions=first_turn)
 
 
 if __name__ == "__main__":
+    # Fail fast at boot: a worker with no LLM/STT key joins the room and then
+    # crashes on the first turn, which the customer experiences as silence.
+    _missing = [k for k in ("GROQ_API_KEY", "DEEPGRAM_API_KEY", "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET") if not os.environ.get(k)]
+    if _missing:
+        logger.error("refusing to start: missing environment %s", ", ".join(_missing))
+        raise SystemExit(2)
     # Health/HTTP port. Cloud Run injects PORT and requires the container to
     # listen on it; locally the library default (8081 in `start`, random in `dev`) applies.
     _port = int(os.environ["PORT"]) if os.environ.get("PORT") else None
     agents.cli.run_app(
-        agents.WorkerOptions(entrypoint_fnc=entrypoint, **({"port": _port} if _port else {}))
+        agents.WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            # Warm processes with models already loaded, so a burst of answered
+            # calls does not queue behind model loading.
+            num_idle_processes=WORKER_IDLE_PROCESSES,
+            **({"port": _port} if _port else {}),
+        )
     )

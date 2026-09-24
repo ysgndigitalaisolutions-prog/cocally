@@ -57,14 +57,32 @@ export class WebhooksService {
     }
   }
 
+  private draining = false;
+
   @Interval(10_000)
   async drainQueue(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      await this.drainOnce();
+    } finally {
+      this.draining = false;
+    }
+  }
+
+  private async drainOnce(): Promise<void> {
     const due = await this.deliveryModel
       .find({ status: 'PENDING', nextRetryAt: { $lte: new Date() } })
       .limit(20)
       .exec();
 
     for (const delivery of due) {
+      // Claim the row before the (up to 10 s) POST so a slow endpoint cannot
+      // be hit again by the next tick with the same delivery.
+      const claimed = await this.deliveryModel
+        .updateOne({ _id: delivery._id, status: 'PENDING', nextRetryAt: { $lte: new Date() } }, { nextRetryAt: new Date(Date.now() + 60_000) })
+        .exec();
+      if (claimed.modifiedCount === 0) continue;
       const subscription = await this.subscriptionModel
         .findById(delivery.subscriptionId)
         .select('+secret')

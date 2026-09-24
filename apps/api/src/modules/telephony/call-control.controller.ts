@@ -51,6 +51,13 @@ export class CallControlController {
     return this.control.hold(user.tenantId, user.userId, id);
   }
 
+  /** End the call from the bar — any source (AI transfer, predictive, manual). */
+  @Post('calls/:id/hangup')
+  @Roles('AGENT', 'SUPERVISOR', 'ADMIN')
+  hangup(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.control.hangupByAgent(user.tenantId, user.userId, id);
+  }
+
   @Post('calls/:id/resume')
   @Roles('AGENT', 'SUPERVISOR', 'ADMIN')
   resume(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {

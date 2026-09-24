@@ -80,7 +80,8 @@ export class LivekitWebhookController {
       return { received: false };
     }
 
-    const roomName = event.room?.name;
+    // Egress events carry the room on `egressInfo`, not `room`.
+    const roomName = event.room?.name ?? event.egressInfo?.roomName;
     const callId = roomName ? this.livekit.callIdFromRoom(roomName) : null;
     if (!callId) return { received: true };
 
@@ -98,7 +99,7 @@ export class LivekitWebhookController {
     switch (event.event) {
       case 'participant_joined': {
         const identity = event.participant?.identity;
-        if (identity) await this.progress.onParticipantJoined(callId, identity);
+        if (identity) await this.progress.onParticipantJoined(callId, identity, event.participant?.attributes);
         return;
       }
       case 'participant_left': {

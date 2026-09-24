@@ -30,7 +30,8 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   MONGODB_URI: z.string().default('mongodb://localhost:27017/cocally'),
   JWT_SECRET: z.string().default(DEV_JWT_SECRET),
-  JWT_EXPIRES_IN: z.string().default('8h'),
+  /** Longer than a shift: an 8 h token expired mid-call and the 401 redirect tore the call bar down. */
+  JWT_EXPIRES_IN: z.string().default('12h'),
   VAULT_KEY: z
     .string()
     .regex(/^[0-9a-f]{64}$/i, 'VAULT_KEY must be 32 bytes hex')
@@ -38,6 +39,10 @@ const envSchema = z.object({
   TELEPHONY_DRIVER: z.enum(['SIMULATION', 'SIP']).default('SIMULATION'),
   /** Minutes without a client heartbeat before a staffed agent is auto-signed-out. */
   PRESENCE_TIMEOUT_MINUTES: z.coerce.number().min(1).default(5),
+  /** Grace after an agent's last socket drops before the floor marks them OFFLINE (a reload takes ~2 s). */
+  PRESENCE_DISCONNECT_GRACE_SECONDS: z.coerce.number().min(5).default(45),
+  /** IANA zone the business day (daily dial budgets/quotas) is counted in. */
+  BUSINESS_TIMEZONE: z.string().default('Australia/Sydney'),
   PORT: z.coerce.number().default(4000),
   /** Comma-separated allowed browser origins. Required in production. */
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
@@ -137,6 +142,8 @@ export const config = {
   vaultKey: parsed.VAULT_KEY,
   telephonyDriver: parsed.TELEPHONY_DRIVER,
   presenceTimeoutMinutes: parsed.PRESENCE_TIMEOUT_MINUTES,
+  presenceDisconnectGraceSeconds: parsed.PRESENCE_DISCONNECT_GRACE_SECONDS,
+  businessTimezone: parsed.BUSINESS_TIMEZONE,
   port: parsed.PORT,
   corsOrigin: parsed.CORS_ORIGIN,
   corsOrigins: parsed.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean),

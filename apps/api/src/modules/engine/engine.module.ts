@@ -7,6 +7,7 @@ import { Lead, LeadSchema } from '../../schemas/lead.schema';
 import { CountryPacksModule } from '../country-packs/country-packs.module';
 import { LeadsModule } from '../leads/leads.module';
 import { ProvidersModule } from '../providers/providers.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
 import { WorkspaceModule } from '../workspace/workspace.module';
 import { EngineController } from './engine.controller';
 import { FlowExecutorService } from './flow-executor.service';
@@ -17,6 +18,7 @@ import { FlowExecutorService } from './flow-executor.service';
     LeadsModule,
     CountryPacksModule,
     WorkspaceModule,
+    WebhooksModule,
     MongooseModule.forFeature([
       { name: Call.name, schema: CallSchema },
       { name: Campaign.name, schema: CampaignSchema },

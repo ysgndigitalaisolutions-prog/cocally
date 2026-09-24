@@ -12,6 +12,21 @@ export class CountryPacksService implements OnModuleInit {
   /** Ensure the AU launch pack exists (CP-02) without overwriting admin edits. */
   async onModuleInit(): Promise<void> {
     await this.packModel.updateOne({ code: 'AU' }, { $setOnInsert: AU_PACK }, { upsert: true }).exec();
+    // Calling hours and holidays are law, not admin preference: keep the
+    // stored copy in step with the code so a holiday added here reaches a
+    // database seeded months ago.
+    await this.packModel
+      .updateOne(
+        { code: 'AU' },
+        {
+          $set: {
+            callingWindows: AU_PACK.callingWindows,
+            publicHolidays: AU_PACK.publicHolidays,
+            publicHolidaysByZone: AU_PACK.publicHolidaysByZone,
+          },
+        },
+      )
+      .exec();
   }
 
   async list() {

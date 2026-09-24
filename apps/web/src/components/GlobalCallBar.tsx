@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Room, RoomEvent, Track } from 'livekit-client';
-import type { AgentTransferOffer, CurrentCallState, SupervisionMode } from '@cocally/shared';
+import type { AgentTransferOffer, CurrentCallState, PredictiveBridgeCard, SupervisionMode, TransferCard } from '@cocally/shared';
 import { api, secondsSince, secondsUntil } from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAppStore } from '@/lib/store';
@@ -116,8 +116,12 @@ export default function GlobalCallBar() {
     setWrapUp,
     supervision,
     setSupervision,
+    transferOffer,
+    setTransferOffer,
   } = useAppStore();
   const [phase, setPhase] = useState<CallPhase>('joining');
+  const [reconnecting, setReconnecting] = useState(false);
+  const [aiOfferCountdown, setAiOfferCountdown] = useState(0);
   const [expanded, setExpanded] = useState(true);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState('');
@@ -336,9 +340,11 @@ export default function GlobalCallBar() {
         // A call this tab started while the request was in flight wins — it has
         // credentials of its own and is further along than this snapshot.
         if (cancelled || !state || useAppStore.getState().activeCall) return;
+        if (state.state === 'WRAP_UP' && state.wrapUpDeadline) setWrapUp({ callId: state.callId, deadline: state.wrapUpDeadline });
         setActiveCall({
           callId: state.callId,
           source: state.manual ? 'manual' : state.transferCard ? 'transfer' : 'predictive',
+          agentId: state.agentId,
           leadName: state.leadName,
           phone: state.phone,
           cli: state.cli,
@@ -352,10 +358,18 @@ export default function GlobalCallBar() {
         });
       })
       .catch(() => undefined);
+    // An AI transfer offer that was mid-countdown when the page reloaded.
+    api
+      .get('/workspace/me')
+      .then((r) => {
+        const offer: TransferCard | null = r.data?.pendingOffer ?? null;
+        if (!cancelled && offer && !useAppStore.getState().transferOffer) setTransferOffer(offer);
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [setActiveCall]);
+  }, [setActiveCall, setTransferOffer, setWrapUp]);
 
   // The call itself: join the room, publish the mic, then (manual only) tell
   // the API to place the SIP leg. Never dial before the mic is live, or the
@@ -370,6 +384,12 @@ export default function GlobalCallBar() {
 
     let cancelled = false;
     resetLocal();
+    // A call recovered in WRAP_UP has already ended: no room to join, just
+    // the disposition form (and the countdown) to put back on screen.
+    if (activeCall.recovered && activeCall.callState === 'WRAP_UP') {
+      setPhase('ended');
+      return;
+    }
     const sipIdentity = `lead-${activeCall.callId}`;
     const room = new Room();
 
@@ -411,13 +431,21 @@ export default function GlobalCallBar() {
         // manual-dial connect would ring the customer a second time.
         if (activeCall.recovered) {
           setPhase(
-            activeCall.callState === 'DIALING'
+            activeCall.callState === 'DIALING' || activeCall.callState === 'CONNECTING'
               ? 'dialing'
               : activeCall.callState === 'RINGING'
                 ? 'ringing'
                 : 'connected',
           );
-          if (activeCall.callState === 'ON_HOLD') {
+          // Reloaded between dial() and connect(): the INVITE was never sent.
+          // connect() is guarded server-side, so re-issuing it cannot ring twice.
+          if (activeCall.source === 'manual' && activeCall.callState === 'DIALING') {
+            await api.post(`/manual-dial/calls/${activeCall.callId}/connect`);
+            if (!cancelled) setPhase((prev) => (prev === 'dialing' ? 'ringing' : prev));
+          }
+          const me = JSON.parse(localStorage.getItem('cocally.user') ?? '{}') as { id?: string };
+          const ownsHold = !activeCall.agentId || !me.id || activeCall.agentId === me.id;
+          if (activeCall.callState === 'ON_HOLD' && ownsHold) {
             // The server still says parked, but the browser that was producing
             // the music is gone — the customer is sitting in silence right now.
             // The hold endpoint is idempotent, so this re-reads the URL without
@@ -483,6 +511,51 @@ export default function GlobalCallBar() {
     if (!socket) return;
 
     const onAgentOffer = (offer: AgentTransferOffer) => setAgentTransferOffer(offer);
+
+    // AI warm-transfer offers. Owned here, not by the Workspace page, so an
+    // Available agent on Manual dial / Insights / Leads still gets the card
+    // (and the ring) instead of silently timing the customer out.
+    const onOffer = (card: TransferCard) => setTransferOffer(card);
+    const onOfferCancelled = ({ transferId }: { transferId: string }) => {
+      if (useAppStore.getState().transferOffer?.transferId === transferId) setTransferOffer(null);
+    };
+    const onBridged = ({ callId }: { callId: string }) => {
+      const offer = useAppStore.getState().transferOffer;
+      setActiveCall({
+        callId,
+        source: 'transfer',
+        leadName: offer?.name ?? '',
+        phone: '',
+        campaignName: offer?.campaignName,
+        transferCard: offer ?? null,
+      });
+      setTransferOffer(null);
+    };
+    const onPredictiveBridged = (card: PredictiveBridgeCard) => {
+      setActiveCall({ callId: card.callId, source: 'predictive', leadName: card.leadName, phone: card.phone });
+    };
+    const onWrapUpFinished = () => {
+      setWrapUp(null);
+      setPresence('AVAILABLE');
+    };
+    const refreshFromServer = () => {
+      api
+        .get('/workspace/me')
+        .then((r) => {
+          setPresence(r.data.presence);
+          const offer: TransferCard | null = r.data?.pendingOffer ?? null;
+          if (offer && !useAppStore.getState().transferOffer) setTransferOffer(offer);
+        })
+        .catch(() => undefined);
+      api.get('/workspace/me/shift').then((r) => setShift(r.data)).catch(() => undefined);
+    };
+    const onDisconnect = () => setReconnecting(true);
+    const onConnect = () => {
+      setReconnecting(false);
+      // Anything the server decided while we were away (an offer, a presence
+      // change, a wrap-up) is re-read rather than assumed.
+      refreshFromServer();
+    };
 
     const onAgentCancelled = ({ transferId, reason }: { transferId: string; reason: string }) => {
       const state = useAppStore.getState();
@@ -557,6 +630,14 @@ export default function GlobalCallBar() {
       setSupervision({ mode, supervisorName });
     };
 
+    socket.on('transfer.offer', onOffer);
+    socket.on('transfer.cancelled', onOfferCancelled);
+    socket.on('transfer.bridged', onBridged);
+    socket.on('predictive.call.bridged', onPredictiveBridged);
+    socket.on('wrapup.finished', onWrapUpFinished);
+    socket.on('disconnect', onDisconnect);
+    socket.on('connect', onConnect);
+    socket.io.on('reconnect', onConnect);
     socket.on('agent.transfer.offer', onAgentOffer);
     socket.on('agent.transfer.cancelled', onAgentCancelled);
     socket.on('agent.transfer.accepted', onAgentAccepted);
@@ -566,6 +647,14 @@ export default function GlobalCallBar() {
     socket.on('supervision.changed', onSupervision);
 
     return () => {
+      socket.off('transfer.offer', onOffer);
+      socket.off('transfer.cancelled', onOfferCancelled);
+      socket.off('transfer.bridged', onBridged);
+      socket.off('predictive.call.bridged', onPredictiveBridged);
+      socket.off('wrapup.finished', onWrapUpFinished);
+      socket.off('disconnect', onDisconnect);
+      socket.off('connect', onConnect);
+      socket.io.off('reconnect', onConnect);
       socket.off('agent.transfer.offer', onAgentOffer);
       socket.off('agent.transfer.cancelled', onAgentCancelled);
       socket.off('agent.transfer.accepted', onAgentAccepted);
@@ -576,6 +665,92 @@ export default function GlobalCallBar() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // AI offer countdown (server-clock corrected).
+  useEffect(() => {
+    if (!transferOffer) return;
+    const tick = () => {
+      const left = secondsUntil(transferOffer.acceptDeadline);
+      setAiOfferCountdown(left);
+      if (left === 0) setTransferOffer(null);
+    };
+    tick();
+    const timer = setInterval(tick, 250);
+    return () => clearInterval(timer);
+  }, [transferOffer, setTransferOffer]);
+
+  // Ring while any offer is waiting: a visual card alone loses most offers on
+  // a floor where the agent is looking at another screen. Synthesised with
+  // WebAudio so there is no asset to load, plus a title flash for a hidden tab.
+  const ringing = Boolean(transferOffer || agentTransferOffer);
+  useEffect(() => {
+    if (!ringing) return;
+    let ctx: AudioContext | null = null;
+    let stopped = false;
+    let ringTimer: ReturnType<typeof setInterval> | undefined;
+    const originalTitle = document.title;
+    let flash = false;
+    const titleTimer = setInterval(() => {
+      flash = !flash;
+      document.title = flash ? '☎ Incoming transfer' : originalTitle;
+    }, 800);
+    try {
+      ctx = new AudioContext();
+      const burst = () => {
+        if (stopped || !ctx) return;
+        const now = ctx.currentTime;
+        for (const [freq, at] of [[880, 0], [1040, 0.18], [880, 0.36], [1040, 0.54]] as Array<[number, number]>) {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.0001, now + at);
+          gain.gain.exponentialRampToValueAtTime(0.25, now + at + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.16);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(now + at);
+          osc.stop(now + at + 0.18);
+        }
+      };
+      burst();
+      ringTimer = setInterval(burst, 2000);
+    } catch {
+      // No audio permission / no AudioContext: the card and title flash remain.
+    }
+    return () => {
+      stopped = true;
+      clearInterval(titleTimer);
+      if (ringTimer) clearInterval(ringTimer);
+      document.title = originalTitle;
+      void ctx?.close().catch(() => undefined);
+    };
+  }, [ringing]);
+
+  async function acceptAiOffer() {
+    const offer = transferOffer;
+    if (!offer || busy) return;
+    setBusy(true);
+    try {
+      await api.post(`/workspace/transfers/${offer.transferId}/accept`);
+      // `transfer.bridged` builds the call bar; the card stays until then.
+    } catch {
+      flash('That offer has expired — it was likely already offered to someone else.');
+      setTransferOffer(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function declineAiOffer() {
+    const offer = transferOffer;
+    if (!offer) return;
+    try {
+      await api.post(`/workspace/transfers/${offer.transferId}/decline`);
+    } catch {
+      // Already expired — nothing to decline.
+    }
+    setTransferOffer(null);
+  }
 
   // Inbound agent-to-agent offer countdown, mirroring the AI transfer card.
   useEffect(() => {
@@ -782,7 +957,9 @@ export default function GlobalCallBar() {
     if (!activeCall) return;
     setBusy(true);
     try {
-      if (activeCall.source === 'manual') await api.post(`/manual-dial/calls/${activeCall.callId}/hangup`);
+      // One route for every source: drops the customer leg, stops the
+      // recording, frees the pacing slot and starts the wrap-up clock.
+      await api.post(`/call-control/calls/${activeCall.callId}/hangup`);
     } catch {
       // Line may already be down (customer hung up first) — still let the agent disposition.
     } finally {
@@ -817,10 +994,19 @@ export default function GlobalCallBar() {
       roomRef.current?.disconnect();
       roomRef.current = null;
       setActiveCall(null);
-      setPresence('WRAP_UP');
+      // The server hands the agent straight back to the floor once the call is logged.
+      setPresence('AVAILABLE');
       setWrapUp(null);
     } catch (err) {
-      flash(errorMessage(err, 'Could not log the disposition.'));
+      const msg = errorMessage(err, 'Could not log the disposition.');
+      flash(msg);
+      if (/already dispositioned/i.test(msg)) {
+        // Logged from another tab: nothing left to do here.
+        roomRef.current?.disconnect();
+        roomRef.current = null;
+        setActiveCall(null);
+        setWrapUp(null);
+      }
     } finally {
       setBusy(false);
     }
@@ -872,7 +1058,72 @@ export default function GlobalCallBar() {
     </div>
   );
 
-  if (!activeCall) return offerCard;
+  const aiOfferCard = transferOffer && (
+    <div
+      className="fixed bottom-4 right-4 z-[56] w-96 rounded-xl border-2 p-4 shadow-2xl"
+      style={{ borderColor: 'var(--good)', background: 'var(--surface)' }}
+      role="alertdialog"
+      aria-label="Incoming warm transfer"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--good)' }}>
+            Incoming transfer — {transferOffer.campaignName}
+          </p>
+          <h3 className="mt-1 text-lg font-bold">{transferOffer.name}</h3>
+          <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+            {transferOffer.location} · score <span className="font-bold" style={{ color: 'var(--good)' }}>{transferOffer.score}</span>
+            {transferOffer.flaggedObjection && <> · objection: {transferOffer.flaggedObjection.replace(/_/g, ' ')}</>}
+          </p>
+        </div>
+        <div
+          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border-4 font-bold"
+          style={{ borderColor: aiOfferCountdown <= 4 ? 'var(--bad)' : 'var(--good)' }}
+          aria-label={`${aiOfferCountdown} seconds to answer`}
+        >
+          {aiOfferCountdown}
+        </div>
+      </div>
+      {transferOffer.facts.length > 0 && (
+        <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
+          {transferOffer.facts.map((fact) => (
+            <li key={fact.label} style={{ color: fact.confirmed ? 'var(--good)' : 'var(--text-dim)' }}>
+              {fact.confirmed ? '✓' : '·'} {fact.label}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-2 text-xs italic" style={{ color: 'var(--text-dim)' }}>{transferOffer.suggestedOpener}</p>
+      <div className="mt-3 flex gap-2">
+        <button className="btn btn-primary flex-1 text-sm" disabled={busy} onClick={acceptAiOffer}>
+          Accept transfer
+        </button>
+        <button className="btn btn-ghost text-sm" disabled={busy} onClick={declineAiOffer}>
+          Decline
+        </button>
+      </div>
+    </div>
+  );
+
+  const reconnectStrip = reconnecting && (
+    <div
+      className="fixed left-1/2 top-2 z-[60] -translate-x-1/2 rounded-full px-4 py-1 text-xs font-semibold shadow"
+      style={{ background: 'var(--bad)', color: '#fff' }}
+      role="status"
+    >
+      Reconnecting to the floor… offers may be missed until this clears.
+    </div>
+  );
+
+  if (!activeCall) {
+    return (
+      <>
+        {reconnectStrip}
+        {aiOfferCard}
+        {offerCard}
+      </>
+    );
+  }
 
   const leadName = briefing?.leadName || activeCall.leadName;
   const sourceLabel = activeCall.source === 'manual' ? 'Manual dial' : activeCall.source === 'predictive' ? 'Predictive dial' : 'Warm transfer';
@@ -880,6 +1131,8 @@ export default function GlobalCallBar() {
 
   return (
     <>
+      {reconnectStrip}
+      {aiOfferCard}
       {offerCard}
       {showTransfer && (
         <TransferDialog
@@ -1103,6 +1356,11 @@ export default function GlobalCallBar() {
                     Call ended — log what happened below.
                   </p>
                 )}
+                {phase === 'connected' && (
+                  <p className="mb-3 text-sm" style={{ color: 'var(--text-dim)' }}>
+                    Hang up when you are done — the outcome is logged after the call ends.
+                  </p>
+                )}
 
                 <label className="sr-only" htmlFor="call-notes">Call notes</label>
                 <textarea
@@ -1114,7 +1372,7 @@ export default function GlobalCallBar() {
                   onChange={(e) => setNotes(e.target.value)}
                 />
 
-                {pending ? (
+                {phase !== 'ended' ? null : pending ? (
                   <div className="rounded-lg p-4" style={{ background: 'var(--surface-2)' }}>
                     <p className="mb-2 text-sm font-semibold">
                       {pending.value === 'BOOKED' ? 'When is the appointment?' : 'When should we call back?'}

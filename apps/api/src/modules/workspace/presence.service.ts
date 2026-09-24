@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Interval } from '@nestjs/schedule';
 import {
@@ -115,10 +115,54 @@ export class PresenceService {
       .exec();
 
     for (const user of stale) {
-      await this.setPresence(user._id.toString(), 'OFFLINE');
+      await this.setPresence(user._id.toString(), 'OFFLINE', undefined, { force: true });
       this.logger.log(
         `Auto-signed-out ${user.email} from ${user.presence} — no heartbeat for ${config.presenceTimeoutMinutes}m`,
       );
+    }
+  }
+
+  /**
+   * Sign an agent out only if they are not mid-work. Used when their last
+   * socket has been gone for the disconnect grace period: an agent ON_CALL or
+   * RESERVED is left alone (the call/transfer machinery owns those states).
+   * Returns true when the presence actually changed.
+   */
+  async setOfflineIfIdle(userId: string): Promise<boolean> {
+    const prev = await this.userModel
+      .findOneAndUpdate(
+        { _id: new Types.ObjectId(userId), presence: { $in: SWEEPABLE_STATES } },
+        { $set: { presence: 'OFFLINE', lastSeenAt: new Date() }, $unset: PresenceService.CLEAR_PAUSE },
+        { new: false },
+      )
+      .select('presence tenantId')
+      .lean()
+      .exec();
+    if (!prev) return false;
+    await this.logSegment(prev.tenantId, userId, 'OFFLINE');
+    return true;
+  }
+
+  /**
+   * RESERVED is owned by an in-flight transfer offer, which normally releases
+   * it within the accept window. After an API restart (offers live in memory)
+   * nothing would — so anyone reserved for longer than any window could last
+   * is handed back to the floor.
+   */
+  @Interval(60_000)
+  async sweepStaleReservations(): Promise<void> {
+    const cutoff = new Date(Date.now() - 3 * 60_000);
+    const stuck = await this.activityModel
+      .find({ state: 'RESERVED', endedAt: null, startedAt: { $lt: cutoff } })
+      .select('userId')
+      .lean()
+      .exec();
+    for (const seg of stuck) {
+      const userId = seg.userId.toString();
+      const user = await this.userModel.findById(userId).select('presence email').lean().exec();
+      if (user?.presence !== 'RESERVED') continue;
+      await this.release(userId, 'AVAILABLE');
+      this.logger.warn(`Released ${user.email} from a RESERVED state older than 3 minutes (orphaned transfer offer)`);
     }
   }
 
@@ -135,7 +179,12 @@ export class PresenceService {
    *     Only enforced for AGENTs: supervisors and admins flip presence to
    *     take an overflow call without running a shift.
    */
-  async setPresence(userId: string, state: PresenceState, pauseCode?: PauseCode): Promise<void> {
+  async setPresence(
+    userId: string,
+    state: PresenceState,
+    pauseCode?: PauseCode,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
     if (state === 'BREAK' && !pauseCode) {
       throw new BadRequestException('Select a pause code (break, lunch, training…) before going on break.');
     }
@@ -147,6 +196,17 @@ export class PresenceService {
       .exec();
     if (state === 'AVAILABLE' && prevDoc?.roles.includes('AGENT') && !prevDoc.clockedInAt) {
       throw new BadRequestException('Clock in before going available — you are not on shift yet.');
+    }
+    // An agent on a call (or reserved for an incoming transfer) cannot move
+    // themselves: flipping to AVAILABLE mid-call gets them double-booked by the
+    // next transfer, and OFFLINE mid-call means the disposition's release
+    // finds nobody to release. The call-control paths use `force`.
+    if (!options.force && prevDoc && (prevDoc.presence === 'ON_CALL' || prevDoc.presence === 'RESERVED')) {
+      throw new ConflictException(
+        prevDoc.presence === 'ON_CALL'
+          ? 'You are on a call — hang up and disposition it first.'
+          : 'A transfer is being offered to you — accept or decline it first.',
+      );
     }
 
     const set: Record<string, unknown> = { presence: state, lastSeenAt: now };
@@ -204,7 +264,7 @@ export class PresenceService {
    * open activity segment has to be closed or the shift totals run forever.
    */
   async clockOut(userId: string): Promise<{ ok: true }> {
-    await this.setPresence(userId, 'OFFLINE');
+    await this.setPresence(userId, 'OFFLINE'); // throws while ON_CALL/RESERVED
     await this.userModel
       .updateOne({ _id: new Types.ObjectId(userId) }, { $unset: { clockedInAt: '', ...PresenceService.CLEAR_PAUSE } })
       .exec();

@@ -78,7 +78,7 @@ See the published page. Summary of the ask:
 5. Self-host LiveKit server + SIP bridge in Sydney. Largest lift; only if 1–4 all fail.
 
 **What the carrier needs from us (once auth is settled)**
-- Our SIP endpoint for inbound: `<project-subdomain>.aus.sip.livekit.cloud` (subdomain = LiveKit project id without `p_`), transport UDP/TCP/TLS, port 5060/5061.
+- Our SIP endpoint for inbound: `5g5k1tqux4m.aus.sip.livekit.cloud` (production LiveKit project `p_5g5k1tqux4m`, global form `sip:5g5k1tqux4m.sip.livekit.cloud`), transport UDP/TCP/TLS, port 5060/5061.
 - If IP ACL is unavoidable: the CIDRs above (option 3) or our proxy IP (option 4).
 - The DIDs they should route to that endpoint, and E.164 formatting.
 - Expected volume: 30 concurrent, 5 CPS, AU only, calling hours per state.

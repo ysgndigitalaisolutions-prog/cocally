@@ -2,9 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression, Interval } from '@nestjs/schedule';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { config } from '../../common/config';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { User, UserDocument } from '../../schemas/user.schema';
 import { RecordingsService } from '../recordings/recordings.service';
+import { CallProgressService } from '../telephony/call-progress.service';
 import { CliService } from '../telephony/cli.service';
 
 /** A call sitting in a non-terminal state longer than this is presumed dead. */
@@ -38,6 +40,7 @@ export class MaintenanceService {
     @InjectModel(Call.name) private readonly callModel: Model<CallDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly cli: CliService,
+    private readonly progress: CallProgressService,
     private readonly recordings: RecordingsService,
   ) {}
 
@@ -59,7 +62,7 @@ export class MaintenanceService {
    * the LEAST_TALK_TIME strategy sorts on this field, so without a reset it
    * biases work permanently toward whoever joined the floor most recently.
    */
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { timeZone: config.businessTimezone })
   async dailyRollover(): Promise<void> {
     try {
       await this.cli.resetDailyCounters();
@@ -94,23 +97,37 @@ export class MaintenanceService {
   async sweepHungCalls(): Promise<number> {
     const cutoff = new Date(Date.now() - HUNG_CALL_MINUTES * 60_000);
     try {
-      const res = await this.callModel
-        .updateMany(
-          { state: { $in: NON_TERMINAL_STATES }, startedAt: { $lte: cutoff } },
-          {
-            $set: {
-              state: 'FAILED',
-              outcome: 'FAILED',
-              endedAt: new Date(),
-              dispositionNotes: 'Auto-closed: call exceeded the maximum live duration.',
-            },
-          },
-        )
+      // Keyed on last activity (`updatedAt`), not start time: a long, live
+      // conversation keeps writing transcript/score updates and must not be
+      // cut off at the hour mark. WRAP_UP is excluded — that record belongs
+      // to the agent's disposition.
+      const hung = await this.callModel
+        .find({ state: { $in: NON_TERMINAL_STATES.filter((s) => s !== 'WRAP_UP') }, updatedAt: { $lte: cutoff } })
+        .select('_id recordingEgressId outcome')
+        .lean()
         .exec();
-      if (res.modifiedCount > 0) {
-        this.logger.warn(`Swept ${res.modifiedCount} hung call(s) older than ${HUNG_CALL_MINUTES}m`);
+      let swept = 0;
+      for (const c of hung) {
+        const res = await this.callModel
+          .updateOne(
+            { _id: c._id, state: { $in: NON_TERMINAL_STATES } },
+            {
+              $set: {
+                state: 'FAILED',
+                ...(c.outcome ? {} : { outcome: 'FAILED' }),
+                endedAt: new Date(),
+                endReason: 'TIMEOUT',
+                dispositionNotes: 'Auto-closed: no activity on this call for over an hour.',
+              },
+            },
+          )
+          .exec();
+        if (res.modifiedCount === 0) continue;
+        swept += 1;
+        await this.progress.releaseResources({ _id: c._id, recordingEgressId: c.recordingEgressId });
       }
-      return res.modifiedCount;
+      if (swept > 0) this.logger.warn(`Swept ${swept} hung call(s) idle for over ${HUNG_CALL_MINUTES}m`);
+      return swept;
     } catch (err) {
       this.logger.error(`sweepHungCalls failed: ${(err as Error).message}`);
       return 0;

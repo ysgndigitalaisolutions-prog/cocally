@@ -46,6 +46,9 @@ export function normalizeLoginPhone(raw: string): string | null {
   return r.ok ? r.value.e164 : null;
 }
 
+// One 30 s step of clock drift either side: a phone 20 s off must not reject every code.
+authenticator.options = { ...authenticator.options, window: 1 };
+
 @Injectable()
 export class AuthService {
   constructor(

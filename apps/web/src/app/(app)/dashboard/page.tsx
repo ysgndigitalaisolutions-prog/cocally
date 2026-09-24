@@ -13,6 +13,9 @@ interface Kpis {
   costPerBookingCents: number | null;
   avgHandleTimeMs: number;
   avgQaScore: number | null;
+  voiceLatencyP50Ms: number | null;
+  voiceLatencyP95Ms: number | null;
+  voiceTurns: number;
 }
 
 interface Funnel {
@@ -122,6 +125,10 @@ export default function DashboardPage() {
         <Stat label="Connect rate" value={kpis ? `${Math.round(kpis.connectRate * 100)}%` : '—'} />
         <Stat label="Transfers" value={kpis?.transfers ?? '—'} />
         <Stat label="Bookings" value={kpis?.bookings ?? '—'} accent />
+        <Stat
+          label="AI response p50 / p95"
+          value={kpis?.voiceLatencyP50Ms != null ? `${(kpis.voiceLatencyP50Ms / 1000).toFixed(2)}s / ${((kpis.voiceLatencyP95Ms ?? 0) / 1000).toFixed(2)}s` : '—'}
+        />
         <Stat
           label="Cost / booking"
           value={kpis?.costPerBookingCents != null ? `$${(kpis.costPerBookingCents / 100).toFixed(2)}` : '—'}

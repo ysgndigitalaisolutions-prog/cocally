@@ -4,7 +4,12 @@ import { normalizePhone } from '../phone.util';
 describe('normalizePhone (LEAD-01/02)', () => {
   it('normalises 04xx mobiles to E.164', () => {
     const result = normalizePhone('0412 345 678', 'AU');
-    expect(result).toEqual({ ok: true, value: { e164: '+61412345678', lineType: 'MOBILE', areaHint: '04' } });
+    expect(result).toEqual({ ok: true, value: { e164: '+61412345678', lineType: 'MOBILE', areaHint: '04', national: '0412345678' } });
+  });
+
+  it('rejects valid numbers from another region under the AU pack', () => {
+    expect(normalizePhone('+64211234567', 'AU').ok).toBe(false);
+    expect(normalizePhone('+44 7700 900123', 'AU').ok).toBe(false);
   });
 
   it('accepts 61-prefixed numbers', () => {

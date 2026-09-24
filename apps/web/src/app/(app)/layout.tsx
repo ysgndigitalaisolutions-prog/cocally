@@ -24,7 +24,8 @@ const NAV = [
   { href: '/users', label: 'Users & access', roles: ['OWNER', 'ADMIN'] },
   { href: '/audit', label: 'Audit log', roles: ['OWNER', 'ADMIN', 'QA'] },
   { href: '/reports', label: 'Reports', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
-  { href: '/live-demo', label: 'Live demo', roles: ['OWNER', 'ADMIN'] },
+  // Dev-only: places a real PSTN call outside every compliance gate.
+  ...(process.env.NODE_ENV === 'production' ? [] : [{ href: '/live-demo', label: 'Live demo', roles: ['OWNER', 'ADMIN'] }]),
   { href: '/security', label: 'My security', roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'AGENT', 'QA'] },
 ];
 

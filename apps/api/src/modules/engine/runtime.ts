@@ -27,6 +27,7 @@ export interface CallRuntime {
   requestTransfer(input: {
     whisperEnabled: boolean;
     acceptWindowSeconds: number;
+    facts?: Record<string, unknown>;
   }): Promise<'BRIDGED' | 'NO_AGENT' | 'FAILED'>;
 }
 

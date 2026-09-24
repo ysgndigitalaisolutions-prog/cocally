@@ -1,9 +1,10 @@
-import { BadRequestException, Body, Controller, Get, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { DISPOSITIONS, redactPii, type Disposition } from '@cocally/shared';
+import { DISPOSITIONS, LIVE_CALL_STATES, redactPii, type Disposition } from '@cocally/shared';
 import { IsIn, IsNotEmpty, IsNumber, IsOptional, IsString } from 'class-validator';
 import { Model, Types } from 'mongoose';
 import { config } from '../../common/config';
+import { presignS3Get } from '../../common/s3-presign';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/auth/jwt-auth.guard';
 import { Public } from '../../common/auth/public.decorator';
@@ -14,11 +15,13 @@ import { Lead, LeadDocument } from '../../schemas/lead.schema';
 import { User, UserDocument } from '../../schemas/user.schema';
 import { LeadsService } from '../leads/leads.service';
 import { SchedulingService } from '../leads/scheduling.service';
+import { SuppressionService } from '../leads/suppression.service';
 import { RecordingsService } from '../recordings/recordings.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 import { PresenceService } from '../workspace/presence.service';
 import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { CallOrchestratorService } from './call-orchestrator.service';
+import { CallProgressService } from './call-progress.service';
 import { LivekitService } from './livekit.service';
 
 class DispositionDto {
@@ -96,10 +99,12 @@ export class CallsController {
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly leads: LeadsService,
     private readonly scheduling: SchedulingService,
+    private readonly suppression: SuppressionService,
     private readonly recordings: RecordingsService,
     private readonly webhooks: WebhooksService,
     private readonly presence: PresenceService,
     private readonly orchestrator: CallOrchestratorService,
+    private readonly progress: CallProgressService,
     private readonly livekit: LivekitService,
     private readonly gateway: RealtimeGateway,
   ) {}
@@ -181,6 +186,40 @@ export class CallsController {
   }
 
   /**
+   * Playback link for the call's audio. The egress writes to S3 (or an
+   * S3-compatible bucket); a short-lived presigned URL is minted per request
+   * so QA can listen without the bucket being public. 404 when the call has
+   * no recording (recording off, simulation, or the egress never started).
+   */
+  @Get(':id/recording')
+  @Roles('ADMIN', 'SUPERVISOR', 'QA', 'OWNER')
+  async recording(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
+    const call = await this.callModel
+      .findOne({ _id: new Types.ObjectId(id), tenantId: new Types.ObjectId(user.tenantId) })
+      .select('recordingUri recordingEgressId endedAt')
+      .lean()
+      .exec();
+    if (!call) throw new NotFoundException('Call not found');
+    if (!call.recordingUri) throw new NotFoundException('No recording for this call');
+    const m = /^s3:\/\/([^/]+)\/(.+)$/.exec(call.recordingUri);
+    const { bucket, s3Region, s3AccessKey, s3Secret, s3Endpoint } = config.recording;
+    if (!m || !bucket || !s3AccessKey || !s3Secret) {
+      throw new NotFoundException('Recording is stored outside the configured bucket');
+    }
+    const url = presignS3Get({
+      bucket: m[1]!,
+      key: m[2]!,
+      region: s3Region ?? 'ap-southeast-2',
+      accessKey: s3AccessKey,
+      secret: s3Secret,
+      endpoint: s3Endpoint,
+      expiresSeconds: 15 * 60,
+    });
+    return { url, expiresInSeconds: 15 * 60, contentType: 'audio/ogg', ready: Boolean(call.endedAt) };
+  }
+
+  /**
    * Agent briefing for a bridged call per XFER-05: the AI-built summary plus the
    * campaign playbook (rebuttals), call-scoped so a just-bridged agent has both
    * the context and the script without a socket race or broad campaign access.
@@ -224,23 +263,93 @@ export class CallsController {
     };
   }
 
-  /** Agent disposition closes the loop into retry/suppression per XFER-06. */
+  /**
+   * Agent disposition closes the loop into retry/suppression per XFER-06.
+   *
+   * Order matters: every input is validated and every side effect that can
+   * legitimately be refused (invalid or past appointment time, a slot already
+   * taken) runs BEFORE the call is marked dispositioned. Previously the call
+   * was saved first, so a rejected booking left a call that could never be
+   * dispositioned again, a lead stuck in TRANSFERRED, no appointment, and the
+   * agent pinned ON_CALL with no wrap-up window — all from one typo in a date.
+   */
   @Post(':id/disposition')
   @Roles('AGENT', 'SUPERVISOR', 'ADMIN')
   async setDisposition(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: DispositionDto) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
     const call = await this.callModel
       .findOne({ _id: new Types.ObjectId(id), tenantId: new Types.ObjectId(user.tenantId) })
       .exec();
     if (!call) throw new NotFoundException('Call not found');
     if (call.disposition) throw new BadRequestException('Call already dispositioned');
+    // A supervisor/admin may close out any call; an agent only their own.
+    if (user.roles.includes('AGENT') && !user.roles.some((r) => r === 'SUPERVISOR' || r === 'ADMIN' || r === 'OWNER')) {
+      if (call.agentId && call.agentId.toString() !== user.userId) {
+        throw new ForbiddenException('This call belongs to another agent.');
+      }
+    }
 
+    // ── Validate everything up front ──────────────────────────────────────
+    let scheduledAt: Date | undefined;
+    if (dto.scheduledFor !== undefined && dto.scheduledFor !== null && dto.scheduledFor !== '') {
+      scheduledAt = new Date(dto.scheduledFor);
+      if (Number.isNaN(scheduledAt.getTime())) throw new BadRequestException('Invalid date/time for scheduledFor');
+    }
+    if (dto.disposition === 'BOOKED' && scheduledAt && scheduledAt.getTime() < Date.now() - 60_000) {
+      throw new BadRequestException('Appointment time is in the past');
+    }
+    if (dto.disposition === 'CALLBACK' && scheduledAt && scheduledAt.getTime() < Date.now() - 60_000) {
+      throw new BadRequestException('Callback time is in the past');
+    }
+    if (dto.durationMinutes !== undefined && (dto.durationMinutes < 5 || dto.durationMinutes > 8 * 60)) {
+      throw new BadRequestException('durationMinutes must be between 5 and 480');
+    }
+
+    const lead = await this.leadModel.findById(call.leadId).exec();
+
+    // ── Refusable side effects first (booking / callback) ─────────────────
+    if (lead && dto.disposition === 'BOOKED' && scheduledAt) {
+      await this.scheduling.bookAppointment({
+        tenantId: user.tenantId,
+        clientId: lead.clientId.toString(),
+        leadId: lead._id.toString(),
+        callId: call._id.toString(),
+        startsAt: scheduledAt,
+        durationMinutes: dto.durationMinutes,
+        slotKey: dto.slotKey,
+        notes: dto.notes,
+      });
+    }
+    let callbackDueAt: Date | undefined;
+    if (lead && dto.disposition === 'CALLBACK') {
+      callbackDueAt = scheduledAt ?? new Date(Date.now() + 24 * 3600 * 1000);
+      // Creates a real Callback task (agent worklist + overdue reporting) and
+      // sets lead state/nextAttemptAt in one place.
+      await this.scheduling.scheduleCallback({
+        tenantId: user.tenantId,
+        leadId: lead._id.toString(),
+        campaignId: call.campaignId.toString(),
+        dueAt: callbackDueAt,
+        handler: 'HUMAN',
+        preferredAgentId: call.agentId?.toString() ?? user.userId,
+        notes: dto.notes,
+      });
+    }
+
+    // ── Commit the call ───────────────────────────────────────────────────
+    // The disposition is how an AI-transferred call ends: drop the customer
+    // leg, stop the recording and free the pacing slot, otherwise the SIP leg
+    // and the egress run on in an empty room until LiveKit's timeout.
+    const wasLive = LIVE_CALL_STATES.includes(call.state);
     call.disposition = dto.disposition;
     call.dispositionNotes = dto.notes;
     call.state = 'COMPLETED';
-    call.endedAt = new Date();
+    if (!call.endedAt) call.endedAt = new Date();
+    if (!call.outcome) call.outcome = call.answeredAt || call.bridgedAt ? 'ANSWERED_HUMAN' : 'NO_ANSWER';
+    if (wasLive && !call.endReason) call.endReason = 'AGENT_HANGUP';
     await call.save();
+    await this.progress.releaseResources(call);
 
-    const lead = await this.leadModel.findById(call.leadId).exec();
     if (lead) {
       // Human leg recorded under the same lead timeline per REC-01/XFER-06.
       await this.recordings.captureLeg({
@@ -255,49 +364,25 @@ export class CallsController {
       switch (dto.disposition) {
         case 'BOOKED': {
           this.leads.transition(lead, 'BOOKED', `Booked by ${user.email}`);
-          // Create the actual appointment record — previously a BOOKED call only
-          // flipped lead state and fired a webhook, so the booking existed
-          // nowhere in the system that a client could be shown or billed for.
-          if (dto.scheduledFor) {
-            await this.scheduling.bookAppointment({
-              tenantId: user.tenantId,
-              clientId: lead.clientId.toString(),
-              leadId: lead._id.toString(),
-              callId: call._id.toString(),
-              startsAt: new Date(dto.scheduledFor),
-              durationMinutes: dto.durationMinutes,
-              slotKey: dto.slotKey,
-              notes: dto.notes,
-            });
-          }
           await this.webhooks.dispatch(user.tenantId, 'appointment.booked', {
             leadId: lead._id.toString(),
             callId: call._id.toString(),
-            scheduledFor: dto.scheduledFor,
+            scheduledFor: scheduledAt?.toISOString(),
           });
           break;
         }
         case 'CALLBACK': {
-          const dueAt = dto.scheduledFor ? new Date(dto.scheduledFor) : new Date(Date.now() + 24 * 3600 * 1000);
-          // Creates a real Callback task (agent worklist + overdue reporting) and
-          // sets lead state/nextAttemptAt in one place.
-          await this.scheduling.scheduleCallback({
-            tenantId: user.tenantId,
-            leadId: lead._id.toString(),
-            campaignId: call.campaignId.toString(),
-            dueAt,
-            handler: 'HUMAN',
-            preferredAgentId: call.agentId?.toString() ?? user.userId,
-            notes: dto.notes,
-          });
           // scheduleCallback already persisted state/nextAttemptAt; refresh the
           // in-memory doc so the save below doesn't write them back stale.
           lead.state_ = 'CALLBACK';
-          lead.nextAttemptAt = dueAt;
+          lead.nextAttemptAt = callbackDueAt;
           break;
         }
         case 'DO_NOT_CALL':
           this.leads.transition(lead, 'DNC', `Marked DNC by ${user.email}`);
+          // A DNC disposition must also suppress the number, not only flip the
+          // lead state — otherwise a re-import of the same list dials them again.
+          await this.suppression.optOut(user.tenantId, lead.phone, `Agent disposition DO_NOT_CALL (by ${user.email})`);
           break;
         case 'NOT_INTERESTED':
         case 'NOT_QUALIFIED':
@@ -308,8 +393,12 @@ export class CallsController {
           break;
         case 'FOLLOW_UP':
         default:
+          // Keep the lead with the agent but do not let the AI dialer grab it
+          // five seconds after they hang up: hold it for the follow-up time or a day.
+          lead.nextAttemptAt = scheduledAt ?? new Date(Date.now() + 24 * 3600 * 1000);
           break;
       }
+      if (call.answeredAt || call.bridgedAt) lead.lastContactedAt = new Date();
       // Any outstanding promise is now settled — a re-promise was already
       // recreated above for CALLBACK, so clearing here can't orphan the new one.
       if (dto.disposition !== 'CALLBACK') {
@@ -331,11 +420,25 @@ export class CallsController {
       await lead.save();
     }
 
-    // Wrap-up presence per WS-01 + talk-time accounting for routing.
-    if (call.agentId) {
-      const talkSeconds = call.bridgedAt ? Math.round((Date.now() - call.bridgedAt.getTime()) / 1000) : 0;
-      await this.presence.addTalkTime(call.agentId.toString(), talkSeconds);
-      await this.presence.release(call.agentId.toString(), 'WRAP_UP');
+    // Wrap-up presence per WS-01 + talk-time accounting for routing. The agent
+    // dispositioned, so their wrap-up is over: hand them straight back to the
+    // floor (or leave them where they put themselves — release() only moves
+    // RESERVED/ON_CALL/WRAP_UP).
+    // Only touch the agent's presence if this is still the call they are on —
+    // a late disposition must not knock them off a newer call.
+    const agentOnAnotherCall = call.agentId
+      ? await this.callModel.exists({ agentId: call.agentId, _id: { $ne: call._id }, state: { $in: [...LIVE_CALL_STATES] } })
+      : null;
+    if (call.agentId && !agentOnAnotherCall) {
+      const talkSeconds = call.bridgedAt
+        ? Math.max(0, Math.round(((call.endedAt ?? new Date()).getTime() - call.bridgedAt.getTime()) / 1000))
+        : 0;
+      if (talkSeconds > 0) await this.presence.addTalkTime(call.agentId.toString(), talkSeconds);
+      await this.callModel.updateOne({ _id: call._id }, { $unset: { wrapUpDeadline: '' } }).exec();
+      await this.presence.release(call.agentId.toString(), 'AVAILABLE');
+      const now = await this.presence.getPresence(call.agentId.toString());
+      this.gateway.emitToTenant(user.tenantId, 'presence.updated', { userId: call.agentId.toString(), state: now ?? 'OFFLINE' });
+      this.gateway.emitToUser(call.agentId.toString(), 'wrapup.finished', { callId: call._id.toString() });
     }
 
     await this.webhooks.dispatch(user.tenantId, 'call.completed', {
@@ -351,6 +454,7 @@ export class CallsController {
     // floor card in its own `finally`; a live-voice-demo call has no such
     // runtime, so this is the only place its card is cleared.
     this.gateway.removeFloorCall(user.tenantId, call._id.toString());
+    this.gateway.emitToTenant(user.tenantId, 'call.state.changed', { callId: call._id.toString(), state: 'COMPLETED' });
 
     return { ok: true };
   }

@@ -140,6 +140,8 @@ export type CallLeg = (typeof CALL_LEGS)[number];
 /** Live call lifecycle used by the orchestrator and floor feed. */
 export const CALL_STATES = [
   'DIALING',
+  /** Manual dial: INVITE claimed by exactly one connect() call, not yet ringing. */
+  'CONNECTING',
   'RINGING',
   'AMD_CLASSIFYING',
   'IN_CONVERSATION',
@@ -156,6 +158,7 @@ export type CallState = (typeof CALL_STATES)[number];
 /** States a call may still be live in — used by sweeps and the "am I on a call?" lookup. */
 export const LIVE_CALL_STATES: readonly CallState[] = [
   'DIALING',
+  'CONNECTING',
   'RINGING',
   'AMD_CLASSIFYING',
   'IN_CONVERSATION',

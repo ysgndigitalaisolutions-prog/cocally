@@ -33,8 +33,11 @@ export class WorkspaceController {
   @Get('me')
   @Roles('AGENT', 'SUPERVISOR', 'ADMIN', 'OWNER', 'QA')
   async me(@CurrentUser() user: AuthenticatedUser) {
-    const presence = await this.presence.getPresence(user.userId);
-    return { userId: user.userId, presence: presence ?? 'OFFLINE' };
+    const [presence, pendingOffer] = await Promise.all([
+      this.presence.getPresence(user.userId),
+      this.transfers.pendingOfferFor(user.userId),
+    ]);
+    return { userId: user.userId, presence: presence ?? 'OFFLINE', pendingOffer };
   }
 
   /** Live team roster with presence — powers the "who's online" panels. */

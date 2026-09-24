@@ -52,7 +52,7 @@ services:
     restart: unless-stopped
     env_file: .env.prod
     environment:
-      ENGINE_BASE_URL: http://api:4000
+      ENGINE_BASE_URL: http://api:4000/api/v1
     depends_on:
       api: { condition: service_healthy }
     <<: *logging

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { PipelineStage, Model, Types } from 'mongoose';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
 import { Transfer, TransferDocument } from '../../schemas/transfer.schema';
@@ -101,10 +101,32 @@ export class AnalyticsService {
       },
     ]).allowDiskUse(true);
 
+    // AI voice latency: every worker-reported turn in range, as percentiles.
+    const latencyPipeline = [
+      { $match: { ...filter, 'timings.turnLatencies.0': { $exists: true } } },
+      { $unwind: '$timings.turnLatencies' },
+      {
+        $group: {
+          _id: null,
+          turns: { $sum: 1 },
+          p50: { $percentile: { input: '$timings.turnLatencies', p: [0.5], method: 'approximate' } },
+          p95: { $percentile: { input: '$timings.turnLatencies', p: [0.95], method: 'approximate' } },
+        },
+      },
+    ] as unknown as PipelineStage[];
+    const [lat] = await this.callModel
+      .aggregate<{ p50: number[]; p95: number[]; turns: number }>(latencyPipeline)
+      .allowDiskUse(true)
+      .exec()
+      .catch(() => [] as never[]);
+
     const dials = row?.dials ?? 0;
     const connects = row?.connects ?? 0;
     const booked = row?.booked ?? 0;
     return {
+      voiceLatencyP50Ms: lat?.p50?.[0] != null ? Math.round(lat.p50[0]) : null,
+      voiceLatencyP95Ms: lat?.p95?.[0] != null ? Math.round(lat.p95[0]) : null,
+      voiceTurns: lat?.turns ?? 0,
       dials,
       connects,
       connectRate: dials > 0 ? connects / dials : 0,

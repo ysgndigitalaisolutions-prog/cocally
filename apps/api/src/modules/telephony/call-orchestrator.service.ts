@@ -129,6 +129,15 @@ export class CallOrchestratorService {
 
       await this.runCall(call, campaign, lead, pack.disclosures, graph, runtime);
       return { answered: call.amdClass === 'HUMAN' };
+    } catch (err) {
+      // A provider/LLM error mid-conversation must still close the record —
+      // otherwise the Call sits IN_CONVERSATION and the lead stays locked for
+      // an hour with no attempt counted.
+      this.logger.error(`simulated call ${callId} aborted: ${(err as Error).message}`);
+      if (call.state !== 'COMPLETED' && call.state !== 'BRIDGED') {
+        await this.finishCall(call, campaign, lead, 'FAILED', Date.now()).catch(() => undefined);
+      }
+      return { answered: false };
     } finally {
       this.activeCalls.delete(callId);
       this.gateway.removeFloorCall(campaign.tenantId.toString(), callId);
@@ -158,19 +167,50 @@ export class CallOrchestratorService {
     // when the INVITE throws there IS no return value, and without the callId
     // the Call would be stranded in DIALING with its lead locked.
     const created: { callId: string | null } = { callId: null };
+    const campaignKey = campaign._id.toString();
     try {
       await this.liveDriver.placeCall(campaign, lead, cli, {
         flowVersionId,
         onCallCreated: (callId) => {
           created.callId = callId;
         },
+        onAnswered: (callId) => this.progress.markAnswered(callId),
+        onDialFailed: (callId, sipStatus, detail) => this.progress.onDialFailed(callId, sipStatus, detail),
       });
+      this.trunkErrors.delete(campaignKey);
     } catch (err) {
       const message = (err as Error).message;
       this.logger.error(`live call to ${lead.phone} failed: ${message}`);
       if (created.callId) await this.progress.failCall(created.callId, 'TRUNK_ERROR', message);
+      await this.noteTrunkError(campaign);
     }
     return { answered: false };
+  }
+
+  /** Consecutive INVITE failures per campaign (trunk down, bad credentials). */
+  private readonly trunkErrors = new Map<string, number>();
+  private static readonly TRUNK_ERRORS_BEFORE_PAUSE = 5;
+
+  /**
+   * A dead trunk must not burn through the lead pool at full pacing: every
+   * failed INVITE used to cost the lead an attempt and an hour, and the tick
+   * kept going. After a run of consecutive failures the campaign pauses
+   * itself and says why, so a human fixes the trunk instead of the leads.
+   */
+  private async noteTrunkError(campaign: CampaignDocument): Promise<void> {
+    const key = campaign._id.toString();
+    const n = (this.trunkErrors.get(key) ?? 0) + 1;
+    this.trunkErrors.set(key, n);
+    if (n < CallOrchestratorService.TRUNK_ERRORS_BEFORE_PAUSE) return;
+    this.trunkErrors.delete(key);
+    await campaign.updateOne({ status: 'PAUSED' }).exec();
+    this.logger.error(
+      `campaign ${campaign.name} auto-PAUSED after ${n} consecutive trunk errors — check the SIP trunk / LiveKit credentials`,
+    );
+    this.gateway.emitToTenant(campaign.tenantId.toString(), 'campaign.auto_paused', {
+      campaignId: key,
+      reason: `${n} consecutive trunk errors`,
+    });
   }
 
   private pickFlowVersion(campaign: CampaignDocument): Types.ObjectId | null {

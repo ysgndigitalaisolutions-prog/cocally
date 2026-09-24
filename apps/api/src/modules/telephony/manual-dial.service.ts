@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { LIVE_CALL_STATES } from '@cocally/shared';
 import { Model, Types } from 'mongoose';
 import { config } from '../../common/config';
 import { Call, CallDocument } from '../../schemas/call.schema';
@@ -250,6 +251,17 @@ export class ManualDialService {
     if (lead.manualClaimedBy && lead.manualClaimedBy.toString() !== agent.id) {
       throw new BadRequestException('Lead is claimed by another agent.');
     }
+    if (!DIALABLE_STATES.includes(lead.state_)) {
+      throw new BadRequestException(`This lead is ${lead.state_} and cannot be dialed.`);
+    }
+    // The AI dialer may be talking to this person right now (its lock is
+    // refreshed at placement); a stale worklist tab must not ring them twice.
+    const liveCall = await this.callModel
+      .findOne({ leadId: lead._id, state: { $in: [...LIVE_CALL_STATES] } })
+      .select('_id')
+      .lean()
+      .exec();
+    if (liveCall) throw new BadRequestException('This lead is on a call right now.');
     const campaign = await this.campaignModel.findById(lead.campaignId).exec();
     if (!campaign) throw new NotFoundException('Campaign not found for lead.');
 
@@ -269,17 +281,29 @@ export class ManualDialService {
       countryPackCode: campaign.countryPackCode,
       dncEnforced: pack.dnc.enforced,
       frequencyCapDays: campaign.frequencyCapDays,
+      skipFrequencyCap: lead.state_ === 'CALLBACK',
     });
     if (!verdict.allowed) {
       throw new BadRequestException(`Blocked by compliance: ${verdict.reason}.`);
     }
 
-    // One live manual call per agent.
+    // One live call per agent. Only a call that is actually live blocks — an
+    // orphaned WRAP_UP/FAILED record (browser closed, trunk error) used to
+    // lock the agent out of dialing until someone edited the database.
     const existing = await this.callModel
-      .findOne({ tenantId: new Types.ObjectId(tenantId), agentId: new Types.ObjectId(agent.id), manual: true, disposition: null })
+      .findOne({
+        tenantId: new Types.ObjectId(tenantId),
+        agentId: new Types.ObjectId(agent.id),
+        state: { $in: [...LIVE_CALL_STATES] },
+      })
+      .select('_id manual')
       .lean()
       .exec();
-    if (existing) throw new BadRequestException('Finish (disposition) your current manual call first.');
+    if (existing) {
+      throw new BadRequestException(
+        existing.manual ? 'You are already on a manual call — hang it up first.' : 'You are on a call — finish it first.',
+      );
+    }
 
     // Claim + lock so neither the auto-dialer nor a second manual dial races us.
     lead.manualClaimedBy = new Types.ObjectId(agent.id);
@@ -293,7 +317,8 @@ export class ManualDialService {
       lead.assignedAt = new Date();
     }
     lead.attempts += 1;
-    lead.lastContactedAt = new Date();
+    // `lastContactedAt` is stamped on disposition, once we know someone answered —
+    // stamping it here made every unanswered manual dial trip the frequency cap.
     lead.timeline.push({ at: new Date(), kind: 'MANUAL_DIAL', detail: `Manual dial by ${agent.email}` });
     await lead.save();
 
@@ -377,6 +402,16 @@ export class ManualDialService {
    */
   async connect(tenantId: string, agentId: string, callId: string): Promise<{ ok: true }> {
     const call = await this.loadOwnedCall(tenantId, agentId, callId);
+    // Exactly one INVITE per call: a double-click or a client retry after a
+    // timeout must not dial the customer twice or, worse, fail and tear down
+    // a call that is already ringing.
+    const claimed = await this.callModel
+      .updateOne({ _id: call._id, state: 'DIALING' }, { $set: { state: 'CONNECTING' } })
+      .exec();
+    if (claimed.modifiedCount === 0) {
+      if (LIVE_CALL_STATES.includes(call.state)) return { ok: true };
+      throw new BadRequestException(`This call is ${call.state}; it cannot be connected.`);
+    }
     const lead = await this.leadModel.findById(call.leadId).lean().exec();
     if (!lead) throw new NotFoundException('Lead not found for this call.');
 
@@ -399,8 +434,9 @@ export class ManualDialService {
       throw new BadRequestException(`Could not place the call: ${(err as Error).message}`);
     }
 
-    call.state = 'RINGING';
-    await call.save();
+    // The customer's leg may already have joined and been finalised by the
+    // webhook in the meantime; only advance a call that is still ours to advance.
+    await this.callModel.updateOne({ _id: call._id, state: 'CONNECTING' }, { $set: { state: 'RINGING' } }).exec();
     return { ok: true };
   }
 
@@ -475,10 +511,10 @@ export class ManualDialService {
    */
   async hangup(tenantId: string, agentId: string, callId: string): Promise<{ ok: true }> {
     const call = await this.loadOwnedCall(tenantId, agentId, callId);
-    if (call.recordingEgressId) await this.livekit.stopRecording(call.recordingEgressId);
-    await this.livekit.hangup(callId);
-
-    if (call.state !== 'COMPLETED' && call.state !== 'FAILED') {
+    // Persist the terminal state BEFORE dropping the leg: the carrier's
+    // `participant_left` webhook races us, and if it wins it would record an
+    // AI_HANGUP end reason on a call the agent ended.
+    if (call.state !== 'COMPLETED' && call.state !== 'FAILED' && call.state !== 'WRAP_UP') {
       // Hanging up while parked would otherwise lose the open hold interval.
       if (call.heldSince) {
         call.heldMs += Math.max(0, Date.now() - call.heldSince.getTime());
@@ -496,6 +532,8 @@ export class ManualDialService {
       this.gateway.emitToTenant(tenantId, 'call.state.changed', { callId, state: 'WRAP_UP' });
       this.gateway.emitToUser(agentId, 'wrapup.started', { callId, deadline: deadline.getTime() });
     }
+    if (call.recordingEgressId) await this.livekit.stopRecording(call.recordingEgressId);
+    await this.livekit.hangup(callId);
     return { ok: true };
   }
 }

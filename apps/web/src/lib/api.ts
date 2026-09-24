@@ -70,6 +70,7 @@ api.interceptors.response.use(
     }
     if (error.response?.status === 401 && typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
       localStorage.removeItem('cocally.token');
+      localStorage.removeItem('cocally.user');
       window.location.href = '/login';
     }
     return Promise.reject(error);

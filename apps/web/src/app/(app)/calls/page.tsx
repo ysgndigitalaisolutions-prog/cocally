@@ -22,6 +22,7 @@ interface CallDetail extends CallRow {
   transcript: Array<{ speaker: string; text: string; leg: string }>;
   scoreHistory: Array<{ atMs: number; score: number; reason: string }>;
   complianceEvents: Array<{ atMs: number; kind: string; detail: string }>;
+  timings?: { turnLatencies?: number[]; turns?: Array<{ eou: number; stt: number; llm: number; tts: number; total: number }>; transferDeadAirMs?: number };
 }
 
 interface Campaign {
@@ -50,6 +51,19 @@ const EMPTY = { campaignId: '', agentId: '', outcome: '', disposition: '', amdCl
 export default function CallsPage() {
   const [calls, setCalls] = useState<CallRow[]>([]);
   const [detail, setDetail] = useState<CallDetail | null>(null);
+  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  const [recordingNote, setRecordingNote] = useState('');
+
+  // Presigned playback link, fetched per call; 404 = no audio for this call.
+  useEffect(() => {
+    setRecordingUrl(null);
+    setRecordingNote('');
+    if (!detail) return;
+    api
+      .get(`/calls/${detail._id}/recording`)
+      .then((r) => setRecordingUrl(r.data.url))
+      .catch((err) => setRecordingNote(err?.response?.data?.message ?? 'No recording available for this call.'));
+  }, [detail?._id]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [agents, setAgents] = useState<Member[]>([]);
   const [filters, setFilters] = useState({ ...EMPTY });
@@ -241,6 +255,13 @@ export default function CallsPage() {
                   {detail.summary}
                 </p>
               )}
+              {recordingUrl ? (
+                <audio controls preload="none" src={recordingUrl} className="w-full" aria-label="Call recording" />
+              ) : (
+                <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                  {recordingNote}
+                </p>
+              )}
               <div className="max-h-64 space-y-1 overflow-y-auto">
                 {detail.transcript.map((line, i) => (
                   <p key={i}>
@@ -263,6 +284,22 @@ export default function CallsPage() {
                   </p>
                 ))}
               </div>
+              {detail.timings?.turnLatencies && detail.timings.turnLatencies.length > 0 && (
+                <div>
+                  <h3 className="mb-1 font-semibold">AI response latency</h3>
+                  <p style={{ color: 'var(--text-dim)' }}>
+                    {(() => {
+                      const sorted = [...detail.timings!.turnLatencies!].sort((a, b) => a - b);
+                      const pct = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] ?? 0;
+                      const t = detail.timings!.turns ?? [];
+                      const avg = (k: 'eou' | 'llm' | 'tts') => (t.length ? Math.round(t.reduce((a, x) => a + x[k], 0) / t.length) : null);
+                      return `${sorted.length} turns · p50 ${pct(0.5)} ms · p95 ${pct(0.95)} ms · worst ${sorted[sorted.length - 1]} ms` +
+                        (t.length ? ` · avg end-of-turn ${avg('eou')} / LLM ${avg('llm')} / TTS ${avg('tts')} ms` : '');
+                    })()}
+                    {detail.timings.transferDeadAirMs != null && ` · transfer dead air ${detail.timings.transferDeadAirMs} ms`}
+                  </p>
+                </div>
+              )}
               <div>
                 <h3 className="mb-1 font-semibold">Compliance events</h3>
                 {detail.complianceEvents.map((event, i) => (

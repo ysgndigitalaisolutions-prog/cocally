@@ -33,6 +33,8 @@ export interface ActiveCallInfo {
   leadName: string;
   phone: string;
   cli?: string | null;
+  /** Owning agent id from the server (null for AI-only); decides who re-engages hold audio after a reload. */
+  agentId?: string | null;
   /** Manual dial only — join info already in hand from dial(), skips a round trip. */
   livekitUrl?: string;
   livekitToken?: string;

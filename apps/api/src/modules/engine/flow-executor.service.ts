@@ -137,6 +137,7 @@ export class FlowExecutorService {
         const result = await runtime.requestTransfer({
           whisperEnabled: node.config.whisperEnabled,
           acceptWindowSeconds: node.config.acceptWindowSeconds,
+          facts: context.facts,
         });
         if (result === 'BRIDGED') return { terminal: true, outcome: { kind: 'TRANSFERRED' } };
         // No agent free → availability fallback per XFER-03; edges keyed on

@@ -54,6 +54,8 @@ export interface CallTimings {
   sttFirstPartial?: number;
   ttsFirstByte?: number;
   turnLatencies: number[];
+  /** Per-turn breakdown (ms) from the voice worker, last 200 turns. */
+  turns?: Array<{ at: Date; eou: number; stt: number; llm: number; tts: number; total: number }>;
   transferDeadAirMs?: number;
 }
 

@@ -53,6 +53,10 @@ export class CountryPack {
   @Prop({ type: [String], default: [] })
   publicHolidays: string[];
 
+  /** State/territory holidays keyed by IANA zone, layered on top of the national list. */
+  @Prop({ type: Object, default: {} })
+  publicHolidaysByZone: Record<string, string[]>;
+
   /** Mandatory disclosures per CP-01 / AI-07 / AI-08. */
   @Prop({ type: Object, required: true })
   disclosures: {

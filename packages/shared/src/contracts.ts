@@ -26,6 +26,10 @@ export interface CurrentCallState {
   campaignName: string;
   state: CallState;
   manual: boolean;
+  /** Owning agent (null for an AI-only call); lets the bar know whether hold music is its job. */
+  agentId: string | null;
+  /** Set when the call is parked in WRAP_UP awaiting the agent's disposition. */
+  wrapUpDeadline: number | null;
   /** Epoch ms — drives the call timer without trusting the client clock. */
   startedAt: number;
   bridgedAt: number | null;

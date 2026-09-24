@@ -43,6 +43,7 @@ class UpdateUserDto {
 
   @IsOptional()
   @IsArray()
+  @ArrayNotEmpty()
   @IsIn(ROLES, { each: true })
   roles?: Role[];
 
@@ -101,6 +102,7 @@ export class UsersController {
   @Post(':id/2fa/reset')
   @Roles('OWNER', 'ADMIN')
   async reset2fa(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    await this.usersService.assertMayManageId(user.tenantId, user.userId, id);
     await this.authService.reset2fa(user.tenantId, id, { id: user.userId, label: user.email });
     return { ok: true };
   }

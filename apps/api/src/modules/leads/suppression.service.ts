@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { DncWashRecord, DncWashRecordDocument, SuppressionEntry, SuppressionEntryDocument } from '../../schemas/suppression.schema';
@@ -16,6 +16,8 @@ export type SuppressionVerdict =
  * 3. cross-campaign frequency caps,
  * 4. per-client suppression.
  */
+import { normalizePhone } from './phone.util';
+
 @Injectable()
 export class SuppressionService {
   constructor(
@@ -32,6 +34,7 @@ export class SuppressionService {
     countryPackCode: string;
     dncEnforced: boolean;
     frequencyCapDays: number;
+    skipFrequencyCap?: boolean;
   }): Promise<SuppressionVerdict> {
     const tenantId = new Types.ObjectId(input.tenantId);
 
@@ -53,7 +56,9 @@ export class SuppressionService {
     if (optOut) return { allowed: false, reason: 'OPT_OUT' };
 
     // 3. Cross-campaign frequency cap: max 1 contact per N days across ALL campaigns.
-    if (input.frequencyCapDays > 0) {
+    // A lead the customer asked us to call back is exempt — the cap protects
+    // people from unsolicited repeat contact, not from a promised callback.
+    if (input.frequencyCapDays > 0 && !input.skipFrequencyCap) {
       const cutoff = new Date(Date.now() - input.frequencyCapDays * 24 * 60 * 60 * 1000);
       const recentContact = await this.leadModel
         .findOne({ tenantId, phone: input.phone, lastContactedAt: { $gte: cutoff } })
@@ -82,7 +87,12 @@ export class SuppressionService {
    * Instant opt-out write per LEAD-05/AI-09: called the moment a customer
    * says "don't call me", including mid-call.
    */
-  async optOut(tenantId: string, phone: string, source: string): Promise<void> {
+  async optOut(tenantId: string, rawPhone: string, source: string, region = 'AU'): Promise<void> {
+    // Agents type numbers as '0412 345 678'; leads are stored E.164. An
+    // un-normalised entry never matches at dial time and suppresses nobody.
+    const normalized = normalizePhone(rawPhone, region);
+    if (!normalized.ok) throw new BadRequestException(`Cannot opt out '${rawPhone}': ${normalized.reason}`);
+    const phone = normalized.value.e164;
     await this.suppressionModel.updateOne(
       { tenantId: new Types.ObjectId(tenantId), phone, kind: 'OPT_OUT' },
       { $setOnInsert: { source } },

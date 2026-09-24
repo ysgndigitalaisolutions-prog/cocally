@@ -1,10 +1,11 @@
 import 'reflect-metadata';
 import { ValidationPipe } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { HttpAdapterHost, NestFactory } from '@nestjs/core';
 import express from 'express';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { config } from './common/config';
+import { MalformedIdFilter } from './common/http/malformed-id.filter';
 
 /**
  * Lead lists arrive as a CSV in the request body, and Express defaults to a
@@ -41,11 +42,19 @@ async function bootstrap(): Promise<void> {
       transform: true,
     }),
   );
+  app.useGlobalFilters(new MalformedIdFilter(app.get(HttpAdapterHost)));
   app.enableShutdownHooks();
 
   await app.listen(config.port);
   // eslint-disable-next-line no-console
   console.log(`CoCally API listening on :${config.port}`);
 }
+
+// A rejected promise nobody awaited (a fire-and-forget timer, a socket
+// handler) must not take the whole floor down with it: log it and carry on.
+process.on('unhandledRejection', (reason) => {
+  // eslint-disable-next-line no-console
+  console.error('[unhandledRejection]', reason instanceof Error ? reason.stack ?? reason.message : reason);
+});
 
 void bootstrap();

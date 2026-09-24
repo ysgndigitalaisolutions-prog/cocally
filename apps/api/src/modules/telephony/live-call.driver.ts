@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { LIVE_CALL_STATES } from '@cocally/shared';
 import { Model, Types } from 'mongoose';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { CampaignDocument } from '../../schemas/campaign.schema';
@@ -31,6 +32,10 @@ export interface LivePlacementOptions {
    * and the lead locked, because the caller would have nothing to finalise.
    */
   onCallCreated?: (callId: string) => void;
+  /** The customer picked up (the awaited INVITE resolved). */
+  onAnswered?: (callId: string) => Promise<void> | void;
+  /** The INVITE ended without an answer: busy, no answer, rejected, invalid… */
+  onDialFailed?: (callId: string, sipStatus: number | undefined, detail: string) => Promise<void> | void;
 }
 
 interface LiveCallEntry {
@@ -61,7 +66,7 @@ interface LiveCallEntry {
  * arrives as a LiveKit webhook and is handled by `CallProgressService`.
  */
 @Injectable()
-export class LiveCallDriver {
+export class LiveCallDriver implements OnModuleInit {
   private readonly logger = new Logger(LiveCallDriver.name);
 
   /**
@@ -81,6 +86,29 @@ export class LiveCallDriver {
     private readonly livekit: LivekitService,
     private readonly gateway: RealtimeGateway,
   ) {}
+
+  /**
+   * Rebuild the in-flight registry after a restart so pacing does not read
+   * zero (and over-dial to twice the channel cap) while calls placed by the
+   * previous process are still live. Whatever really ended in the meantime is
+   * released by the terminal webhook or the hung-call sweep as usual.
+   */
+  async onModuleInit(): Promise<void> {
+    const since = new Date(Date.now() - 2 * 60 * 60_000);
+    const live = await this.callModel
+      .find({ state: { $in: [...LIVE_CALL_STATES] }, manual: { $ne: true }, agentId: null, startedAt: { $gte: since } })
+      .select('_id campaignId tenantId leadId')
+      .lean()
+      .exec();
+    for (const c of live) {
+      this.liveCalls.set(c._id.toString(), {
+        campaignId: c.campaignId.toString(),
+        tenantId: c.tenantId.toString(),
+        leadId: c.leadId.toString(),
+      });
+    }
+    if (live.length > 0) this.logger.warn(`restored ${live.length} live call(s) into the pacing registry after restart`);
+  }
 
   activeCount(campaignId: string): number {
     return [...this.liveCalls.values()].filter((c) => c.campaignId === campaignId).length;
@@ -164,10 +192,22 @@ export class LiveCallDriver {
         call.recordingUri = recording.uri;
       }
 
-      const { sipCallId } = await this.livekit.dialOut(callId, lead.phone, { from: cli });
-      if (sipCallId) call.sipCallId = sipCallId;
       call.state = 'RINGING';
       await call.save();
+      // The INVITE is awaited until answered (or refused) in the background —
+      // see LivekitService.dialOut. Answer/failure is reported through the
+      // callbacks so CallProgressService owns the state machine either way.
+      void this.livekit
+        .dialOut(callId, lead.phone, { from: cli })
+        .then(async ({ sipCallId }) => {
+          if (sipCallId) await this.callModel.updateOne({ _id: call._id }, { sipCallId }).exec();
+          await options?.onAnswered?.(callId);
+        })
+        .catch(async (err: Error) => {
+          const status = LivekitService.sipStatusFromError(err);
+          this.logger.warn(`live dial ${callId} not answered: ${err.message} (sip ${status ?? 'n/a'})`);
+          await options?.onDialFailed?.(callId, status, err.message);
+        });
 
       this.gateway.updateFloorCall(tenantId, {
         callId,
@@ -182,9 +222,7 @@ export class LiveCallDriver {
       });
       this.gateway.emitToTenant(tenantId, 'call.state.changed', { callId, state: 'RINGING' });
 
-      this.logger.log(
-        `live dial: ${lead.phone} via ${cli ?? 'trunk default'} (call ${callId}, sip ${sipCallId ?? 'n/a'})`,
-      );
+      this.logger.log(`live dial: ${lead.phone} via ${cli ?? 'trunk default'} (call ${callId})`);
 
       // Progress arrives by webhook from here — see LivekitWebhookController.
       return { answered: false, callId };

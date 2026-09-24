@@ -10,6 +10,7 @@ import {
 } from '@nestjs/websockets';
 import type { FloorCallCard, PauseCode, PresenceState, Role, TransferCard, TranscriptSegment } from '@cocally/shared';
 import type { Server, Socket } from 'socket.io';
+import { UserStateService } from '../../common/auth/user-state.service';
 import { PresenceService } from './presence.service';
 
 interface SocketUser {
@@ -33,16 +34,42 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   constructor(
     private readonly jwtService: JwtService,
     private readonly presence: PresenceService,
+    private readonly userState: UserStateService,
   ) {}
 
   private users = new Map<string, SocketUser>();
 
+  /** userId → timer that will mark them OFFLINE if no socket comes back in time. */
+  private readonly offlineTimers = new Map<string, NodeJS.Timeout>();
+
+  /** Sockets currently connected for a user (for the tenant-wide "who's online" and for kicking on deactivation). */
+  private socketsOf(userId: string): string[] {
+    return [...this.users.entries()].filter(([, u]) => u.userId === userId).map(([id]) => id);
+  }
+
+  /** Drop every socket a user has (deactivated / signed out everywhere). */
+  disconnectUser(userId: string): void {
+    for (const id of this.socketsOf(userId)) this.server.sockets.sockets.get(id)?.disconnect(true);
+  }
+
   async handleConnection(socket: Socket): Promise<void> {
     try {
       const token = (socket.handshake.auth as { token?: string }).token ?? '';
-      const payload = await this.jwtService.verifyAsync<{ sub: string; tenantId: string; roles: Role[] }>(token);
-      const user: SocketUser = { userId: payload.sub, tenantId: payload.tenantId, roles: payload.roles };
+      const payload = await this.jwtService.verifyAsync<{ sub: string; tenantId: string; roles: Role[]; tv?: number }>(token);
+      // Same live checks as the HTTP guard: a deactivated user or one whose
+      // sessions were signed out must not keep a socket streaming floor data.
+      const state = await this.userState.load(payload.sub);
+      if (!state || !state.active || (payload.tv ?? 0) !== state.tokenVersion) {
+        socket.disconnect(true);
+        return;
+      }
+      const user: SocketUser = { userId: payload.sub, tenantId: payload.tenantId, roles: state.roles };
       this.users.set(socket.id, user);
+      const pending = this.offlineTimers.get(user.userId);
+      if (pending) {
+        clearTimeout(pending);
+        this.offlineTimers.delete(user.userId);
+      }
       await socket.join(`tenant:${user.tenantId}`);
       await socket.join(`user:${user.userId}`);
       this.logger.log(`socket connected user=${user.userId}`);
@@ -54,13 +81,27 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   async handleDisconnect(socket: Socket): Promise<void> {
     const user = this.users.get(socket.id);
     this.users.delete(socket.id);
-    if (user) {
-      // If this was the agent's last socket, mark them offline per WS-01.
-      const stillConnected = [...this.users.values()].some((u) => u.userId === user.userId);
-      if (!stillConnected) {
-        await this.presence.setPresence(user.userId, 'OFFLINE');
-        this.emitToTenant(user.tenantId, 'presence.updated', { userId: user.userId, state: 'OFFLINE' });
-      }
+    if (user && this.socketsOf(user.userId).length === 0) {
+      // Last socket gone. A reload or a Wi-Fi blip reconnects within seconds,
+      // so wait out a grace period before taking the agent off the floor —
+      // and even then never touch ON_CALL/RESERVED, which belong to the call.
+      const existing = this.offlineTimers.get(user.userId);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        this.offlineTimers.delete(user.userId);
+        if (this.socketsOf(user.userId).length > 0) return;
+        void this.presence
+          .setOfflineIfIdle(user.userId)
+          .then((changed) => {
+            if (changed) {
+              this.emitToTenant(user.tenantId, 'presence.updated', { userId: user.userId, state: 'OFFLINE' });
+              this.logger.log(`socket gone ${config.presenceDisconnectGraceSeconds}s: user=${user.userId} → OFFLINE`);
+            }
+          })
+          .catch((err: Error) => this.logger.error(`offline-on-disconnect failed for ${user.userId}: ${err.message}`));
+      }, config.presenceDisconnectGraceSeconds * 1000);
+      timer.unref?.();
+      this.offlineTimers.set(user.userId, timer);
     }
   }
 

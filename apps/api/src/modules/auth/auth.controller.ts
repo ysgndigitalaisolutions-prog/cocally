@@ -56,7 +56,8 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Public()
-  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  // A whole floor logs in from one office IP at 9am; 10/min locked them out.
+  @Throttle({ default: { ttl: 60_000, limit: 60 } })
   @Post('login')
   login(@Body() dto: LoginDto, @Req() req: Request) {
     return this.authService.login(dto.identifier, dto.password, dto.totpCode, ctxOf(req));

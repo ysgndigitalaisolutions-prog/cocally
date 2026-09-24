@@ -18,6 +18,7 @@ import { Transfer, TransferDocument } from '../../schemas/transfer.schema';
 import { User, UserDocument } from '../../schemas/user.schema';
 import { PresenceService } from '../workspace/presence.service';
 import { RealtimeGateway } from '../workspace/realtime.gateway';
+import { CallProgressService } from './call-progress.service';
 import { LivekitService } from './livekit.service';
 
 /** What an accepting agent needs to join the room. */
@@ -115,6 +116,7 @@ export class CallControlService {
     private readonly presence: PresenceService,
     private readonly gateway: RealtimeGateway,
     private readonly livekit: LivekitService,
+    private readonly progress: CallProgressService,
   ) {}
 
   // ── Shared helpers ──────────────────────────────────────────────────────
@@ -500,16 +502,17 @@ export class CallControlService {
     }
 
     this.settleHold(call);
-    if (call.recordingEgressId) await this.livekit.stopRecording(call.recordingEgressId);
-    // The SIP leg has been REFERed away and the SDK only resolves once the
-    // transfer completed, so tearing the room down cannot cut the customer off.
-    await this.livekit.hangup(callId);
-
     const deadline = new Date(Date.now() + config.floor.wrapUpMaxSeconds * 1000);
+    // Terminal state first so the racing `participant_left` webhook is a no-op.
     call.state = 'WRAP_UP';
     call.endReason = 'AGENT_HANGUP';
+    call.endedAt = new Date();
     call.wrapUpDeadline = deadline;
     await call.save();
+    this.warmHandovers.delete(callId);
+    // The SIP leg has been REFERed away and the SDK only resolves once the
+    // transfer completed, so tearing the room down cannot cut the customer off.
+    await this.progress.releaseResources(call);
 
     await this.presence.release(agentId, 'WRAP_UP');
     this.gateway.emitToTenant(tenantId, 'presence.updated', { userId: agentId, state: 'WRAP_UP' });
@@ -518,6 +521,50 @@ export class CallControlService {
     this.emitCallState(call, 'AGENT_HANGUP');
     this.logger.log(`call ${callId} transferred externally to ${destination} by agent ${agentId}`);
     return { ok: true, destination };
+  }
+
+  // ── B2. Agent hang-up (any call source) ─────────────────────────────────
+
+  /**
+   * The agent ends the call from the bar. Works for a bridged AI transfer, a
+   * predictive bridge or a manual dial alike: persist WRAP_UP with a deadline
+   * first (so a racing `participant_left` webhook is a no-op), then drop the
+   * customer leg, stop the recording and free the pacing slot.
+   */
+  async hangupByAgent(tenantId: string, agentId: string, callId: string): Promise<{ ok: true; state: CallState }> {
+    if (!Types.ObjectId.isValid(callId)) throw new NotFoundException('Call not found');
+    const call = await this.callModel
+      .findOne({ _id: new Types.ObjectId(callId), tenantId: new Types.ObjectId(tenantId) })
+      .exec();
+    if (!call) throw new NotFoundException('Call not found');
+    const onCall =
+      call.agentId?.toString() === agentId || call.participantAgentIds.some((id) => id.toString() === agentId);
+    if (!onCall) throw new ForbiddenException('This call belongs to another agent.');
+    if (!LIVE_CALL_STATES.includes(call.state)) return { ok: true, state: call.state };
+
+    this.settleHold(call);
+    const deadline = new Date(Date.now() + config.floor.wrapUpMaxSeconds * 1000);
+    call.state = 'WRAP_UP';
+    call.wrapUpDeadline = deadline;
+    if (!call.endReason) call.endReason = 'AGENT_HANGUP';
+    if (!call.endedAt) call.endedAt = new Date();
+    if (!call.outcome && call.answeredAt) call.outcome = 'ANSWERED_HUMAN';
+    await call.save();
+    this.warmHandovers.delete(callId);
+
+    await this.progress.releaseResources(call);
+
+    for (const id of [call.agentId?.toString(), ...call.participantAgentIds.map((p) => p.toString())]) {
+      if (!id) continue;
+      const to = id === call.agentId?.toString() ? 'WRAP_UP' : 'AVAILABLE';
+      await this.presence.release(id, to);
+      this.gateway.emitToTenant(tenantId, 'presence.updated', { userId: id, state: to });
+      this.gateway.emitToUser(id, 'call.ended', { callId, reason: 'AGENT_HANGUP', outcome: call.outcome ?? null });
+      if (to === 'WRAP_UP') this.gateway.emitToUser(id, 'wrapup.started', { callId, deadline: deadline.getTime() });
+    }
+    this.emitCallState(call, 'AGENT_HANGUP');
+    this.logger.log(`call ${callId} hung up by agent ${agentId}`);
+    return { ok: true, state: call.state };
   }
 
   // ── C. Call-bar recovery ────────────────────────────────────────────────
@@ -535,11 +582,16 @@ export class CallControlService {
    */
   async currentCall(tenantId: string, agentId: string): Promise<CurrentCallState | null> {
     const oid = new Types.ObjectId(agentId);
+    // WRAP_UP is included so an un-dispositioned call survives a reload: the
+    // bar comes back in its "ended, disposition needed" state instead of the
+    // agent being blocked from dialing by a record they can no longer see.
     const call = await this.callModel
       .findOne({
         tenantId: new Types.ObjectId(tenantId),
-        state: { $in: [...LIVE_CALL_STATES] },
-        $or: [{ agentId: oid }, { participantAgentIds: oid }],
+        $or: [
+          { state: { $in: [...LIVE_CALL_STATES] }, $or: [{ agentId: oid }, { participantAgentIds: oid }] },
+          { state: 'WRAP_UP', agentId: oid, disposition: null },
+        ],
       })
       .sort({ startedAt: -1 })
       .exec();
@@ -565,7 +617,7 @@ export class CallControlService {
     let livekitUrl = '';
     let livekitToken = '';
     let roomName = this.livekit.roomName(callId);
-    if (this.livekit.isConfigured()) {
+    if (this.livekit.isConfigured() && LIVE_CALL_STATES.includes(call.state)) {
       const minted = await this.livekit.mintToken(callId, this.livekit.agentIdentity(agentId), agentId);
       livekitUrl = minted.url;
       livekitToken = minted.token;
@@ -581,6 +633,8 @@ export class CallControlService {
       campaignName: campaign?.name ?? '',
       state: call.state,
       manual: call.manual,
+      agentId: call.agentId?.toString() ?? null,
+      wrapUpDeadline: call.wrapUpDeadline?.getTime() ?? null,
       startedAt: call.startedAt.getTime(),
       bridgedAt: call.bridgedAt?.getTime() ?? null,
       onHold: call.state === 'ON_HOLD',

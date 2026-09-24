@@ -132,6 +132,21 @@ export class LivekitService {
   // ── Dialling ────────────────────────────────────────────────────────────
 
   /**
+   * SIP response code carried on a failed `createSipParticipant`, if any.
+   * The SDK surfaces it as Twirp error metadata (`sip_status_code`), and
+   * older builds only in the message text.
+   */
+  static sipStatusFromError(err: unknown): number | undefined {
+    const e = err as { metadata?: Record<string, string>; message?: string };
+    const meta = e?.metadata?.['sip_status_code'] ?? e?.metadata?.['sip_status'];
+    const fromMeta = meta ? Number(meta) : NaN;
+    if (Number.isInteger(fromMeta) && fromMeta >= 100 && fromMeta < 700) return fromMeta;
+    const m = /\b(4\d\d|5\d\d|6\d\d)\b/.exec(e?.message ?? '');
+    if (m) return Number(m[1]);
+    return undefined;
+  }
+
+  /**
    * Real PSTN dial-out over whichever outbound SIP trunk `LIVEKIT_SIP_TRUNK_ID`
    * points at. `from` presents the CLI the pool selected instead of the trunk
    * default.
@@ -143,7 +158,7 @@ export class LivekitService {
   async dialOut(
     callId: string,
     phoneNumber: string,
-    options?: { from?: string; ringingTimeoutSeconds?: number },
+    options?: { from?: string; ringingTimeoutSeconds?: number; waitUntilAnswered?: boolean },
   ): Promise<{ sipCallId: string | null }> {
     if (!config.livekit.sipTrunkId) {
       throw new ServiceUnavailableException('LIVEKIT_SIP_TRUNK_ID is not configured — no outbound SIP trunk set up yet');
@@ -157,7 +172,12 @@ export class LivekitService {
         participantName: 'Lead',
         playDialtone: true,
         fromNumber: options?.from,
-        waitUntilAnswered: false,
+        // `waitUntilAnswered: true` is the only reliable answer signal on a
+        // real trunk: the `participant_joined` webhook fires while the phone
+        // is still ringing, and there is no webhook for the SIP status
+        // attribute changing to "active". With it, this promise resolves on
+        // pickup and rejects with the SIP status (486/480/603…) on failure.
+        waitUntilAnswered: options?.waitUntilAnswered ?? true,
         ringingTimeout: options?.ringingTimeoutSeconds ?? 45,
       },
     );

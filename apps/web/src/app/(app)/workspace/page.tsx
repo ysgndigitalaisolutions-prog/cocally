@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentShiftState, FloorCallCard, PauseCode, PredictiveBridgeCard, TransferCard } from '@cocally/shared';
+import type { AgentShiftState, FloorCallCard, PauseCode } from '@cocally/shared';
 import { api, secondsSince, secondsUntil, serverNow } from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAppStore } from '@/lib/store';
@@ -46,20 +46,15 @@ export default function WorkspacePage() {
     setPresence,
     shift,
     setShift,
-    transferOffer,
-    setTransferOffer,
-    setActiveCall,
     activeCall,
     wrapUp,
   } = useAppStore();
   const [floor, setFloor] = useState<Record<string, FloorCallCard>>({});
-  const [countdown, setCountdown] = useState(0);
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [shiftError, setShiftError] = useState('');
   const [busy, setBusy] = useState(false);
   /** Forces a re-render once a second so the shift clocks tick. */
   const [, setTick] = useState(0);
-  const offerRef = useRef<TransferCard | null>(null);
   /** serverNow() at the moment `shift` was fetched — the origin the clocks tick from. */
   const shiftFetchedAt = useRef(0);
 
@@ -95,67 +90,35 @@ export default function WorkspacePage() {
     const socket = getSocket();
     if (!socket) return;
 
-    socket.on('presence.updated', ({ userId, state }: { userId: string; state: string }) => {
+    // Transfer offers, bridges and wrap-up are owned by GlobalCallBar (mounted
+    // for the whole session) so they are never missed on another page. This
+    // page only keeps the team roster and the live floor in step.
+    const onPresence = ({ userId, state }: { userId: string; state: string }) => {
       setTeam((prev) => prev.map((m) => (m.id === userId ? { ...m, presence: state } : m)));
       const me = JSON.parse(localStorage.getItem('cocally.user') ?? '{}') as { id?: string };
       // Re-read the shift rather than trusting the broadcast alone: pause code,
       // paused total and clock-in time all move with it.
       if (me.id === userId) void loadShift().catch(() => undefined);
-    });
-
-    socket.on('transfer.offer', (card: TransferCard) => {
-      offerRef.current = card;
-      setTransferOffer(card);
-    });
-    socket.on('transfer.cancelled', ({ transferId }: { transferId: string }) => {
-      if (offerRef.current?.transferId === transferId) {
-        offerRef.current = null;
-        setTransferOffer(null);
-      }
-    });
-    // The GlobalCallBar (mounted once in the app layout) owns everything
-    // from here on — audio, mute, DTMF, briefing, disposition — so it stays
-    // on screen even if the agent navigates off /workspace mid-call.
-    socket.on('transfer.bridged', ({ callId }: { callId: string }) => {
-      const offer = offerRef.current;
-      setActiveCall({ callId, source: 'transfer', leadName: offer?.name ?? '', phone: '' });
-      setTransferOffer(null);
-    });
-    socket.on('predictive.call.bridged', (card: PredictiveBridgeCard) => {
-      setActiveCall({ callId: card.callId, source: 'predictive', leadName: card.leadName, phone: card.phone });
-    });
-    socket.on('floor.call.updated', (card: FloorCallCard) => {
-      setFloor((prev) => ({ ...prev, [card.callId]: card }));
-    });
-    socket.on('floor.call.removed', ({ callId }: { callId: string }) => {
+    };
+    const onFloorUpdated = (card: FloorCallCard) => setFloor((prev) => ({ ...prev, [card.callId]: card }));
+    const onFloorRemoved = ({ callId }: { callId: string }) =>
       setFloor((prev) => {
         const next = { ...prev };
         delete next[callId];
         return next;
       });
-    });
+    socket.on('presence.updated', onPresence);
+    socket.on('floor.call.updated', onFloorUpdated);
+    socket.on('floor.call.removed', onFloorRemoved);
 
+    // Removed by reference: `socket.off(event)` would also strip the
+    // GlobalCallBar's listeners for the same events.
     return () => {
-      socket.off('presence.updated');
-      socket.off('transfer.offer');
-      socket.off('transfer.cancelled');
-      socket.off('transfer.bridged');
-      socket.off('predictive.call.bridged');
-      socket.off('floor.call.updated');
-      socket.off('floor.call.removed');
+      socket.off('presence.updated', onPresence);
+      socket.off('floor.call.updated', onFloorUpdated);
+      socket.off('floor.call.removed', onFloorRemoved);
     };
-  }, [setActiveCall, setTransferOffer, loadShift]);
-
-  // Countdown ring per WS-03.
-  useEffect(() => {
-    if (!transferOffer) return;
-    const timer = setInterval(() => {
-      const remaining = secondsUntil(transferOffer.acceptDeadline);
-      setCountdown(remaining);
-      if (remaining === 0) setTransferOffer(null);
-    }, 250);
-    return () => clearInterval(timer);
-  }, [transferOffer, setTransferOffer]);
+  }, [loadShift]);
 
   async function changePresence(state: 'AVAILABLE' | 'WRAP_UP' | 'OFFLINE', pauseCode?: PauseCode) {
     setBusy(true);
@@ -196,36 +159,17 @@ export default function WorkspacePage() {
     }
   }
 
-  async function acceptOffer() {
-    if (!transferOffer) return;
-    try {
-      await api.post(`/workspace/transfers/${transferOffer.transferId}/accept`);
-    } catch {
-      // The 13s(ish) accept window can lapse between the card rendering and
-      // the click landing (server already cascaded to the next agent) — was
-      // previously an uncaught 404 that crashed the page instead of just
-      // clearing the stale card with an explanation.
-      alert('This offer has expired — it was likely already offered to someone else. Wait for the next one.');
-      setTransferOffer(null);
-    }
-  }
-
-  async function declineOffer() {
-    if (!transferOffer) return;
-    try {
-      await api.post(`/workspace/transfers/${transferOffer.transferId}/decline`);
-    } catch {
-      // Already expired — nothing to decline, just clear it below.
-    }
-    setTransferOffer(null);
-  }
-
   const meta = PRESENCE_META[presence] ?? PRESENCE_META.OFFLINE!;
   const clockedIn = Boolean(shift?.clockedInAt);
   // The API refuses AVAILABLE for an agent who is not on shift, because the
   // dialer would otherwise pace calls at an empty chair. Disable the button and
   // say why rather than letting the agent discover it through a 400.
-  const availableBlockedReason = clockedIn ? '' : 'Clock in first — you are not on shift yet.';
+  const onCall = Boolean(activeCall) || presence === 'ON_CALL' || presence === 'RESERVED';
+  const availableBlockedReason = onCall
+    ? 'Finish the call (hang up and log it) first.'
+    : clockedIn
+      ? ''
+      : 'Clock in first — you are not on shift yet.';
 
   // Both counters tick from the server's snapshot plus the time since we took
   // it. `pausedSeconds` only advances while actually paused; the server already
@@ -242,7 +186,7 @@ export default function WorkspacePage() {
           <button
             onClick={() => changePresence('AVAILABLE')}
             className="btn text-sm"
-            disabled={busy || !clockedIn}
+            disabled={busy || !clockedIn || onCall}
             title={availableBlockedReason || undefined}
             style={
               presence === 'AVAILABLE'
@@ -260,7 +204,8 @@ export default function WorkspacePage() {
           <button
             onClick={() => changePresence('WRAP_UP')}
             className="btn text-sm"
-            disabled={busy}
+            disabled={busy || onCall}
+            title={onCall ? availableBlockedReason : undefined}
             style={
               presence === 'WRAP_UP'
                 ? { background: 'var(--accent)', color: '#0b1220' }
@@ -278,7 +223,8 @@ export default function WorkspacePage() {
           <button
             onClick={() => changePresence('OFFLINE')}
             className="btn text-sm"
-            disabled={busy}
+            disabled={busy || onCall}
+            title={onCall ? availableBlockedReason : undefined}
             style={
               presence === 'OFFLINE'
                 ? { background: 'var(--accent)', color: '#0b1220' }
@@ -370,51 +316,6 @@ export default function WorkspacePage() {
           <span className="font-mono text-xl font-bold tabular-nums" style={{ color: 'var(--accent)' }}>
             {formatClock(secondsUntil(wrapUp.deadline))}
           </span>
-        </div>
-      )}
-
-      {transferOffer && (
-        <div className="card border-2 p-6" style={{ borderColor: 'var(--accent)' }}>
-          <div className="flex items-start justify-between">
-            <div>
-              <p className="text-sm font-semibold" style={{ color: 'var(--accent)' }}>
-                Incoming transfer — {transferOffer.campaignName}
-              </p>
-              <h2 className="mt-1 text-xl font-bold">
-                {transferOffer.name} · {transferOffer.location}
-              </h2>
-              <p className="mt-1 text-sm" style={{ color: 'var(--text-dim)' }}>
-                Score <span className="font-bold" style={{ color: 'var(--good)' }}>{transferOffer.score}</span>
-                {transferOffer.flaggedObjection && <> · objection: {transferOffer.flaggedObjection}</>}
-              </p>
-            </div>
-            <div
-              className="flex h-14 w-14 items-center justify-center rounded-full border-4 text-lg font-bold"
-              style={{ borderColor: countdown <= 4 ? 'var(--bad)' : 'var(--accent)' }}
-            >
-              {countdown}
-            </div>
-          </div>
-          <ul className="mt-4 grid grid-cols-2 gap-1 text-sm md:grid-cols-3">
-            {transferOffer.facts.map((fact) => (
-              <li key={fact.label}>
-                <span style={{ color: fact.confirmed ? 'var(--good)' : 'var(--text-dim)' }}>
-                  {fact.confirmed ? '✓' : '·'} {fact.label}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-3 text-sm italic" style={{ color: 'var(--text-dim)' }}>
-            {transferOffer.suggestedOpener}
-          </p>
-          <div className="mt-4 flex gap-3">
-            <button onClick={acceptOffer} className="btn btn-primary flex-1">
-              Accept transfer
-            </button>
-            <button onClick={declineOffer} className="btn btn-ghost">
-              Decline
-            </button>
-          </div>
         </div>
       )}
 

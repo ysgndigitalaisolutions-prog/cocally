@@ -29,6 +29,15 @@ function applyLexicon(text: string, lexicon?: Record<string, string>): string {
   return out;
 }
 
+/**
+ * Every provider call on the speech path is bounded: an unanswered HTTP call
+ * used to hang a turn (and the caller's `await`) indefinitely.
+ */
+const PROVIDER_TIMEOUT_MS = 20_000;
+function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(PROVIDER_TIMEOUT_MS) });
+}
+
 export class ElevenLabsTts implements TtsAdapter {
   readonly info = {
     id: 'elevenlabs',
@@ -49,7 +58,7 @@ export class ElevenLabsTts implements TtsAdapter {
     const apiKey = credentials?.apiKey;
     if (!apiKey) throw new Error('ElevenLabs API key not configured');
     const voiceId = request.voiceId ?? 'EXAVITQu4vr4xnSDxMaL';
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+    const response = await fetchWithTimeout(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
       method: 'POST',
       headers: { 'xi-api-key': apiKey, 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -66,7 +75,7 @@ export class ElevenLabsTts implements TtsAdapter {
 
   async listVoices(credentials?: ProviderCredentials) {
     if (!credentials?.apiKey) return [];
-    const response = await fetch('https://api.elevenlabs.io/v1/voices', { headers: { 'xi-api-key': credentials.apiKey } });
+    const response = await fetchWithTimeout('https://api.elevenlabs.io/v1/voices', { headers: { 'xi-api-key': credentials.apiKey } });
     if (!response.ok) return [];
     const data = (await response.json()) as { voices: Array<{ voice_id: string; name: string }> };
     return data.voices.map((v) => ({ id: v.voice_id, label: v.name }));
@@ -75,7 +84,7 @@ export class ElevenLabsTts implements TtsAdapter {
   async healthy(credentials?: ProviderCredentials): Promise<boolean> {
     if (!credentials?.apiKey) return false;
     try {
-      const response = await fetch('https://api.elevenlabs.io/v1/user', { headers: { 'xi-api-key': credentials.apiKey } });
+      const response = await fetchWithTimeout('https://api.elevenlabs.io/v1/user', { headers: { 'xi-api-key': credentials.apiKey } });
       return response.ok;
     } catch {
       return false;
@@ -107,7 +116,7 @@ export class GoogleTts implements TtsAdapter {
   async synthesize(request: TtsRequest, credentials?: ProviderCredentials): Promise<TtsResult> {
     const apiKey = credentials?.apiKey;
     if (!apiKey) throw new Error('Google Cloud API key not configured');
-    const response = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
+    const response = await fetchWithTimeout(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${apiKey}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -125,7 +134,7 @@ export class GoogleTts implements TtsAdapter {
 
   async listVoices(credentials?: ProviderCredentials) {
     if (!credentials?.apiKey) return [];
-    const response = await fetch(`https://texttospeech.googleapis.com/v1/voices?languageCode=en-AU&key=${credentials.apiKey}`);
+    const response = await fetchWithTimeout(`https://texttospeech.googleapis.com/v1/voices?languageCode=en-AU&key=${credentials.apiKey}`);
     if (!response.ok) return [];
     const data = (await response.json()) as { voices: Array<{ name: string }> };
     return data.voices.map((v) => ({ id: v.name, label: v.name }));
@@ -153,7 +162,7 @@ export class DeepgramStt implements SttAdapter {
     if (!apiKey) throw new Error('Deepgram API key not configured');
     const params = new URLSearchParams({ model: 'nova-2', language: request.language, smart_format: 'true' });
     for (const keyword of request.keywords ?? []) params.append('keywords', keyword);
-    const response = await fetch(`https://api.deepgram.com/v1/listen?${params}`, {
+    const response = await fetchWithTimeout(`https://api.deepgram.com/v1/listen?${params}`, {
       method: 'POST',
       headers: { Authorization: `Token ${apiKey}`, 'content-type': request.mimeType },
       body: new Uint8Array(request.audio),
@@ -199,7 +208,7 @@ export class OpenAiWhisperStt implements SttAdapter {
     form.append('file', new Blob([new Uint8Array(request.audio)], { type: request.mimeType }), 'audio.wav');
     form.append('model', 'whisper-1');
     form.append('language', request.language.split('-')[0] ?? 'en');
-    const response = await fetch(`${baseUrl}/audio/transcriptions`, {
+    const response = await fetchWithTimeout(`${baseUrl}/audio/transcriptions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
@@ -230,7 +239,7 @@ export class AzureStt implements SttAdapter {
   async transcribe(request: SttRequest, credentials?: ProviderCredentials): Promise<SttResult> {
     const { apiKey, region } = credentials ?? {};
     if (!apiKey || !region) throw new Error('Azure Speech key/region not configured');
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${request.language}`,
       {
         method: 'POST',
@@ -264,11 +273,11 @@ export class AnthropicLlm implements LlmAdapter {
     const apiKey = credentials?.apiKey;
     if (!apiKey) throw new Error('Anthropic API key not configured');
     const system = request.messages.find((m) => m.role === 'system')?.content;
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: request.model ?? this.info.models[0],
+        model: request.model ?? (request.speedTier === 'fast' ? 'claude-haiku-4-5-20251001' : this.info.models[0]),
         max_tokens: request.maxTokens ?? 512,
         temperature: request.temperature ?? 0.7,
         system,
@@ -316,11 +325,11 @@ export class OpenAiLlm implements LlmAdapter {
     const apiKey = credentials?.apiKey;
     if (!apiKey) throw new Error('OpenAI API key not configured');
     const baseUrl = credentials?.baseUrl?.replace(/\/$/, '') || 'https://api.openai.com/v1';
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: request.model ?? this.info.models[0],
+        model: request.model ?? (request.speedTier === 'fast' ? 'gpt-4o-mini' : this.info.models[0]),
         max_tokens: request.maxTokens ?? 512,
         temperature: request.temperature ?? 0.7,
         messages: request.messages,
@@ -365,11 +374,11 @@ export class GroqLlm implements LlmAdapter {
   async complete(request: LlmRequest, credentials?: ProviderCredentials): Promise<LlmResult> {
     const apiKey = credentials?.apiKey;
     if (!apiKey) throw new Error('Groq API key not configured');
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const response = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: request.model ?? this.info.models[0],
+        model: request.model ?? (request.speedTier === 'fast' ? 'llama-3.1-8b-instant' : this.info.models[0]),
         max_tokens: request.maxTokens ?? 512,
         temperature: request.temperature ?? 0.7,
         messages: request.messages,
@@ -411,7 +420,7 @@ export class GeminiLlm implements LlmAdapter {
     if (!apiKey) throw new Error('Google API key not configured');
     const model = request.model ?? this.info.models[0];
     const system = request.messages.find((m) => m.role === 'system')?.content;
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
@@ -462,7 +471,7 @@ export class SelfHostedLlm implements LlmAdapter {
   async complete(request: LlmRequest, credentials?: ProviderCredentials): Promise<LlmResult> {
     const baseUrl = credentials?.baseUrl?.replace(/\/$/, '');
     if (!baseUrl) throw new Error('Self-hosted LLM base URL not configured');
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',

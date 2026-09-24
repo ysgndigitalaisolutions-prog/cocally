@@ -98,6 +98,8 @@ export interface LlmRequest {
   temperature?: number;
   /** Ask the model for a JSON object response. */
   jsonMode?: boolean;
+  /** 'fast' picks each provider's small low-latency model when no explicit model is set. */
+  speedTier?: 'fast' | 'quality';
 }
 
 export interface LlmResult {

@@ -11,6 +11,7 @@ import { RecordingsService } from '../recordings/recordings.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 import { PresenceService } from '../workspace/presence.service';
 import { RealtimeGateway } from '../workspace/realtime.gateway';
+import { TransfersService } from '../workspace/transfers.service';
 import { CliService } from './cli.service';
 import { LiveCallDriver } from './live-call.driver';
 import { LivekitService } from './livekit.service';
@@ -100,6 +101,7 @@ export class CallProgressService {
     private readonly presence: PresenceService,
     private readonly gateway: RealtimeGateway,
     private readonly audit: AuditService,
+    private readonly transfers: TransfersService,
   ) {}
 
   // ── Webhook entry points ────────────────────────────────────────────────
@@ -109,12 +111,26 @@ export class CallProgressService {
    * answer event — the only moment on a real trunk where "they picked up" is
    * knowable.
    */
-  async onParticipantJoined(callId: string, identity: string): Promise<void> {
+  async onParticipantJoined(callId: string, identity: string, attributes?: Record<string, string>): Promise<void> {
     if (identity !== this.livekit.sipParticipantIdentity(callId)) {
       // The AI worker, a human agent or a supervisor. Their arrival is not a
       // call-progress event; agent bridging is recorded where the transfer is.
       return;
     }
+    // LiveKit adds the SIP participant to the room while the phone is still
+    // ringing. Only `sip.callStatus: active` means someone picked up; the
+    // authoritative answer signal is the awaited INVITE (see `markAnswered`).
+    const status = attributes?.['sip.callStatus'];
+    if (status && status !== 'active') {
+      await this.callModel.updateOne({ _id: new Types.ObjectId(callId), state: { $in: ['DIALING', 'CONNECTING'] } }, { state: 'RINGING' }).exec();
+      return;
+    }
+    if (!status) return; // no status attribute: wait for the INVITE to resolve
+    await this.markAnswered(callId);
+  }
+
+  /** The customer picked up. Idempotent. */
+  async markAnswered(callId: string): Promise<void> {
     const call = await this.load(callId);
     if (!call) return;
     if (HANDLED_STATES.includes(call.state)) return;
@@ -143,6 +159,16 @@ export class CallProgressService {
     await call.save();
     this.logger.log(`call ${callId} answered after ${call.ringMs}ms → ${call.state}`);
     this.emitStateChanged(call);
+  }
+
+  /**
+   * The awaited INVITE ended without an answer (busy, no answer, rejected,
+   * invalid number, trunk refusal). The SIP status, when the carrier gave
+   * one, drives the retry matrix and CLI health exactly like a webhook would.
+   */
+  async onDialFailed(callId: string, sipStatus: number | undefined, detail: string): Promise<void> {
+    this.logger.log(`call ${callId} not answered: ${detail}`);
+    await this.finalise(callId, sipStatus !== undefined ? { sipStatus } : { endReason: 'NO_ANSWER' });
   }
 
   /**
@@ -227,7 +253,11 @@ export class CallProgressService {
     // so it wins — but only when the customer actually answered, which is the
     // guarantee that a never-answered call can never be recorded as ANSWERED_*.
     const derived = this.outcomeForEndReason(endReason, answered);
-    const outcome: CallOutcome = answered && snapshot.outcome ? snapshot.outcome : derived;
+    // What answered matters more than how it ended: a voicemail the worker
+    // hung up on is ANSWERED_VOICEMAIL (24 h retry), not a human contact that
+    // would freeze the lead under the frequency cap for two weeks.
+    const byAmd = answered ? this.outcomeForAmd(snapshot.amdClass) : null;
+    const outcome: CallOutcome = answered && snapshot.outcome ? snapshot.outcome : (byAmd ?? derived);
     const state: CallState = outcome === 'FAILED' ? 'FAILED' : 'COMPLETED';
 
     const call = await this.callModel
@@ -291,6 +321,8 @@ export class CallProgressService {
     );
 
     await this.safely('wrapUp', () => this.startWrapUp(call, endReason, outcome));
+    await this.safely('cancelOffers', () => this.transfers.cancelOffersForCall(callId, 'the customer hung up'));
+    await this.safely('supervision', () => this.clearSupervision(call._id));
 
     // Free the pacing slot and clear the floor card last, so a supervisor sees
     // the card disappear only once the record is genuinely closed.
@@ -341,6 +373,8 @@ export class CallProgressService {
     // result back, so these dials were invisible to number health.
     await this.safely('cliHealth', () => this.recordCliHealth(call, Boolean(snapshot.answeredAt), endReason));
 
+    await this.safely('participants', () => this.releaseOtherParticipants(call));
+    await this.safely('supervision', () => this.clearSupervision(call._id));
     const agentId = call.agentId?.toString();
     if (agentId) {
       // Release ON_CALL → WRAP_UP so the sweep can return them to AVAILABLE.
@@ -372,6 +406,7 @@ export class CallProgressService {
    * releasing here would hand them a new call mid-disposition.
    */
   private async startWrapUp(call: CallDocument, endReason: CallEndReason, outcome: CallOutcome): Promise<void> {
+    await this.releaseOtherParticipants(call);
     const agentId = call.agentId?.toString();
     if (!agentId) return;
 
@@ -386,6 +421,58 @@ export class CallProgressService {
       userId: agentId,
       state: 'WRAP_UP',
     });
+  }
+
+  /**
+   * Agents who were on the call without owning it (a warm consult, a
+   * conference) are not on `call.agentId`, so the owner's wrap-up never
+   * reaches them and they would sit ON_CALL until they noticed. Hand them
+   * straight back to the floor.
+   */
+  private async releaseOtherParticipants(call: CallDocument): Promise<void> {
+    const owner = call.agentId?.toString();
+    const callId = call._id.toString();
+    for (const id of call.participantAgentIds ?? []) {
+      const agentId = id.toString();
+      if (agentId === owner) continue;
+      await this.presence.release(agentId, 'AVAILABLE');
+      this.gateway.emitToUser(agentId, 'call.ended', { callId, reason: call.endReason ?? 'ended', outcome: null });
+      this.gateway.emitToTenant(call.tenantId.toString(), 'presence.updated', { userId: agentId, state: 'AVAILABLE' });
+    }
+  }
+
+  /** A supervisor attached to this call has nothing left to monitor. */
+  private async clearSupervision(callId: Types.ObjectId): Promise<void> {
+    await this.callModel.updateOne({ _id: callId }, { $unset: { supervisorId: '', supervisionMode: '' } }).exec();
+  }
+
+  /**
+   * Release everything a call holds on the media plane and in pacing, for the
+   * paths that close a call without going through `finalise` (an agent's
+   * disposition or hang-up, an external transfer, the hung-call sweep).
+   * Safe to call more than once.
+   */
+  async releaseResources(call: { _id: Types.ObjectId; recordingEgressId?: string }): Promise<void> {
+    const callId = call._id.toString();
+    if (call.recordingEgressId) await this.safely('stopRecording', () => this.livekit.stopRecording(call.recordingEgressId!));
+    if (this.livekit.isConfigured()) await this.safely('hangup', () => this.livekit.hangup(callId));
+    await this.safely('cancelOffers', () => this.transfers.cancelOffersForCall(callId, 'the call has ended'));
+    this.driver.release(callId);
+  }
+
+  /** What answered, when the worker told us. Null when unknown/human. */
+  private outcomeForAmd(amdClass: CallDocument['amdClass'] | undefined): CallOutcome | null {
+    switch (amdClass) {
+      case 'VOICEMAIL':
+        return 'ANSWERED_VOICEMAIL';
+      case 'IVR':
+        return 'ANSWERED_IVR';
+      case 'FAX':
+      case 'SILENCE':
+        return 'NO_ANSWER';
+      default:
+        return null;
+    }
   }
 
   // ── CLI health ──────────────────────────────────────────────────────────

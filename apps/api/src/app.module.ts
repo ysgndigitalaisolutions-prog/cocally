@@ -54,7 +54,8 @@ import { WorkspaceModule } from './modules/workspace/workspace.module';
     AnalyticsModule,
     // Global ceiling per client IP; the login route carries a much tighter
     // limit of its own (see AuthController). Reads X-Forwarded-For when TRUST_PROXY is set.
-    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 600 }]),
+    // Shared by every seat behind the office NAT: polling + heartbeats for 30 seats.
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 3000 }]),
     OpsModule,
     ReportsModule,
   ],

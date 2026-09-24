@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import type { Role } from '@cocally/shared';
 import { Model, Types } from 'mongoose';
@@ -82,12 +82,35 @@ export class UsersService {
   }
 
   /** New invite for a user who has not set a password, or a reset link for one who has. */
+  /**
+   * An ADMIN must not be able to take over an OWNER account: reissuing the
+   * owner's reset link or clearing their authenticator is exactly that. Only
+   * an OWNER may act on an OWNER (other than themselves).
+   */
+  async assertMayManage(tenantId: string, actorId: string, target: { _id: Types.ObjectId; roles: string[] }): Promise<void> {
+    if (!target.roles.includes('OWNER') || target._id.toString() === actorId) return;
+    const actor = await this.userModel.findById(actorId).select('roles').lean().exec();
+    if (!actor?.roles.includes('OWNER')) throw new ForbiddenException('Only an owner can manage an owner account');
+  }
+
+  async assertMayManageId(tenantId: string, actorId: string, userId: string): Promise<void> {
+    if (!Types.ObjectId.isValid(userId)) throw new NotFoundException('User not found');
+    const target = await this.userModel
+      .findOne({ _id: new Types.ObjectId(userId), tenantId: new Types.ObjectId(tenantId) })
+      .select('roles')
+      .lean()
+      .exec();
+    if (!target) throw new NotFoundException('User not found');
+    await this.assertMayManage(tenantId, actorId, target);
+  }
+
   async reissueLink(tenantId: string, actor: { id: string; label: string }, userId: string) {
     const user = await this.userModel
       .findOne({ _id: new Types.ObjectId(userId), tenantId: new Types.ObjectId(tenantId) })
       .select('+passwordHash')
       .exec();
     if (!user) throw new NotFoundException('User not found');
+    await this.assertMayManage(tenantId, actor.id, user);
     const purpose = user.passwordHash ? 'RESET' : 'INVITE';
     const invite = await this.authService.createInvite(tenantId, userId, purpose, actor);
     return { purpose, invite };
@@ -116,6 +139,15 @@ export class UsersService {
     if (userId === actor.id && patch.active === false) throw new BadRequestException('You cannot deactivate your own account');
     if (userId === actor.id && patch.roles && !patch.roles.includes('OWNER') && user.roles.includes('OWNER')) {
       throw new BadRequestException('You cannot remove your own OWNER role');
+    }
+    await this.assertMayManage(tenantId, actor.id, user);
+    // Never leave a tenant with nobody who can grant OWNER.
+    const strippingOwner = user.roles.includes('OWNER') && ((patch.roles && !patch.roles.includes('OWNER')) || patch.active === false);
+    if (strippingOwner) {
+      const otherOwners = await this.userModel
+        .countDocuments({ tenantId: new Types.ObjectId(tenantId), _id: { $ne: user._id }, roles: 'OWNER', active: true })
+        .exec();
+      if (otherOwners === 0) throw new BadRequestException('This is the last active owner of the account');
     }
 
     // class-transformer exposes every declared DTO field, so absent ones arrive
