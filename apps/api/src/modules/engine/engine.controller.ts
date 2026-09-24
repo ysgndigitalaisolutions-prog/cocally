@@ -518,6 +518,8 @@ export class EngineController {
     call.summary = interpolate(campaign.summaryTemplate, {
       firstName: lead.firstName ?? '',
       suburb: lead.suburb ?? '',
+      name: [lead.firstName, lead.lastName].filter(Boolean).join(' ') || 'unknown',
+      location: [lead.suburb, lead.state].filter(Boolean).join(', ') || 'unknown area',
       score,
       facts: Object.entries(lead.facts)
         .map(([k, v]) => `${k}: ${String(v)}`)

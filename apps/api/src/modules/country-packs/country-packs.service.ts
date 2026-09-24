@@ -3,15 +3,17 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CountryPack, CountryPackDocument } from '../../schemas/country-pack.schema';
 import { AU_PACK } from './au.pack';
+import { IN_PACK } from './in.pack';
 import { isWithinCallingWindow, nextWindowOpen } from './calling-windows';
 
 @Injectable()
 export class CountryPacksService implements OnModuleInit {
   constructor(@InjectModel(CountryPack.name) private readonly packModel: Model<CountryPackDocument>) {}
 
-  /** Ensure the AU launch pack exists (CP-02) without overwriting admin edits. */
+  /** Ensure the AU launch pack (CP-02) and the India test pack exist without overwriting admin edits. */
   async onModuleInit(): Promise<void> {
     await this.packModel.updateOne({ code: 'AU' }, { $setOnInsert: AU_PACK }, { upsert: true }).exec();
+    await this.packModel.updateOne({ code: 'IN' }, { $setOnInsert: IN_PACK }, { upsert: true }).exec();
     // Calling hours and holidays are law, not admin preference: keep the
     // stored copy in step with the code so a holiday added here reaches a
     // database seeded months ago.

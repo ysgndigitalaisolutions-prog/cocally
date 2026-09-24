@@ -65,6 +65,8 @@ export default function CampaignDetailPage() {
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [liveChannels, setLiveChannels] = useState(0);
   const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [scripts, setScripts] = useState<{ id: string; label: string }[]>([]);
 
   async function load() {
     const [campaignRes, leadsRes, teamRes, channelsRes] = await Promise.all([
@@ -79,6 +81,23 @@ export default function CampaignDetailPage() {
     setLiveChannels(channelsRes.data.liveChannels ?? 0);
   }
 
+  // Published flow versions this campaign can run (the AI script).
+  useEffect(() => {
+    api
+      .get<{ name: string; versions: { _id: string; version: number; state: string }[] }[]>('/flows')
+      .then(({ data }) =>
+        setScripts(
+          data.flatMap((f) =>
+            f.versions
+              .filter((v) => v.state === 'PUBLISHED')
+              .sort((a, b) => b.version - a.version)
+              .map((v) => ({ id: v._id, label: `${f.name} · v${v.version}` })),
+          ),
+        ),
+      )
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     load().catch(() => undefined);
     const timer = setInterval(() => load().catch(() => undefined), 10_000);
@@ -86,13 +105,31 @@ export default function CampaignDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.id]);
 
+  function reasonOf(err: unknown, fallback: string): string {
+    const detail = (err as { response?: { data?: { message?: unknown } } }).response?.data?.message;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) return detail.join('; ');
+    return fallback;
+  }
+
   async function setStatus(status: string) {
-    await api.post(`/campaigns/${params.id}/status`, { status });
+    setError('');
+    try {
+      await api.post(`/campaigns/${params.id}/status`, { status });
+    } catch (err) {
+      setError(reasonOf(err, `Could not set the campaign ${status.toLowerCase()}.`));
+    }
     await load();
   }
 
   async function save(patch: Record<string, unknown>) {
-    await api.patch(`/campaigns/${params.id}`, patch);
+    setError('');
+    try {
+      await api.patch(`/campaigns/${params.id}`, patch);
+    } catch (err) {
+      setError(reasonOf(err, 'Could not save.'));
+      return;
+    }
     setMessage('Saved.');
     await load();
     setTimeout(() => setMessage(''), 2000);
@@ -156,6 +193,33 @@ export default function CampaignDetailPage() {
         </div>
       </div>
       {message && <p style={{ color: 'var(--good)' }}>{message}</p>}
+      {error && <p style={{ color: 'var(--bad)' }}>{error}</p>}
+
+      <div className="card flex flex-wrap items-center gap-3 px-4 py-3">
+        <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+          AI script
+        </span>
+        <select
+          className="input max-w-md"
+          value={campaign.activeFlowVersionId ?? ''}
+          onChange={(e) => save({ activeFlowVersionId: e.target.value || null })}
+        >
+          <option value="">{scripts.length ? 'None (human-only campaign)' : 'No published flows yet'}</option>
+          {scripts.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
+            </option>
+          ))}
+          {campaign.activeFlowVersionId && !scripts.some((s) => s.id === campaign.activeFlowVersionId) && (
+            <option value={campaign.activeFlowVersionId}>Current version (not in list)</option>
+          )}
+        </select>
+        {!scripts.length && (
+          <Link href="/flows" className="text-sm" style={{ color: 'var(--accent)' }}>
+            Create and publish a flow →
+          </Link>
+        )}
+      </div>
 
       {/* Live team strip: who can take a transfer right now */}
       <div className="card flex flex-wrap items-center gap-4 px-4 py-3">

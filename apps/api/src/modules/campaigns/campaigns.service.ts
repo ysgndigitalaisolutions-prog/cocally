@@ -199,6 +199,24 @@ export class CampaignsService {
     }
     patch = parsed.data as Record<string, unknown>;
 
+    // The AI script must be this tenant's own, published version; and a live
+    // AI campaign cannot be left without one (activation checks the same).
+    if (patch.activeFlowVersionId !== undefined) {
+      if (patch.activeFlowVersionId === null) {
+        if (campaign.status === 'ACTIVE' && !campaign.predictiveDialing?.enabled) {
+          throw new BadRequestException('Pause the campaign before removing its AI script');
+        }
+      } else {
+        const version = await this.versionModel
+          .findOne({ _id: new Types.ObjectId(String(patch.activeFlowVersionId)), tenantId: new Types.ObjectId(tenantId) })
+          .select('state')
+          .lean()
+          .exec();
+        if (!version) throw new BadRequestException('Flow version not found');
+        if (version.state !== 'PUBLISHED') throw new BadRequestException('Only a published flow version can be assigned');
+      }
+    }
+
     const editable = [
       'name',
       'activeFlowVersionId',

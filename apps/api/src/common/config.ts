@@ -106,6 +106,12 @@ const envSchema = z.object({
    * before go-live rather than after.
    */
   DNCR_ENABLED: envBool(),
+  /**
+   * Pilot escape hatch: skip the DNC wash check at dial time even on a pack
+   * with dnc.enforced=true. Only for internal testing before the ACMA
+   * account exists; it is logged as an error at every boot while set.
+   */
+  DNCR_BYPASS: envBool(),
   DNCR_ACCOUNT_ID: optionalString(),
   DNCR_PASSPHRASE: optionalString(),
   DNCR_ENDPOINT: z.string().default('https://www.donotcall.gov.au/dncrtelem/rtw/washing.cfc'),
@@ -186,6 +192,7 @@ export const config = {
   },
   dncr: {
     enabled: parsed.DNCR_ENABLED,
+    bypass: parsed.DNCR_BYPASS,
     accountId: parsed.DNCR_ACCOUNT_ID,
     passphrase: parsed.DNCR_PASSPHRASE,
     endpoint: parsed.DNCR_ENDPOINT,

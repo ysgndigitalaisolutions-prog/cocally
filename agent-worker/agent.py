@@ -72,7 +72,10 @@ ENGINE_BASE_URL = _engine_base_url()
 ENGINE_SERVICE_TOKEN = os.getenv("ENGINE_SERVICE_TOKEN")
 
 # ── Speech stack selection (env-driven so the floor can A/B without a deploy) ──
-LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+# Groq retired the Llama 3.x models in 2026. qwen3.8-27b measured ~190 ms to
+# first token with reasoning off and handles the transfer tool reliably;
+# openai/gpt-oss-120b is the higher-quality, slower (~400-650 ms) option.
+LLM_MODEL = os.getenv("LLM_MODEL") or "qwen/qwen3.8-27b"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "160"))  # short spoken turns → TTS starts sooner
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | elevenlabs | cartesia
 TTS_VOICE = os.getenv("TTS_VOICE")  # provider-specific voice/model id; sensible default per provider
@@ -83,6 +86,15 @@ WORKER_IDLE_PROCESSES = int(os.getenv("WORKER_IDLE_PROCESSES", "2"))
 # environments: the API hands it to the agent's browser for hold, this worker
 # publishes it during the transfer hand-off.
 HOLD_MUSIC_URL = os.getenv("HOLD_MUSIC_URL")
+
+
+def _reasoning_effort(model: str) -> str | None:
+    """Groq reasoning models think silently unless told not to."""
+    if model.startswith("qwen/"):
+        return "none"
+    if model.startswith("openai/gpt-oss"):
+        return "low"
+    return None
 
 # ── Timings ────────────────────────────────────────────────────────────────
 #
@@ -983,10 +995,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     session = AgentSession(
         # Groq (OpenAI-compatible endpoint) for low-latency LLM; Deepgram for
-        # STT + Aura TTS. llama-3.3-70b-versatile: best quality/latency/
-        # tool-calling balance for voice. Swap to "openai/gpt-oss-120b" for
-        # higher quality (a bit slower) or "llama-3.1-8b-instant" for the
-        # lowest latency. `openai.LLM.with_groq` was removed from the plugin
+        # STT + Aura TTS. See LLM_MODEL for the model choice. Reasoning is
+        # switched off/low explicitly: the plugin only does that for OpenAI's
+        # own model names, and hidden thinking tokens are dead air on a call.
+        # `openai.LLM.with_groq` was removed from the plugin
         # (livekit-agents 1.6.x) — built manually via base_url instead.
         # nova-2-phonecall (not nova-2/nova-3 general) is Deepgram's model
         # tuned for narrowband/noisy telephone audio — the generic model was
@@ -1001,6 +1013,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             base_url="https://api.groq.com/openai/v1",
             api_key=os.environ["GROQ_API_KEY"],
             max_completion_tokens=LLM_MAX_TOKENS,
+            **({"reasoning_effort": _reasoning_effort(LLM_MODEL)} if _reasoning_effort(LLM_MODEL) else {}),
             timeout=20.0,
         ),
         tts=tts_engine,
@@ -1221,8 +1234,18 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 if __name__ == "__main__":
     # Fail fast at boot: a worker with no LLM/STT key joins the room and then
     # crashes on the first turn, which the customer experiences as silence.
+    # Only for the serving commands: `download-files` (run at image build) and
+    # the other maintenance subcommands need no credentials.
+    import sys as _sys
+    _serving = len(_sys.argv) > 1 and _sys.argv[1] in ("start", "dev")
     _missing = [k for k in ("GROQ_API_KEY", "DEEPGRAM_API_KEY", "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET") if not os.environ.get(k)]
-    if _missing:
+    if _missing and _serving:
+        if (os.getenv("TELEPHONY_DRIVER") or "SIMULATION").upper() != "SIP":
+            # The stack is still in simulation: nothing will ever dispatch a room to
+            # this worker, so idle quietly instead of crash-looping under Compose.
+            logger.warning("telephony is simulated and %s unset; worker idle until configured", ", ".join(_missing))
+            while True:
+                time.sleep(3600)
         logger.error("refusing to start: missing environment %s", ", ".join(_missing))
         raise SystemExit(2)
     # Health/HTTP port. Cloud Run injects PORT and requires the container to

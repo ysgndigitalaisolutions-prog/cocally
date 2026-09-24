@@ -356,8 +356,20 @@ export class OpenAiLlm implements LlmAdapter {
 }
 
 /**
- * Groq's OpenAI-compatible chat endpoint — the same low-latency Llama models
- * the LiveKit voice worker uses. Registered separately from `openai` (not
+ * Groq reasoning models spend hidden tokens thinking unless told not to; for
+ * a phone conversation that is pure latency. Qwen takes "none", gpt-oss "low".
+ */
+function groqReasoningEffort(model: string): 'none' | 'low' | undefined {
+  if (model.startsWith('qwen/')) return 'none';
+  if (model.startsWith('openai/gpt-oss')) return 'low';
+  return undefined;
+}
+
+/**
+ * Groq's OpenAI-compatible chat endpoint — the same low-latency models the
+ * LiveKit voice worker uses. Groq retired the Llama 3.x models in 2026;
+ * qwen3.8-27b (≈190 ms to first token, reliable JSON + tool calls) is the
+ * default and gpt-oss-120b the higher-quality option. Registered separately from `openai` (not
  * reusing that adapter with a custom baseUrl) so a real OpenAI key, if added
  * later, never collides with the Groq one.
  */
@@ -368,24 +380,31 @@ export class GroqLlm implements LlmAdapter {
     capability: 'LLM' as const,
     unitCost: { amountCentsPer: 0, unit: '1k_tokens' as const },
     credentialSchema: [{ key: 'apiKey', label: 'API key', type: 'secret' as const, required: true, placeholder: 'gsk_…' }],
-    models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b'],
+    models: ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
   };
 
   async complete(request: LlmRequest, credentials?: ProviderCredentials): Promise<LlmResult> {
     const apiKey = credentials?.apiKey;
     if (!apiKey) throw new Error('Groq API key not configured');
+    const model = request.model ?? this.info.models[0] ?? 'qwen/qwen3.8-27b';
+    const reasoningEffort = groqReasoningEffort(model);
     const response = await fetchWithTimeout('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: request.model ?? (request.speedTier === 'fast' ? 'llama-3.1-8b-instant' : this.info.models[0]),
+        model,
         max_tokens: request.maxTokens ?? 512,
         temperature: request.temperature ?? 0.7,
         messages: request.messages,
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         ...(request.jsonMode ? { response_format: { type: 'json_object' } } : {}),
       }),
     });
-    if (!response.ok) throw new Error(`Groq completion failed: ${response.status}`);
+    if (!response.ok) {
+      // Keep Groq's reason (e.g. model_not_found) in the log; a bare status hid a retired model.
+      const detail = (await response.text().catch(() => '')).slice(0, 200);
+      throw new Error(`Groq completion failed: ${response.status} ${detail}`);
+    }
     const data = (await response.json()) as {
       choices: Array<{ message: { content: string } }>;
       usage: { prompt_tokens: number; completion_tokens: number };
@@ -418,7 +437,7 @@ export class GeminiLlm implements LlmAdapter {
   async complete(request: LlmRequest, credentials?: ProviderCredentials): Promise<LlmResult> {
     const apiKey = credentials?.apiKey;
     if (!apiKey) throw new Error('Google API key not configured');
-    const model = request.model ?? this.info.models[0];
+    const model = request.model ?? this.info.models[0] ?? 'qwen/qwen3.8-27b';
     const system = request.messages.find((m) => m.role === 'system')?.content;
     const response = await fetchWithTimeout(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,

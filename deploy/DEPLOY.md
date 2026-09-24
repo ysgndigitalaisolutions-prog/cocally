@@ -41,6 +41,8 @@ Re-run it whenever `.env` changes; it updates `.env.prod` on the VM or the secre
 
 ## 3. Deploy
 
+The Deploy workflows are gated on the repository variable `DEPLOY_TARGET`, which `setup.sh` sets. Until it has run, every push to `prod` shows both Deploy workflows as **skipped**; only CI runs. `gcloud` must be logged in as an Owner of the project (`gcloud auth login`, then `gcloud config set project cocally-509318`); an account that is not a member gets "does not have permission to access projects instance".
+
 Push to `prod`, or run the matching workflow manually: **Deploy (VM)** or **Deploy (Cloud Run)**. Each ends with a health gate on `/api/v1/ops/ready`. The VM path logs the VM into GHCR with the job's short-lived token to pull, then logs out.
 
 ## 4. Provision the first tenant
@@ -66,7 +68,15 @@ $SSH -- 'cd /opt/cocally && ./backup-mongo.sh'                                  
 
 Roll back by re-running an earlier Deploy workflow run, or by setting `IMAGE_TAG=<sha>` on the VM and running pull + up. Change a secret by editing `.env` locally and re-running `setup.sh`, then `up -d api worker`.
 
-Switch to live telephony: set `TELEPHONY_DRIVER=SIP` and the `LIVEKIT_*` values in `.env`, re-run `setup.sh`, redeploy.
+### Switching to live telephony
+
+The carrier authenticates the trunk with a username and password (SIP digest), which is what makes LiveKit's Australian SIP region usable: its gateway IPs are not published, so an IP allow-list cannot be used.
+
+1. Fill `LIVEKIT_*`, `SIP_TRUNK_ADDRESS`, `SIP_TRUNK_USERNAME`, `SIP_TRUNK_PASSWORD`, `SIP_TRUNK_NUMBERS` (the CLIs you hold, E.164) and `SIP_TRUNK_TRANSPORT` in `.env`; re-run `setup.sh` so they reach the VM.
+2. `./deploy/gcp/provision-sip-trunk.sh` (add `--inbound` if the carrier routes your DIDs to `sip:<project>.aus.sip.livekit.cloud`). It prints the outbound trunk id. Re-running updates the trunk in place.
+3. Put the id in `LIVEKIT_SIP_TRUNK_ID`, set `TELEPHONY_DRIVER=SIP`, re-run `setup.sh`, then redeploy or `up -d api worker` on the VM.
+
+While `TELEPHONY_DRIVER=SIMULATION` the worker container idles (it logs a warning once) instead of restarting, because nothing dispatches rooms to it. Voice tuning (`LLM_MODEL`, `TTS_PROVIDER`, `TTS_VOICE`, `NOISE_CANCELLATION`, `WORKER_IDLE_PROCESSES`) also lives in `.env`; see `agent-worker/README.md`.
 
 Recording must stay off until `RECORDING_BUCKET` is set; the VM keeps a local copy under the `recordings` volume but a bucket is what gives retention and legal hold.
 

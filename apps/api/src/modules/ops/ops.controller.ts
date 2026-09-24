@@ -41,6 +41,7 @@ export class OpsController {
       env: config.nodeEnv,
       telephony: isLiveTelephony() ? 'SIP' : 'SIMULATION',
       dncr: config.dncr.enabled,
+      dncrBypass: config.dncr.bypass,
       recording: config.recording.enabled,
     };
     if (!dbReady) throw new ServiceUnavailableException(body);

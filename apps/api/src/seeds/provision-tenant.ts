@@ -5,7 +5,7 @@
  *
  *   node apps/api/dist/seeds/provision-tenant.js \
  *     --name "Acme BPO" --slug acme --owner-name "Jane Citizen" \
- *     --owner-phone "+61412000104" [--owner-email jane@acme.com.au] [--region au]
+ *     --owner-phone "+61412000104" [--owner-email jane@acme.com.au] [--region au] [--client-name "Aurora Solar"]
  *
  * No password is created or printed. The owner sets their own through the
  * invite link (valid 48 h), then must enrol TOTP before doing anything else.
@@ -72,6 +72,18 @@ async function main(): Promise<void> {
   await db
     .collection('countrypacks')
     .updateOne({ code: 'AU' }, { $setOnInsert: { ...AU_PACK, createdAt: now, updatedAt: now } }, { upsert: true });
+  // Every campaign belongs to a client (the brand being called for). Without one
+  // the owner cannot create the first campaign, so start with a client named
+  // after the tenant; more can be added later.
+  const clientName = arg('client-name') ?? name;
+  await db.collection('clients').insertOne({
+    tenantId,
+    name: clientName,
+    branding: {},
+    active: true,
+    createdAt: now,
+    updatedAt: now,
+  });
 
   const ownerId = new Types.ObjectId();
   await db.collection('users').insertOne({
@@ -117,6 +129,7 @@ async function main(): Promise<void> {
   const base = (config.corsOrigins[0] ?? 'http://localhost:3000').replace(/\/$/, '');
   console.log('');
   console.log(`Tenant "${name}" (${slug}) created: ${tenantId.toString()}`);
+  console.log(`Client "${clientName}" created (campaigns are filed under it; add more from Campaigns).`);
   console.log(`Owner ${ownerName} <${phone.value.e164}> created: ${ownerId.toString()}`);
   console.log('');
   console.log('Send this one-time link to the owner (expires in 48 hours):');

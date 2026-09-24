@@ -34,7 +34,7 @@ const TRANSPORTS: Record<string, SIPTransport> = {
 };
 
 async function main(): Promise<void> {
-  const address = arg('address');
+  const address = arg('address') ?? process.env.SIP_TRUNK_ADDRESS;
   const username = arg('username') ?? process.env.SIP_TRUNK_USERNAME;
   const password = arg('password') ?? process.env.SIP_TRUNK_PASSWORD;
   const numbers = (arg('numbers') ?? process.env.SIP_TRUNK_NUMBERS ?? '')
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     .map((n) => n.trim())
     .filter(Boolean);
   const name = arg('name') ?? 'CoCally carrier trunk';
-  const transport = TRANSPORTS[(arg('transport') ?? 'udp').toLowerCase()];
+  const transport = TRANSPORTS[(arg('transport') ?? process.env.SIP_TRUNK_TRANSPORT ?? 'udp').toLowerCase()];
   if (!address || !username || !password || numbers.length === 0 || transport === undefined) {
     console.error('Usage: --address <host[:port]> --username <u> --password <p> --numbers +61...,+61... [--transport udp|tcp|tls] [--name ...] [--inbound] [--inbound-addresses cidr,...] [--srtp]');
     process.exit(2);

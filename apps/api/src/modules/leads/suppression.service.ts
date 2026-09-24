@@ -4,6 +4,7 @@ import { Model, Types } from 'mongoose';
 import { DncWashRecord, DncWashRecordDocument, SuppressionEntry, SuppressionEntryDocument } from '../../schemas/suppression.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
 import { AuditService } from '../audit/audit.service';
+import { config } from '../../common/config';
 
 export type SuppressionVerdict =
   | { allowed: true }
@@ -16,7 +17,7 @@ export type SuppressionVerdict =
  * 3. cross-campaign frequency caps,
  * 4. per-client suppression.
  */
-import { normalizePhone } from './phone.util';
+import { normalizePhone, regionOf } from './phone.util';
 
 @Injectable()
 export class SuppressionService {
@@ -39,7 +40,8 @@ export class SuppressionService {
     const tenantId = new Types.ObjectId(input.tenantId);
 
     // 1. DNC wash per pack: a listed number, or a wash that is missing/expired, blocks the dial.
-    if (input.dncEnforced) {
+    //    DNCR_BYPASS (pilot testing only) skips this step entirely.
+    if (input.dncEnforced && !config.dncr.bypass) {
       const wash = await this.dncModel
         .findOne({ tenantId, phone: input.phone, countryPackCode: input.countryPackCode })
         .lean()
@@ -90,9 +92,19 @@ export class SuppressionService {
   async optOut(tenantId: string, rawPhone: string, source: string, region = 'AU'): Promise<void> {
     // Agents type numbers as '0412 345 678'; leads are stored E.164. An
     // un-normalised entry never matches at dial time and suppresses nobody.
-    const normalized = normalizePhone(rawPhone, region);
-    if (!normalized.ok) throw new BadRequestException(`Cannot opt out '${rawPhone}': ${normalized.reason}`);
-    const phone = normalized.value.e164;
+    const normalized = normalizePhone(rawPhone, regionOf(rawPhone, region));
+    let phone: string;
+    if (normalized.ok) {
+      phone = normalized.value.e164;
+    } else {
+      // A bare number from another pack's region (e.g. an Indian lead typed as
+      // "89853 50964") is resolved against the tenant's own leads, whose
+      // stored E.164 numbers carry the country code already.
+      const digits = rawPhone.replace(/\D/g, '').replace(/^0+/, '');
+      const matches = digits.length >= 6 ? await this.leadModel.distinct('phone', { tenantId: new Types.ObjectId(tenantId), phone: { $regex: `${digits}$` } }).exec() : [];
+      if (matches.length !== 1) throw new BadRequestException(`Cannot opt out '${rawPhone}': ${normalized.reason}`);
+      phone = matches[0] as string;
+    }
     await this.suppressionModel.updateOne(
       { tenantId: new Types.ObjectId(tenantId), phone, kind: 'OPT_OUT' },
       { $setOnInsert: { source } },

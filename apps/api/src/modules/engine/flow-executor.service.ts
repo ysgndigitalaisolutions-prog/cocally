@@ -363,8 +363,13 @@ export class FlowExecutorService {
       .map(([k, v]) => `${k}: ${String(v)}`)
       .join('; ');
     const lastObjection = context.objections[context.objections.length - 1]?.label ?? 'none';
+    const v = context.vars as Record<string, unknown>;
+    const str = (x: unknown) => (x === undefined || x === null ? '' : String(x));
     return interpolate(config.summaryTemplate, {
       ...context.vars,
+      // The default template uses {{name}} and {{location}}; derive them from the lead vars.
+      name: [str(v['firstName']), str(v['lastName'])].filter(Boolean).join(' ') || 'unknown',
+      location: [str(v['suburb']), str(v['state'])].filter(Boolean).join(', ') || 'unknown area',
       score: context.score,
       facts,
       objection: lastObjection,

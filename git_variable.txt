@@ -1,0 +1,12 @@
+# GitHub Actions repository variables — ysgndigitalaisolutions-prog/cocally
+# Source: github.com/ysgndigitalaisolutions-prog/cocally/settings/variables/actions (captured 2026-09-24)
+# Values ending in "..." were truncated in the UI; full values noted where known.
+
+DEPLOY_TARGET=vm
+GCP_DEPLOYER_SA=cocally-deployer@cocally-509318.iam.gserviceaccount.com
+GCP_PROJECT_ID=cocally-509318
+GCP_PROJECT_NUMBER=1041761530506
+GCP_REGION=australia-southeast1
+GCP_RUNTIME_SA=cocally-runtime@cocally-509318.iam.gserviceaccount.com
+GCP_WIF_PROVIDER=projects/1041761530506/locations/global/workloadIdentityPools/<pool>/providers/<provider>   # truncated in UI — fill in pool/provider names
+TELEPHONY_DRIVER=SIMULATION

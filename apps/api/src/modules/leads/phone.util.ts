@@ -9,6 +9,18 @@ export interface NormalizedPhone {
 }
 
 /**
+ * Region to parse `raw` under: an international "+CC…" number carries its own
+ * country, so it must not be judged against a default (an Indian tester's
+ * +91 login, or a lead on the India test pack, is not "not in region AU").
+ * Bare national numbers fall back to `fallback`.
+ */
+export function regionOf(raw: string, fallback: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('+')) return fallback;
+  return parsePhoneNumberFromString(trimmed)?.country ?? fallback;
+}
+
+/**
  * Forgiving number parsing per LEAD-01: accepts "04xx", "61x", spaces,
  * dashes, parens; returns E.164 or null with a reason.
  */

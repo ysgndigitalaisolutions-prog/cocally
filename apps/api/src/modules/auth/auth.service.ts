@@ -11,7 +11,7 @@ import { User, UserDocument } from '../../schemas/user.schema';
 import { UserInvite, UserInviteDocument, type InvitePurpose } from '../../schemas/user-invite.schema';
 import { AuditService } from '../audit/audit.service';
 import { UserStateService } from '../../common/auth/user-state.service';
-import { normalizePhone } from '../leads/phone.util';
+import { normalizePhone, regionOf } from '../leads/phone.util';
 
 export interface LoginResult {
   token?: string;
@@ -42,7 +42,7 @@ const INVITE_TTL_HOURS = 48;
 const PHONE_REGION = 'AU';
 
 export function normalizeLoginPhone(raw: string): string | null {
-  const r = normalizePhone(raw, PHONE_REGION);
+  const r = normalizePhone(raw, regionOf(raw, PHONE_REGION));
   return r.ok ? r.value.e164 : null;
 }
 

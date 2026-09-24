@@ -128,6 +128,12 @@ export class DncrWashService implements OnModuleInit {
    * DNC_WASH_STALE and the floor sits idle with no explanation anywhere.
    */
   onModuleInit(): void {
+    if (config.dncr.bypass) {
+      this.logger.error(
+        'DNCR_BYPASS=true: the DNC wash check is SKIPPED at dial time on every pack. ' +
+          'Internal testing only — unset it and configure DNCR_ACCOUNT_ID/DNCR_PASSPHRASE before dialling AU customers.',
+      );
+    }
     if (!config.dncr.enabled) {
       this.logger.warn(
         'DNC washing is OFF (DNCR_ENABLED=false). Any campaign on a country pack with dnc.enforced=true ' +

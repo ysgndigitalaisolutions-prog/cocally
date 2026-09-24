@@ -17,8 +17,8 @@ Your browser mic  ──WebRTC──▶  LiveKit Cloud room  ◀──  this Pyt
 - A **LiveKit Cloud** project — grab `LIVEKIT_URL`, `LIVEKIT_API_KEY`,
   `LIVEKIT_API_SECRET` from the dashboard.
 - **Deepgram** (STT + Aura TTS) and **Groq** (`GROQ_API_KEY`, runs the LLM). No
-  ElevenLabs / OpenAI / Google needed. Model: `llama-3.3-70b-versatile` — swap in
-  `agent.py`.
+  ElevenLabs / OpenAI / Google needed. Model: `qwen/qwen3.8-27b` (set `LLM_MODEL`;
+  Groq retired the Llama 3.x models in 2026).
 
 ## Run it
 
@@ -76,7 +76,7 @@ What is in place:
 - **Prewarmed processes** (`prewarm_fnc`, `WORKER_IDLE_PROCESSES`): Silero VAD and the end-of-turn model are loaded once per process, not per call.
 - **Word-level end-of-turn model** (`turn_detector` English) with dynamic endpointing `min_delay 0.3 s / max 2.0 s`, adaptive interruption (backchannels do not cut the agent off), **preemptive LLM + TTS** (generation starts before the turn is confirmed).
 - **Pre-rendered disclosure**: the mandatory first line is synthesised while the phone is still ringing and played the instant the customer picks up; it already ends with "is now a good moment?", so no LLM round trip happens at the most sensitive moment.
-- **Short spoken turns** (`LLM_MAX_TOKENS=160`) so TTS starts sooner; Groq `llama-3.3-70b-versatile` by default, `llama-3.1-8b-instant` available via `LLM_MODEL` when raw speed beats nuance.
+- **Short spoken turns** (`LLM_MAX_TOKENS=160`) so TTS starts sooner; Groq `qwen/qwen3.8-27b` by default (about 190 ms to first token with reasoning off), `openai/gpt-oss-120b` via `LLM_MODEL` when nuance beats speed (about 400 to 650 ms). Reasoning is switched off explicitly for these models.
 - **TTS choice by env**: Deepgram Aura-2 (default), ElevenLabs Flash v2.5 (~75 ms TTFB) or Cartesia Sonic-2 (~90 ms) via `TTS_PROVIDER`.
 - **PSTN noise cancellation** (`NOISE_CANCELLATION=1`, LiveKit BVCTelephony) so the STT hears words, not line hiss.
 - **Nothing on the speech path waits on the engine**: transcript/scoring posts are fire-and-forget; the engine's per-turn fact extraction runs on the fast model tier and every provider call is time-boxed.

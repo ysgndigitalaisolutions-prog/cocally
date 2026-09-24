@@ -20,11 +20,16 @@ interface Client {
   name: string;
 }
 
+const NEW_CLIENT = '__new__';
+
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [name, setName] = useState('');
   const [clientId, setClientId] = useState('');
+  const [newClientName, setNewClientName] = useState('');
+  const [countryPackCode, setCountryPackCode] = useState('AU');
+  const [packs, setPacks] = useState<{ code: string; name: string }[]>([]);
   const [creating, setCreating] = useState(false);
   const [dialStatus, setDialStatus] = useState<Record<string, DialStatus>>({});
 
@@ -32,6 +37,7 @@ export default function CampaignsPage() {
     const [campaignRes, clientRes] = await Promise.all([api.get('/campaigns'), api.get('/tenants/clients')]);
     setCampaigns(campaignRes.data);
     setClients(clientRes.data);
+    api.get('/country-packs').then((r) => setPacks(r.data)).catch(() => undefined);
     if (clientRes.data[0] && !clientId) setClientId(clientRes.data[0]._id);
   }
 
@@ -63,7 +69,15 @@ export default function CampaignsPage() {
     e.preventDefault();
     setCreating(true);
     try {
-      await api.post('/campaigns', { name, clientId, countryPackCode: 'AU' });
+      let targetClient = clientId;
+      if (!targetClient || targetClient === NEW_CLIENT) {
+        // First campaign on a new tenant, or the admin chose to add a client here.
+        const { data } = await api.post('/tenants/clients', { name: newClientName.trim() });
+        targetClient = data._id;
+        setClientId(data._id);
+        setNewClientName('');
+      }
+      await api.post('/campaigns', { name, clientId: targetClient, countryPackCode });
       setName('');
       await load();
     } finally {
@@ -85,16 +99,43 @@ export default function CampaignsPage() {
           <label className="mb-1 block text-sm">Name</label>
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} required placeholder="e.g. Aurora Solar — NSW" />
         </div>
-        <div>
-          <label className="mb-1 block text-sm">Client</label>
-          <select className="input" value={clientId} onChange={(e) => setClientId(e.target.value)} required>
-            {clients.map((c) => (
-              <option key={c._id} value={c._id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {clients.length > 0 && (
+          <div>
+            <label className="mb-1 block text-sm">Client</label>
+            <select className="input" value={clientId} onChange={(e) => setClientId(e.target.value)} required>
+              {clients.map((c) => (
+                <option key={c._id} value={c._id}>
+                  {c.name}
+                </option>
+              ))}
+              <option value={NEW_CLIENT}>+ New client…</option>
+            </select>
+          </div>
+        )}
+        {(clients.length === 0 || clientId === NEW_CLIENT) && (
+          <div>
+            <label className="mb-1 block text-sm">New client name</label>
+            <input
+              className="input"
+              value={newClientName}
+              onChange={(e) => setNewClientName(e.target.value)}
+              required
+              placeholder="e.g. Aurora Solar"
+            />
+          </div>
+        )}
+        {packs.length > 1 && (
+          <div>
+            <label className="mb-1 block text-sm">Country</label>
+            <select className="input" value={countryPackCode} onChange={(e) => setCountryPackCode(e.target.value)}>
+              {packs.map((p) => (
+                <option key={p.code} value={p.code}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <button className="btn btn-primary" disabled={creating}>
           Create
         </button>

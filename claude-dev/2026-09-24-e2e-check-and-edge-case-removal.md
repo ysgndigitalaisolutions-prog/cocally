@@ -98,3 +98,27 @@ Engine/API: `POST /engine/calls/:id/metrics` → `timings.turnLatencies` + last 
 Trunk: `apps/api/src/seeds/provision-sip-trunk.ts` creates/updates the LiveKit outbound trunk with SIP digest auth (`--username/--password`, transport, CLI numbers, optional SRTP) and, with `--inbound`, an inbound trunk + per-call dispatch rule; prints `LIVEKIT_SIP_TRUNK_ID`. Env docs added (`SIP_TRUNK_*`, worker latency knobs).
 
 Verified: API/web typecheck, 19 tests, metrics route stores and slices, KPI endpoint returns p50 1043 ms / p95 1410 ms over 4,340 existing simulated turns. Not run: a real trunk call (needs the carrier credentials) and the ElevenLabs/Cartesia plugins (installed as optional deps, untested here).
+
+## Later still: deployment readiness + production-image e2e (2026-09-25 local)
+
+**State of deployment:** not deployed. The push of 158308f ran CI only; both Deploy workflows were *skipped* because `setup.sh` has never run, so the repo variable `DEPLOY_TARGET` is unset. `setup.sh` cannot run from this machine yet: `nithinyakateela@gmail.com` has no access to project `cocally-509318`. CI on 158308f failed on the worker Docker build.
+
+**Fixed**
+- Worker image build: `python agent.py download-files` hit the new fail-fast env check (no keys at build time). The check now applies only to `start`/`dev`. With `TELEPHONY_DRIVER` ≠ SIP and keys missing, the worker idles with one warning instead of crash-looping under Compose.
+- **Groq retired `llama-3.3-70b-versatile` and `llama-3.1-8b-instant`** (404 model_not_found). Every AI turn in the API failed and the live voice worker would have been silent. Measured the remaining models (time to first token, short spoken turn): `qwen/qwen3.8-27b` with reasoning off ≈ 185 ms, `openai/gpt-oss-120b` (low) 380–610 ms, `gpt-oss-20b` 510–730 ms. Qwen also returns valid JSON envelopes and calls the transfer tool reliably. It is now the default in the API Groq adapter and the worker (`LLM_MODEL`), with `reasoning_effort` sent explicitly (`none` for Qwen, `low` for gpt-oss), since the LiveKit plugin only does that for OpenAI model names. Groq errors now log the response body.
+- **Fresh tenant could not create a campaign:** provisioning created no Client, and the web had no way to add one. `provision-tenant` now creates a client (`--client-name`, default tenant name); the campaign form creates one inline when none exist (or via "+ New client…").
+- **Fresh tenant could not activate an AI campaign:** nothing in the UI assigned a published flow version. Campaign page gains an "AI script" picker; the API now refuses versions that are unpublished or belong to another tenant, and refuses clearing the script on an active AI campaign. Activate/save errors are shown instead of failing silently.
+- Call summary rendered "Lead  in ." — the default template's `{{name}}`/`{{location}}` were never supplied. Both renderers now fill them.
+- Deploy plumbing: `setup.sh` passes SIP trunk credentials, `BUSINESS_TIMEZONE`, and the voice knobs (`LLM_MODEL`, `TTS_*`, `NOISE_CANCELLATION`, `WORKER_IDLE_PROCESSES`, ElevenLabs/Cartesia keys) to `.env.prod`. New `deploy/gcp/provision-sip-trunk.sh` runs the trunk seed on the VM from `.env` values (the seed now reads `SIP_TRUNK_ADDRESS`/`SIP_TRUNK_TRANSPORT` from env). DEPLOY.md documents the live-telephony switch and why Deploy shows skipped.
+
+**Verified** on the production images (built locally) under the production Compose file with Caddy TLS, `NODE_ENV=production`, SIMULATION telephony and real Groq/Deepgram keys: 41/41 checks in `pilot.mjs` — provision tenant → owner invite → password → TOTP gate → enrol → invite closer → campaign under the provisioned client → activation refused without script → LLM-generated flow → draft/foreign version refused → publish with disclosure → assign → team → CSV import (BOM, duplicate, invalid number, Perth TZ from postcode) → activate → closer Available → AI call with scripted customer → transfer offer with facts → accept → bridge → hangup → BOOKED → closer Available → lead BOOKED, transcript opens with the recording disclosure, QA 95, clean summary → KPIs, calls CSV, audit, channels → agent refused on campaign admin. API tests 19/19, api/web typecheck clean.
+
+**Go-live blockers that are not code**
+1. GCP access for `cocally-509318` (Owner) to run `setup.sh`; then pushes to `prod` deploy.
+2. DNCR credentials: with DNC washing off, the AU pack blocks every dial (`DNC_WASH_STALE`).
+3. Carrier SIP address/username/password/CLIs → `provision-sip-trunk.sh` → `LIVEKIT_SIP_TRUNK_ID`, `TELEPHONY_DRIVER=SIP`.
+4. A real call on the trunk (answer/no-answer/voicemail, recording) — still unproven.
+
+## 2026-09-25 (later): India test pack
+
+Decision: test live calling in India first (own verified numbers on the existing Twilio trunk), ACMA deferred. Added the `IN` country pack (TRAI window 09–21 IST daily, DNC not enforced, internal testing only), a Country selector on the campaign form, `regionOf()` so `+CC` numbers are parsed by their own country on login and opt-out, and an opt-out fallback that resolves a bare foreign-region number against the tenant's leads. Per Nithin, the AU timezone/postcode inference stays as is. `india.mjs` on the dev API: 13/13 (+91 user invite + login, IN campaign, +91 import with AU number rejected, `Asia/Kolkata`, no DNC block, simulated call → transfer, DNC disposition, bare-number opt-out). Handoff written: `2026-09-25-handoff-india-testing-and-deployment.md`.
