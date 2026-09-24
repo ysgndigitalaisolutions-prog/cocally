@@ -907,7 +907,13 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
         try:
             from livekit.plugins import elevenlabs
 
-            return elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=TTS_VOICE or "EXAVITQu4vr4xnSDxMaL")
+            # The plugin's own env lookup is ELEVEN_API_KEY, not ELEVENLABS_API_KEY —
+            # pass the key explicitly or it raises and we silently fall back.
+            return elevenlabs.TTS(
+                model="eleven_flash_v2_5",
+                voice_id=TTS_VOICE or "EXAVITQu4vr4xnSDxMaL",
+                api_key=os.environ["ELEVENLABS_API_KEY"],
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("elevenlabs TTS unavailable (%s) — using Deepgram", e)
     if TTS_PROVIDER == "cartesia" and os.environ.get("CARTESIA_API_KEY"):

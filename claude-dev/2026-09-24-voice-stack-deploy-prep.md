@@ -26,3 +26,6 @@ GCP Owner access; Twilio credential password (or permission to create a new cred
 - `DNCR_BYPASS` flag added (config, suppression check, boot log, ops/ready, setup.sh, env files). tsc clean, 19/19 tests.
 - `deploy/gcp/.env`: DOMAIN=app.co-cally.com, tenant YSGN/ysgn, owner Nithin +919902352425.
 - Blocked by session permissions: creating the Twilio SIP credential, `git commit`/`push`, re-running `setup.sh`. Handed to Nithin as a runbook. GitHub repository variables are still unset (no `gh`), so the Deploy workflow skips until they are.
+- ElevenLabs key received (restricted key: TTS works, `voices_read`/`user_read` missing; the plugin does not need them). Bug fixed in `agent.py`: the LiveKit plugin reads `ELEVEN_API_KEY`, so the key is now passed explicitly via `api_key=`; before this fix `TTS_PROVIDER=elevenlabs` silently fell back to Deepgram.
+- Local timing (same sentence, warm): Deepgram Aura-2 first audio ~320 ms, full utterance ~1.8 s; ElevenLabs Flash v2.5 first audio ~340 ms, full utterance ~0.42 s. First-byte equal; ElevenLabs delivers the whole turn 4x sooner and has the better voice. `TTS_PROVIDER=elevenlabs` set in `deploy/gcp/.env`; revert to `deepgram` by env if a real call shows a problem.
+- Twilio account shows Suspended in the console (API still says active). Advised a fresh, upgraded Twilio account; Nithin is on it.
