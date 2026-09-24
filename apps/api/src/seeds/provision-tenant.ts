@@ -16,7 +16,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import mongoose, { Types } from 'mongoose';
 import { config } from '../common/config';
 import { AU_PACK } from '../modules/country-packs/au.pack';
-import { normalizePhone } from '../modules/leads/phone.util';
+import { normalizePhone, regionOf } from '../modules/leads/phone.util';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -38,7 +38,10 @@ async function main(): Promise<void> {
     console.error('slug must be 3-40 chars of a-z, 0-9, -');
     process.exit(2);
   }
-  const phone = normalizePhone(ownerPhoneRaw, region.toUpperCase());
+  // The owner's phone is validated against its own country code when given in
+  // E.164 (+91..., +61...); the tenant region only applies to bare numbers. An
+  // AU tenant can be owned by someone with a non-AU mobile.
+  const phone = normalizePhone(ownerPhoneRaw, regionOf(ownerPhoneRaw, region.toUpperCase()));
   if (!phone.ok) {
     console.error(`owner-phone rejected: ${phone.reason}`);
     process.exit(2);

@@ -940,7 +940,11 @@ def prewarm(proc: agents.JobProcess) -> None:
         min_speech_duration=0.05,
         min_silence_duration=0.35,
     )
-    proc.userdata["turn_detector"] = EnglishModel()
+    # NOTE: the turn-detector model is NOT built here. In livekit-agents 1.6 its
+    # constructor needs the job's inference executor (get_job_context()), so
+    # creating it in prewarm fails every process with "no job context found".
+    # Its weights are already on disk from `download-files`, so building it in
+    # the entrypoint is cheap.
 
 
 async def _presynthesize(tts, text: str) -> list[rtc.AudioFrame]:  # noqa: ANN001
@@ -1032,7 +1036,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         turn_handling={
             # Word-level end-of-turn model (prewarmed): "they have finished"
             # comes from the sentence, not from a silence timer.
-            "turn_detection": ctx.proc.userdata["turn_detector"],
+            "turn_detection": EnglishModel(),
             "endpointing": {
                 "mode": "dynamic",  # adapts to this caller's pace instead of one fixed wait
                 "min_delay": 0.3,  # framework default 0.5s — snappier turn-taking

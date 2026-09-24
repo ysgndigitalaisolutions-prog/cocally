@@ -13,7 +13,7 @@ GCP_WIF_PROVIDER   = projects/1041761530506/locations/global/workloadIdentityPoo
 GCP_DEPLOYER_SA    = cocally-deployer@cocally-509318.iam.gserviceaccount.com
 GCP_RUNTIME_SA     = cocally-runtime@cocally-509318.iam.gserviceaccount.com
 VM_NAME            = cocally-app
-APP_DOMAIN         = 35.244.108.69.sslip.io   # baked into the web image as the API URL; must equal DOMAIN on the VM. Change to app.co-cally.com after DNS is set.
-TELEPHONY_DRIVER   = SIMULATION               # switch to SIP once LIVEKIT_SIP_TRUNK_ID is provisioned
+APP_DOMAIN         = app.co-cally.com          # baked into the web image as the API URL; must equal DOMAIN on the VM
+TELEPHONY_DRIVER   = SIP                       # LIVEKIT_SIP_TRUNK_ID=ST_Dy4tHDsvd6Y8 provisioned 2026-09-24
 
 # Changing APP_DOMAIN requires "Re-run all jobs" (the web image is rebuilt), not just the deploy job.
