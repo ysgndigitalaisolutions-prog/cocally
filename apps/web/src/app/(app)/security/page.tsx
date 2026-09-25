@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import { api } from '@/lib/api';
 import { useAppStore } from '@/lib/store';
+import { homeFor } from '@/lib/roles';
 
 interface Profile {
   id: string;
@@ -39,13 +40,14 @@ export default function SecurityPage() {
   const [confirm, setConfirm] = useState('');
   const [pwMsg, setPwMsg] = useState('');
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<Profile> => {
     const { data } = await api.get('/auth/me');
     setProfile(data);
     const stored = localStorage.getItem('cocally.user');
     const merged = { ...(stored ? JSON.parse(stored) : {}), ...data };
     localStorage.setItem('cocally.user', JSON.stringify(merged));
     setUser(merged);
+    return data;
   }, [setUser]);
 
   useEffect(() => {
@@ -73,9 +75,11 @@ export default function SecurityPage() {
       setSecret(null);
       setQr(null);
       setCode('');
-      await load();
+      const fresh = await load();
       setTotpMsg('Authenticator enabled.');
-      if (profile?.twoFactorSetupRequired) router.push('/dashboard');
+      // Route on the profile just fetched, not the stale one: it still says
+      // setup is required and would send them straight back here.
+      if (profile?.twoFactorSetupRequired) router.push(homeFor(fresh));
     } catch (err) {
       setTotpMsg(errText(err, 'Code not accepted'));
     }

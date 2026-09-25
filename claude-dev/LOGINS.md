@@ -20,10 +20,10 @@ All six share the password **`CoCally!Pilot2026`**. Sign in with the **phone num
 
 | Phone | Email | Name | Role | Can see |
 |---|---|---|---|---|
-| `0400 000 001` | `owner@cocally.dev` | Olivia Owner | Owner | Everything, incl. team insights + kill switch |
+| `0400 000 001` | `owner@cocally.dev` | Olivia Owner | Owner | Everything except the agent desk (Workspace, Manual dial, My insights) unless "Takes calls" is on for her in Users & access |
 | `0400 000 002` | `admin@cocally.dev` | Andre Admin | Admin | Campaigns, flows, providers, users, audit log |
 | `0400 000 003` | `supervisor@cocally.dev` | Sana Supervisor | Supervisor | Floor feed, team insights, can pause campaigns |
-| `0400 000 004` | `agent1@cocally.dev` | Alex Agent | Agent | Workspace + own insights only (403 on team endpoints) |
+| `0400 000 004` | `agent1@cocally.dev` | Alex Agent | Agent | My desk (Workspace, Manual dial, My insights) + My security only; lands on Workspace; management URLs bounce home |
 | `0400 000 005` | `agent2@cocally.dev` | Amelia Agent | Agent | Same as agent1 |
 | `0400 000 006` | `qa@cocally.dev` | Quinn QA | QA | Calls, recordings, QA scores, team insights |
 

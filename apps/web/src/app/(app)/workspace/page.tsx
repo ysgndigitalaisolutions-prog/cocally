@@ -5,6 +5,7 @@ import type { AgentShiftState, FloorCallCard, PauseCode } from '@cocally/shared'
 import { api, secondsSince, secondsUntil, serverNow } from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAppStore } from '@/lib/store';
+import { SUPERVISOR_ROLES, hasRole, roleLabel } from '@/lib/roles';
 import PauseCodeMenu from '@/components/PauseCodeMenu';
 
 interface TeamMember {
@@ -42,6 +43,7 @@ function errorMessage(err: unknown, fallback: string): string {
 
 export default function WorkspacePage() {
   const {
+    user,
     presence,
     setPresence,
     shift,
@@ -49,6 +51,9 @@ export default function WorkspacePage() {
     activeCall,
     wrapUp,
   } = useAppStore();
+  // Team roster and live AI floor are floor-management views. An agent's day
+  // is their own status and their own calls; offers arrive via the call bar.
+  const showFloor = hasRole(user, ...SUPERVISOR_ROLES);
   const [floor, setFloor] = useState<Record<string, FloorCallCard>>({});
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [shiftError, setShiftError] = useState('');
@@ -71,12 +76,13 @@ export default function WorkspacePage() {
   // banner always reflect what the SERVER believes, never a stale local default.
   useEffect(() => {
     loadShift().catch(() => undefined);
+    if (!showFloor) return;
     api.get('/workspace/team').then((r) => setTeam(r.data)).catch(() => undefined);
     const timer = setInterval(() => {
       api.get('/workspace/team').then((r) => setTeam(r.data)).catch(() => undefined);
     }, 15_000);
     return () => clearInterval(timer);
-  }, [loadShift]);
+  }, [loadShift, showFloor]);
 
   // Shift and pause durations are ticked client-side off the server's counters
   // rather than re-fetched every second: one request on every change, then pure
@@ -181,7 +187,7 @@ export default function WorkspacePage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Agent workspace</h1>
+        <h1 className="text-2xl font-bold">Workspace</h1>
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => changePresence('AVAILABLE')}
@@ -319,68 +325,72 @@ export default function WorkspacePage() {
         </div>
       )}
 
-      <section>
-        <h2 className="mb-3 font-semibold">Team</h2>
-        <div className="card divide-y" style={{ borderColor: 'var(--border)' }}>
-          {team.length === 0 && (
-            <p className="p-4 text-sm" style={{ color: 'var(--text-dim)' }}>
-              No agents on this tenant yet.
-            </p>
-          )}
-          {team.map((member) => {
-            const m = PRESENCE_META[member.presence] ?? PRESENCE_META.OFFLINE!;
-            return (
-              <div key={member.id} className="flex items-center justify-between px-4 py-2" style={{ borderColor: 'var(--border)' }}>
-                <div className="flex items-center gap-3">
-                  <span className="inline-flex h-2.5 w-2.5 rounded-full" style={{ background: m.dot }} />
-                  <span className="text-sm font-medium">{member.name}</span>
-                  <span className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                    {member.roles.join(', ').toLowerCase()}
-                  </span>
+      {showFloor && (
+        <section>
+          <h2 className="mb-3 font-semibold">Team</h2>
+          <div className="card divide-y" style={{ borderColor: 'var(--border)' }}>
+            {team.length === 0 && (
+              <p className="p-4 text-sm" style={{ color: 'var(--text-dim)' }}>
+                No one else is on the floor yet.
+              </p>
+            )}
+            {team.map((member) => {
+              const m = PRESENCE_META[member.presence] ?? PRESENCE_META.OFFLINE!;
+              return (
+                <div key={member.id} className="flex items-center justify-between px-4 py-2" style={{ borderColor: 'var(--border)' }}>
+                  <div className="flex items-center gap-3">
+                    <span className="inline-flex h-2.5 w-2.5 rounded-full" style={{ background: m.dot }} />
+                    <span className="text-sm font-medium">{member.name}</span>
+                    <span className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                      {roleLabel(member)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs" style={{ color: 'var(--text-dim)' }}>
+                    <span style={{ color: m.dot }}>{m.label}</span>
+                    {member.presence === 'AVAILABLE' && member.availableSince && (
+                      <span>idle {Math.max(0, Math.round((Date.now() - new Date(member.availableSince).getTime()) / 60000))}m</span>
+                    )}
+                    <span>talk today {Math.round(member.talkTimeTodaySeconds / 60)}m</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-4 text-xs" style={{ color: 'var(--text-dim)' }}>
-                  <span style={{ color: m.dot }}>{m.label}</span>
-                  {member.presence === 'AVAILABLE' && member.availableSince && (
-                    <span>idle {Math.max(0, Math.round((Date.now() - new Date(member.availableSince).getTime()) / 60000))}m</span>
-                  )}
-                  <span>talk today {Math.round(member.talkTimeTodaySeconds / 60)}m</span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      <section>
-        <h2 className="mb-3 font-semibold">Live floor</h2>
-        {Object.keys(floor).length === 0 ? (
-          <p className="text-sm" style={{ color: 'var(--text-dim)' }}>
-            No AI calls in progress.
-          </p>
-        ) : (
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-            {Object.values(floor).map((card) => (
-              <div key={card.callId} className="card p-4">
-                <div className="flex items-center justify-between">
-                  <p className="font-semibold">{card.leadName}</p>
-                  <span
-                    className="rounded-full px-2 py-0.5 text-xs font-bold"
-                    style={{
-                      background: card.score >= 70 ? 'var(--good)' : 'var(--surface-2)',
-                      color: card.score >= 70 ? '#0b1220' : 'var(--text-dim)',
-                    }}
-                  >
-                    {card.score}
-                  </span>
-                </div>
-                <p className="mt-1 text-xs" style={{ color: 'var(--text-dim)' }}>
-                  {card.state} · {card.currentStage}
-                </p>
-              </div>
-            ))}
+              );
+            })}
           </div>
-        )}
-      </section>
+        </section>
+      )}
+
+      {showFloor && (
+        <section>
+          <h2 className="mb-3 font-semibold">Live floor</h2>
+          {Object.keys(floor).length === 0 ? (
+            <p className="text-sm" style={{ color: 'var(--text-dim)' }}>
+              No AI calls in progress.
+            </p>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+              {Object.values(floor).map((card) => (
+                <div key={card.callId} className="card p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="font-semibold">{card.leadName}</p>
+                    <span
+                      className="rounded-full px-2 py-0.5 text-xs font-bold"
+                      style={{
+                        background: card.score >= 70 ? 'var(--good)' : 'var(--surface-2)',
+                        color: card.score >= 70 ? '#0b1220' : 'var(--text-dim)',
+                      }}
+                    >
+                      {card.score}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs" style={{ color: 'var(--text-dim)' }}>
+                    {card.state} · {card.currentStage}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

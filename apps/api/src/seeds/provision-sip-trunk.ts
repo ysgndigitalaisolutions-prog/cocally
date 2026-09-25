@@ -43,8 +43,16 @@ async function main(): Promise<void> {
     .filter(Boolean);
   const name = arg('name') ?? 'CoCally carrier trunk';
   const transport = TRANSPORTS[(arg('transport') ?? process.env.SIP_TRUNK_TRANSPORT ?? 'udp').toLowerCase()];
-  if (!address || !username || !password || numbers.length === 0 || transport === undefined) {
-    console.error('Usage: --address <host[:port]> --username <u> --password <p> --numbers +61...,+61... [--transport udp|tcp|tls] [--name ...] [--inbound] [--inbound-addresses cidr,...] [--srtp]');
+  // Carriers authenticate either by digest (username+password) or by IP
+  // allow-list (no credentials; they whitelist LiveKit's static ranges — see
+  // destinationCountry below). Both are valid; only address+numbers are required.
+  const destinationCountry = (arg('destination-country') ?? process.env.SIP_DESTINATION_COUNTRY ?? 'AU').toUpperCase();
+  if (!address || numbers.length === 0 || transport === undefined) {
+    console.error('Usage: --address <host[:port]> [--username <u> --password <p>] --numbers +61...,+61... [--transport udp|tcp|tls] [--destination-country AU|IN|JP|...] [--name ...] [--inbound] [--inbound-addresses cidr,...] [--srtp]');
+    process.exit(2);
+  }
+  if ((username && !password) || (!username && password)) {
+    console.error('--username and --password must be given together');
     process.exit(2);
   }
   const { url, apiKey, apiSecret } = config.livekit;
@@ -64,18 +72,20 @@ async function main(): Promise<void> {
         address,
         numbers,
         transport,
-        authUsername: username,
-        authPassword: password,
+        ...(username ? { authUsername: username, authPassword: password } : {}),
+        destinationCountry,
         mediaEncryption,
       } as never)
     : await sip.createSipOutboundTrunk(name, address, numbers, {
         transport,
-        authUsername: username,
-        authPassword: password,
-        destinationCountry: 'AU',
+        ...(username ? { authUsername: username, authPassword: password } : {}),
+        // Which LiveKit region the call ORIGINATES from. 'AU' = Sydney (no static
+        // IPs published). 'IN' or 'JP' = regions with published static ranges, for
+        // carriers that only allow-list IPs (143.223.88.0/21, 161.115.160.0/19, 153.57.128.0/18).
+        destinationCountry,
         mediaEncryption,
       });
-  console.log(`${existing ? 'updated' : 'created'} outbound trunk ${outbound.sipTrunkId} → ${address} (${numbers.length} CLI number(s), digest auth as ${username})`);
+  console.log(`${existing ? 'updated' : 'created'} outbound trunk ${outbound.sipTrunkId} → ${address} (${numbers.length} CLI number(s), ${username ? `digest auth as ${username}` : 'no digest auth (IP allow-list)'}, originates from region for ${destinationCountry})`);
   console.log(`\nLIVEKIT_SIP_TRUNK_ID=${outbound.sipTrunkId}\n`);
 
   if (flag('inbound')) {

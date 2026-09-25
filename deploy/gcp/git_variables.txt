@@ -1,19 +1,17 @@
-# GitHub Actions repository VARIABLES for ysgndigitalaisolutions-prog/cocally
+# GitHub Actions repository VARIABLES for ysgndigitalaisolutions-prog/cocally (Variables tab, not Secrets).
 # Set at: https://github.com/ysgndigitalaisolutions-prog/cocally/settings/variables/actions
-# These are the Variables tab, not Secrets. None of them are secret.
-# Keep this file in sync whenever a variable is added or changed; setup.sh rewrites it on every run.
-# Last updated: 2026-09-24
+# Written by deploy/gcp/setup.sh on 2026-09-25T05:03:45Z; rewritten on every run.
 
 DEPLOY_TARGET      = vm
 GCP_PROJECT_ID     = cocally-509318
 GCP_PROJECT_NUMBER = 1041761530506
 GCP_REGION         = australia-southeast1
-GCP_ZONE           = australia-southeast1-b
 GCP_WIF_PROVIDER   = projects/1041761530506/locations/global/workloadIdentityPools/github/providers/github
 GCP_DEPLOYER_SA    = cocally-deployer@cocally-509318.iam.gserviceaccount.com
 GCP_RUNTIME_SA     = cocally-runtime@cocally-509318.iam.gserviceaccount.com
+TELEPHONY_DRIVER   = SIP
 VM_NAME            = cocally-app
-APP_DOMAIN         = app.co-cally.com          # baked into the web image as the API URL; must equal DOMAIN on the VM
-TELEPHONY_DRIVER   = SIP                       # LIVEKIT_SIP_TRUNK_ID=ST_Dy4tHDsvd6Y8 provisioned 2026-09-24
+GCP_ZONE           = australia-southeast1-b
+APP_DOMAIN         = app.co-cally.com
 
-# Changing APP_DOMAIN requires "Re-run all jobs" (the web image is rebuilt), not just the deploy job.
+# Changing APP_DOMAIN needs 'Re-run all jobs' (web image is rebuilt with it).

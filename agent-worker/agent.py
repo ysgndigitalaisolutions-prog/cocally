@@ -89,10 +89,14 @@ HOLD_MUSIC_URL = os.getenv("HOLD_MUSIC_URL")
 
 
 def _reasoning_effort(model: str) -> str | None:
-    """Groq reasoning models think silently unless told not to."""
-    if model.startswith("qwen/"):
+    """Reasoning models think silently unless told not to; hidden thinking is
+    dead air on a call. Names differ per provider: Groq `qwen/qwen3.8-27b`,
+    Cerebras `qwen-3.8-27b`; Groq `openai/gpt-oss-120b`, Cerebras `gpt-oss-120b`.
+    Both accept OpenAI's `reasoning_effort` (verified on Cerebras 2026-09-25)."""
+    m = model.lower()
+    if "qwen" in m:
         return "none"
-    if model.startswith("openai/gpt-oss"):
+    if "gpt-oss" in m:
         return "low"
     return None
 
@@ -929,6 +933,71 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
     return deepgram.TTS(model=TTS_VOICE or "aura-2-luna-en")
 
 
+# OpenAI-compatible providers. Cerebras and Groq serve the same two open models
+# under different names; each provider rate-limits per model, so every entry
+# below is a separate bucket.
+_PROVIDERS = {
+    "cerebras": {
+        "base_url": "https://api.cerebras.ai/v1",
+        "key_env": "CEREBRAS_API_KEY",
+        "models": {"qwen": "qwen-3.8-27b", "gpt-oss": "gpt-oss-120b"},
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "key_env": "GROQ_API_KEY",
+        "models": {"qwen": "qwen/qwen3.8-27b", "gpt-oss": "openai/gpt-oss-120b"},
+    },
+}
+# Primary provider; the other becomes the fallback. LLM_MODEL picks the family
+# ("qwen" = fastest first token, "gpt-oss" = higher quality); full provider
+# model ids are accepted too and mapped by family.
+LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or ("cerebras" if os.getenv("CEREBRAS_API_KEY") else "groq")).lower()
+
+
+def _family(model: str) -> str:
+    return "gpt-oss" if "gpt-oss" in model.lower() else "qwen"
+
+
+def _openai_compat_llm(provider: str, family: str):
+    spec = _PROVIDERS[provider]
+    model = spec["models"][family]
+    return openai.LLM(
+        model=model,
+        base_url=spec["base_url"],
+        api_key=os.environ[spec["key_env"]],
+        max_completion_tokens=LLM_MAX_TOKENS,
+        **({"reasoning_effort": _reasoning_effort(model)} if _reasoning_effort(model) else {}),
+        timeout=20.0,
+    )
+
+
+def _llm_chain() -> list[tuple[str, str]]:
+    """[(provider, family), ...] in fallback order: primary provider's chosen
+    family, then its other family, then the same on the other provider (only
+    providers with a key)."""
+    primary = _family(LLM_MODEL)
+    other = "gpt-oss" if primary == "qwen" else "qwen"
+    order = [LLM_PROVIDER] + [p for p in _PROVIDERS if p != LLM_PROVIDER]
+    return [(p, f) for p in order if os.environ.get(_PROVIDERS[p]["key_env"]) for f in (primary, other)]
+
+
+def _make_llm():
+    """Chained LLM: any 429/5xx/timeout on one entry fails over to the next.
+
+    First live call (2026-09-25): Groq on_demand is 8 000 input tokens/min per
+    model -> HTTP 429 after ~3 turns -> dead air. Cerebras is 150 000 (qwen) /
+    500 000 (gpt-oss) tokens/min at ~370 ms first token, so it is the default
+    primary whenever CEREBRAS_API_KEY is set; Groq stays as the seatbelt."""
+    from livekit.agents import llm as _llm
+
+    chain = _llm_chain()
+    if not chain:
+        raise RuntimeError("no LLM provider key set (CEREBRAS_API_KEY or GROQ_API_KEY)")
+    logger.info("LLM chain: %s", " -> ".join(f"{p}:{_PROVIDERS[p]['models'][f]}" for p, f in chain))
+    instances = [_openai_compat_llm(p, f) for p, f in chain]
+    return instances[0] if len(instances) == 1 else _llm.FallbackAdapter(instances)
+
+
 def prewarm(proc: agents.JobProcess) -> None:
     """Load the VAD and end-of-turn models once per worker process, not once
     per call: ~1 s of model loading used to sit between "customer answered" and
@@ -996,7 +1065,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if brief
         else "Greet the person, give the AI + recording disclosure in one sentence, and ask if now is a good moment."
     )
-    logger.info("starting agent (call=%s, brief=%s, llm=%s, tts=%s)", call_id, bool(brief), LLM_MODEL, TTS_PROVIDER)
+    logger.info("starting agent (call=%s, brief=%s, llm=%s:%s, tts=%s)", call_id, bool(brief), LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER)
 
     tts_engine = _build_tts()
     # Render the disclosure while the phone is still ringing.
@@ -1018,14 +1087,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # noise-robust path to finalize a turn instead of relying solely on
         # endpointing's raw-silence VAD, which is exactly what stalled.
         stt=deepgram.STT(model="nova-2-phonecall", utterance_end_ms=1000, endpointing_ms=25),
-        llm=openai.LLM(
-            model=LLM_MODEL,
-            base_url="https://api.groq.com/openai/v1",
-            api_key=os.environ["GROQ_API_KEY"],
-            max_completion_tokens=LLM_MAX_TOKENS,
-            **({"reasoning_effort": _reasoning_effort(LLM_MODEL)} if _reasoning_effort(LLM_MODEL) else {}),
-            timeout=20.0,
-        ),
+        llm=_make_llm(),
         tts=tts_engine,
         vad=ctx.proc.userdata["vad"],
         # Uncompromising-on-latency tuning. The framework already implements
@@ -1248,7 +1310,9 @@ if __name__ == "__main__":
     # the other maintenance subcommands need no credentials.
     import sys as _sys
     _serving = len(_sys.argv) > 1 and _sys.argv[1] in ("start", "dev")
-    _missing = [k for k in ("GROQ_API_KEY", "DEEPGRAM_API_KEY", "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET") if not os.environ.get(k)]
+    _missing = [k for k in ("DEEPGRAM_API_KEY", "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET") if not os.environ.get(k)]
+    if not (os.environ.get("CEREBRAS_API_KEY") or os.environ.get("GROQ_API_KEY")):
+        _missing.append("CEREBRAS_API_KEY|GROQ_API_KEY")
     if _missing and _serving:
         if (os.getenv("TELEPHONY_DRIVER") or "SIMULATION").upper() != "SIP":
             # The stack is still in simulation: nothing will ever dispatch a room to

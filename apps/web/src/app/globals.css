@@ -11,6 +11,24 @@
   --accent-dim: #b47a14;
   --good: #34d399;
   --bad: #f87171;
+  /* Text on an accent/good/bad fill. Phase 2 (light theme) retunes this per theme. */
+  --on-accent: #0b1220;
+}
+
+/* Expose the palette as Tailwind utilities (bg-surface, text-dim, border-border,
+   text-on-accent) so components stop reaching for inline style={{ color: var(...) }}. */
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-dim: var(--text-dim);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-good: var(--good);
+  --color-bad: var(--bad);
+  --color-on-accent: var(--on-accent);
 }
 
 body {
@@ -49,7 +67,7 @@ body {
 }
 .btn-primary {
   background: var(--accent);
-  color: #0b1220;
+  color: var(--on-accent);
 }
 .btn-ghost {
   background: var(--surface-2);
@@ -58,5 +76,5 @@ body {
 }
 .btn-danger {
   background: var(--bad);
-  color: #0b1220;
+  color: var(--on-accent);
 }

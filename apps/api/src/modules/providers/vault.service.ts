@@ -68,6 +68,7 @@ export class VaultService {
       anthropic: config.providerKeys.anthropic,
       google: config.providerKeys.google,
       groq: config.providerKeys.groq,
+      cerebras: config.providerKeys.cerebras,
       'google-stt': config.providerKeys.google,
       'google-tts': config.providerKeys.google,
       gemini: config.providerKeys.google,

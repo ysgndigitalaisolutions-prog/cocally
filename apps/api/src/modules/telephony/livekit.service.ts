@@ -163,9 +163,12 @@ export class LivekitService {
     if (!config.livekit.sipTrunkId) {
       throw new ServiceUnavailableException('LIVEKIT_SIP_TRUNK_ID is not configured — no outbound SIP trunk set up yet');
     }
+    // Some carriers route on a tech prefix + country code + number with no
+    // leading plus (e.g. 1701 61 2xxxxxxxx). Twilio takes E.164 unchanged.
+    const dialTo = config.livekit.sipDialPrefix ? `${config.livekit.sipDialPrefix}${phoneNumber.replace(/^\+/, '')}` : phoneNumber;
     const info = await this.sipClient.createSipParticipant(
       config.livekit.sipTrunkId,
-      phoneNumber,
+      dialTo,
       this.roomName(callId),
       {
         participantIdentity: this.sipParticipantIdentity(callId),

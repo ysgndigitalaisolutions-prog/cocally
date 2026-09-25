@@ -360,9 +360,68 @@ export class OpenAiLlm implements LlmAdapter {
  * a phone conversation that is pure latency. Qwen takes "none", gpt-oss "low".
  */
 function groqReasoningEffort(model: string): 'none' | 'low' | undefined {
-  if (model.startsWith('qwen/')) return 'none';
-  if (model.startsWith('openai/gpt-oss')) return 'low';
+  // Provider names differ (Groq `qwen/qwen3.8-27b`, Cerebras `qwen-3.8-27b`); match by family.
+  const m = model.toLowerCase();
+  if (m.includes('qwen')) return 'none';
+  if (m.includes('gpt-oss')) return 'low';
   return undefined;
+}
+
+/**
+ * Cerebras: same two open models as Groq behind the same OpenAI-compatible
+ * shape, but with per-minute token limits that a call floor can live on
+ * (2026-09-25: 150k/min qwen, 500k/min gpt-oss vs Groq's 8k on the free tier).
+ * Primary LLM for the engine's per-turn extraction, summaries and scoring;
+ * Groq stays registered as the fallback.
+ */
+export class CerebrasLlm implements LlmAdapter {
+  readonly info = {
+    id: 'cerebras',
+    label: 'Cerebras',
+    capability: 'LLM' as const,
+    unitCost: { amountCentsPer: 0, unit: '1k_tokens' as const },
+    credentialSchema: [{ key: 'apiKey', label: 'API key', type: 'secret' as const, required: true, placeholder: 'csk-…' }],
+    models: ['qwen-3.8-27b', 'gpt-oss-120b'],
+  };
+
+  async complete(request: LlmRequest, credentials?: ProviderCredentials): Promise<LlmResult> {
+    const apiKey = credentials?.apiKey;
+    if (!apiKey) throw new Error('Cerebras API key not configured');
+    // Callers may name the Groq id; map by family so one config works for both providers.
+    const requested = request.model?.toLowerCase() ?? '';
+    const model = requested.includes('gpt-oss') ? 'gpt-oss-120b' : 'qwen-3.8-27b';
+    const reasoningEffort = groqReasoningEffort(model);
+    const response = await fetchWithTimeout('https://api.cerebras.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        max_tokens: request.maxTokens ?? 512,
+        temperature: request.temperature ?? 0.7,
+        messages: request.messages,
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+        ...(request.jsonMode ? { response_format: { type: 'json_object' } } : {}),
+      }),
+    });
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => '')).slice(0, 200);
+      throw new Error(`Cerebras completion failed: ${response.status} ${detail}`);
+    }
+    const data = (await response.json()) as {
+      choices: Array<{ message: { content: string } }>;
+      usage: { prompt_tokens: number; completion_tokens: number };
+    };
+    return {
+      text: data.choices[0]?.message.content ?? '',
+      inputTokens: data.usage.prompt_tokens,
+      outputTokens: data.usage.completion_tokens,
+      costCents: 0,
+    };
+  }
+
+  async healthy(credentials?: ProviderCredentials): Promise<boolean> {
+    return Boolean(credentials?.apiKey);
+  }
 }
 
 /**

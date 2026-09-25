@@ -57,6 +57,7 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: optionalString(),
   GOOGLE_API_KEY: optionalString(),
   GROQ_API_KEY: optionalString(),
+  CEREBRAS_API_KEY: optionalString(),
 
   // --- Live telephony (only required when TELEPHONY_DRIVER=SIP). See
   //     claude-dev/2026-07-19-live-call-build-plan.md for the full design. ---
@@ -70,6 +71,12 @@ const envSchema = z.object({
   LIVEKIT_API_SECRET: optionalString(),
   /** LiveKit outbound SIP trunk id (dial-out) once the carrier trunk is wired. */
   LIVEKIT_SIP_TRUNK_ID: optionalString(),
+  /**
+   * Carrier "tech prefix" prepended to the dialled digits on outbound calls,
+   * e.g. 1701 → +61412000123 is sent as 170161412000123 (no plus). Blank for
+   * carriers that take plain E.164 (Twilio).
+   */
+  SIP_DIAL_PREFIX: optionalString(),
   /** Twilio account backing the SIP trunk / numbers. */
   TWILIO_ACCOUNT_SID: optionalString(),
   TWILIO_AUTH_TOKEN: optionalString(),
@@ -163,6 +170,7 @@ export const config = {
     anthropic: parsed.ANTHROPIC_API_KEY,
     google: parsed.GOOGLE_API_KEY,
     groq: parsed.GROQ_API_KEY,
+    cerebras: parsed.CEREBRAS_API_KEY,
   },
   publicBaseUrl: parsed.PUBLIC_BASE_URL,
   engineServiceToken: parsed.ENGINE_SERVICE_TOKEN,
@@ -171,6 +179,7 @@ export const config = {
     apiKey: parsed.LIVEKIT_API_KEY,
     apiSecret: parsed.LIVEKIT_API_SECRET,
     sipTrunkId: parsed.LIVEKIT_SIP_TRUNK_ID,
+    sipDialPrefix: parsed.SIP_DIAL_PREFIX?.trim() || undefined,
   },
   twilio: {
     accountSid: parsed.TWILIO_ACCOUNT_SID,

@@ -3,6 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { api } from '@/lib/api';
+import { homeFor } from '@/lib/roles';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -29,7 +30,7 @@ export default function LoginPage() {
       }
       localStorage.setItem('cocally.token', data.token);
       localStorage.setItem('cocally.user', JSON.stringify(data.user));
-      router.push(data.user?.twoFactorSetupRequired ? '/security' : '/dashboard');
+      router.push(homeFor(data.user));
     } catch (err) {
       const message =
         (err as { response?: { data?: { message?: string } } }).response?.data?.message ?? 'Login failed';

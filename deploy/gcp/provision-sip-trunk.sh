@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 set -a; . ./.env; set +a
-: "${SIP_TRUNK_ADDRESS:?set SIP_TRUNK_ADDRESS in deploy/gcp/.env}"; : "${SIP_TRUNK_USERNAME:?}"; : "${SIP_TRUNK_PASSWORD:?}"; : "${SIP_TRUNK_NUMBERS:?}"
+: "${SIP_TRUNK_ADDRESS:?set SIP_TRUNK_ADDRESS in deploy/gcp/.env}"; : "${SIP_TRUNK_NUMBERS:?}"   # username/password optional (IP allow-list carriers)
 GCP_ZONE="${GCP_ZONE:-${GCP_REGION:-australia-southeast1}-b}"
 gcloud config set project "$GCP_PROJECT_ID" >/dev/null
 # Credentials come from .env.prod inside the container (env_file), so they never appear on the ssh command line.

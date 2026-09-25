@@ -23,7 +23,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @cocally/shared build
       - run: pnpm typecheck
-      - run: pnpm --filter @cocally/shared test && pnpm --filter @cocally/api test
+      - run: pnpm --filter @cocally/shared test && pnpm --filter @cocally/api test && pnpm --filter @cocally/web test
       - run: pnpm --filter @cocally/web build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
