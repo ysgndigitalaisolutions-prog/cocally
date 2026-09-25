@@ -185,7 +185,7 @@ async function main() {
         { objection: 'already_with_broker', rebuttal: 'Reassure: this is a free review, no commitment; continue the questions.' },
         { objection: 'no_bill_handy', rebuttal: 'Reassure: the bill is not needed for this call; a rough quarterly amount is enough.' },
       ],
-      aiSelfIdentification: true, transcriptionMode: 'FULL', whisperEnabled: false, routingStrategy: 'LONGEST_IDLE',
+      aiSelfIdentification: true, transcriptionMode: 'BOTH', whisperEnabled: false, routingStrategy: 'LONGEST_IDLE',
       transferAcceptWindowSeconds: 15, schedule: [], sttKeywords: ['AGL', 'Origin', 'Alinta', 'NBN', 'Superloop', 'Dodo', 'gas', 'electricity'],
       summaryTemplate: 'Lead {{firstName}}. Score {{score}}. Facts: {{facts}}. Objection: {{objection}}.',
       createdAt: now, updatedAt: now,
@@ -193,7 +193,8 @@ async function main() {
     campaign = { _id };
     console.log(`created campaign "${CAMPAIGN_NAME}" (IN pack, ACTIVE, frequency cap off, retries every 5 min)`);
   } else {
-    await db.collection('campaigns').updateOne({ _id: campaign._id }, { $set: { activeFlowVersionId: flowVersionId, updatedAt: now } });
+    // Also repairs campaigns seeded by the first version of this script, which wrote an invalid transcriptionMode.
+    await db.collection('campaigns').updateOne({ _id: campaign._id }, { $set: { activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', updatedAt: now } });
     console.log(`reusing campaign "${CAMPAIGN_NAME}"`);
   }
   const campaignId = campaign._id as Types.ObjectId;

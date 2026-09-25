@@ -71,3 +71,31 @@ Unset `DNCR_BYPASS` + DNCR creds; replace Twilio with the AU carrier trunk via `
 - IN pack calling window widened to 00:00–23:59 (temporary, comment in `in.pack.ts`); `country-packs.service.ts` now syncs IN windows on boot like AU. **Restore 09:00–21:00 before any non-own number is on the pack.**
 - Login page hint for non-AU numbers. Attempts to add `TOTP_BYPASS`/`CALLING_WINDOW_BYPASS` flags were blocked by the session classifier and abandoned; the authenticator stays mandatory.
 - Test kit: `2026-09-25-wendy-anwar-test-kit.md`.
+
+## 9. Live-path behaviour to know before the first call (answers given to Nithin)
+
+- **Inbound trunk: not needed.** All calls are outbound; the closer joins the LiveKit room from the browser. `provision-sip-trunk.sh --inbound` exists for a later call-back line.
+- **Voicemail.** Worker classifies from the FIRST transcript (~0.5 s) with phrase patterns (`_VOICEMAIL_PATTERNS` in `agent.py`), posts `POST /engine/calls/:id/amd`. **Gap:** on the live SIP path the campaign `voicemailPolicy` (SILENT_HANGUP / PRERECORDED_DROP / AI_DROP) is only executed by the simulation runtime (`call-orchestrator.service.ts` AMD branch runs on the sim path; `placeLiveCall` does not). Live: the AI talks into the voicemail until silence/max turns. Fix after the first test: worker hangs up via `POST /call-control/calls/:id/hangup` with `ANSWERED_VOICEMAIL` when its class is VOICEMAIL; check detector accuracy on the real recording first.
+- **DTMF.** Receiving customer keypresses is wired (`sip_dtmf_received` → `POST /engine/calls/:id/dtmf`). **Sending** tones (campaign `ivrPolicy`, `IVR_KEYPRESS` node → `runtime.sendDtmf`) is implemented only in `simulation.runtime.ts` / `sim-session.service.ts`; no live `CallRuntime` exists. If needed: `room.local_participant.publish_dtmf(code, digit)` in the worker, triggered from the engine.
+
+## 10. Exact next steps (supersedes §5)
+
+1. **Push** (uncommitted: IN pack window + boot sync, login hint, `seed-test-campaign.ts` + `.sh`, handoff, test kit):
+   `git add -A && git commit -m "seed-test-campaign; open IN calling window; login hint; handoff" && git push origin prod`
+2. **Invite one agent** (Users & access) while Deploy (VM) runs (~8 min). Owner login: `+919902352425` + password + authenticator (mandatory; bypass attempts were blocked and abandoned).
+3. **Seed**: `./deploy/gcp/seed-test-campaign.sh` → prints the campaign URL. Re-run after inviting agents to assign them, or any time to reset the lead to FRESH.
+4. **LiveKit webhook** (unconfirmed): `https://app.co-cally.com/api/v1/telephony/livekit/webhook`, key `APIfVWyDfjpDCsZ`.
+5. **Dial** from the campaign page with the agent Available. Expect: Twilio trial notice → disclosure ("…Is now a good moment?") → Sam. Then the negative cases: let one ring to voicemail (see §9), decline, agent declines transfer.
+6. **Read back**: call page transcript + latency line, dashboard p50/p95, worker log `starting agent (… llm=qwen/qwen3.8-27b, tts=elevenlabs)`.
+
+## 11. Restore before the AU pilot (checklist)
+
+`in.pack.ts` window → 09:00–21:00; `DNCR_BYPASS` unset + DNCR creds; AU carrier trunk (or Twilio upgraded + AU CLI); rotate ElevenLabs key (pasted in chat); `RECORDING_BUCKET`; voicemail hang-up on live path (§9); LiveKit webhook confirmed; `TELEPHONY_DRIVER`/`APP_DOMAIN` GitHub variables match `deploy/gcp/git_variables.txt`.
+
+## 12. First production dial attempts (2026-09-25 ~05:20–05:33 IST) — findings
+
+- **Manual dial works end to end** on the Twilio trunk: call `6ab5797101c30eec139ed853` connected (agent's phone +919902352425 → lead +918985350964), 51 s, hung up by agent, wrap-up → AVAILABLE. Earlier attempts: dialling own number as both agent and lead → "sip request timed out"; one `480 Temporarily Unavailable` from the carrier.
+- **AI dial connected but was silent.** `LiveCallDriver live dial … answered after 10036ms → IN_CONVERSATION`, then the worker job crashed: `livekit-plugins-turn-detector … Could not find file "languages.json"` / `model_q8.onnx`. Cause: `Dockerfile` runs `download-files` as root, then `USER worker` reads a different `~/.cache`. **Fix:** `ENV HF_HOME=/app/.cache/huggingface` before the download (uncommitted; local image build verifying).
+- **Seed bug:** `transcriptionMode: 'FULL'` is not in `TRANSCRIPTION_MODES` (`LIVE|SUMMARY|BOTH`); every PATCH on the seeded campaign failed with a Mongoose ValidationError. Seed now writes `BOTH` and repairs the existing campaign on re-run. Run `./deploy/gcp/seed-test-campaign.sh` once after the next deploy.
+- **"No agent is AVAILABLE":** `availableAgentCount` requires `roles: 'AGENT'`; the Owner going Available does not count. Invite a separate Agent user (roles are checkboxes at invite time; existing users' roles cannot be edited in the UI yet). Campaign page "Dial (sim)" (now relabelled "AI dial now") places one AI call regardless of pacing.
+- Manual dial rings the AGENT's phone first, then bridges the lead; it never involves the AI (`manual: true` → worker leaves the room).

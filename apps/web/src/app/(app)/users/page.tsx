@@ -123,6 +123,25 @@ export default function UsersPage() {
     }
   }
 
+  /** Toggle the AGENT role on an existing user (e.g. an Owner who also takes calls).
+   *  A role change signs that user out everywhere, so warn when it is yourself. */
+  async function setTakesCalls(u: UserRow, takesCalls: boolean) {
+    const roles = takesCalls ? [...u.roles, 'AGENT'] : u.roles.filter((r) => r !== 'AGENT');
+    const self = u.id === me?.id;
+    if (!confirm(`${takesCalls ? 'Add' : 'Remove'} the Agent role for ${u.name}? ${self ? 'You will be signed out and need to sign in again.' : 'They are signed out and must sign in again.'}`)) return;
+    setError('');
+    try {
+      await api.patch(`/users/${u.id}`, { roles });
+      if (self) {
+        window.location.href = '/login';
+        return;
+      }
+      await load();
+    } catch (err) {
+      setError(errText(err, 'Could not update roles'));
+    }
+  }
+
   async function setActive(u: UserRow, active: boolean) {
     if (!active && !confirm(`Deactivate ${u.name}? They are signed out immediately.`)) return;
     setError('');
@@ -255,7 +274,15 @@ export default function UsersPage() {
                   )}
                 </td>
                 <td className="p-3 font-mono text-xs">{u.phone ?? '—'}</td>
-                <td className="p-3">{u.roles.join(', ')}</td>
+                <td className="p-3">
+                  <p>{u.roles.join(', ')}</p>
+                  {u.active && (
+                    <label className="mt-1 flex items-center gap-1 text-xs" style={{ color: 'var(--text-dim)' }} title="Agent role: can clock in, go Available and take calls and transfers">
+                      <input type="checkbox" checked={u.roles.includes('AGENT')} onChange={(e) => setTakesCalls(u, e.target.checked)} />
+                      takes calls
+                    </label>
+                  )}
+                </td>
                 <td className="p-3">{!u.active ? 'Deactivated' : u.passwordSet ? 'Active' : 'Invited, no password yet'}</td>
                 <td className="p-3">{u.totpEnabled ? 'Enabled' : '—'}</td>
                 <td className="p-3">

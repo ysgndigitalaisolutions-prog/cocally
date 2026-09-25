@@ -346,10 +346,11 @@ export default function CampaignDetailPage() {
         </section>
 
         <section className="card p-6">
-          <h2 className="mb-3 font-semibold">Leads · simulated dial</h2>
+          <h2 className="mb-3 font-semibold">Leads · AI dial</h2>
           <p className="mb-3 text-xs" style={{ color: 'var(--text-dim)' }}>
-            Fire a simulated AI call for any lead (dev driver). Set yourself AVAILABLE in the Workspace first to
-            receive the warm transfer.
+            Places one AI-fronted call to a lead right now, outside the dialer&apos;s pacing (a real phone call when
+            telephony is live, a simulation otherwise). Have a closer AVAILABLE first to receive the warm transfer.
+            The Manual dial page is different: it connects a human agent directly, with no AI.
           </p>
           <ul className="space-y-2 text-sm">
             {leads.map((lead) => (
@@ -358,8 +359,8 @@ export default function CampaignDetailPage() {
                   {lead.firstName ?? 'Lead'} · <span className="font-mono text-xs">{lead.phone}</span> ·{' '}
                   <span style={{ color: 'var(--text-dim)' }}>{lead.state_}</span>
                 </span>
-                <button className="btn btn-ghost text-xs" onClick={() => devDial(lead._id)}>
-                  Dial (sim)
+                <button className="btn btn-ghost text-xs" onClick={() => devDial(lead._id)} title="Places one AI-fronted call to this lead now (real phone call when telephony is SIP)">
+                  AI dial now
                 </button>
               </li>
             ))}
