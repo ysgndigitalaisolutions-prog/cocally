@@ -109,6 +109,8 @@ export class SupervisionService {
       const agentId = call.agentId?.toString() ?? null;
       return {
         callId: call._id.toString(),
+        leadId: call.leadId.toString(),
+        campaignId: call.campaignId.toString(),
         agentId,
         agentName: agentId ? (agentNames.get(agentId) ?? null) : null,
         // A live call always has a lead and a campaign; the fallbacks exist
@@ -118,6 +120,7 @@ export class SupervisionService {
         state: call.state,
         startedAt: call.startedAt.getTime(),
         manual: call.manual,
+        score: call.finalScore ?? 0,
         supervised: call.supervisionMode ?? null,
       } satisfies SupervisableCall;
     });

@@ -243,9 +243,18 @@ export class CallsController {
       dwellingHouse: 'House (not unit)',
       roofSuitable: 'Roof suitable',
       appointmentInterest: 'Wants appointment',
+      decisionMaker: 'Looks after the bill',
+      payingTooMuch: 'Feels they pay too much',
+      notSwitchedRecently: 'Not switched in 6–12 months',
+      wantsSpecialist: 'Agreed to specialist',
+      appointmentSlot: 'Preferred time',
+    };
+    const humanise = (key: string) => {
+      const words = key.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+      return words.charAt(0).toUpperCase() + words.slice(1);
     };
     const facts = Object.entries(lead?.facts ?? {}).map(([key, value]) => ({
-      label: factLabels[key] ?? key,
+      label: factLabels[key] ?? humanise(key),
       value: String(value),
       confirmed: Boolean(value),
     }));

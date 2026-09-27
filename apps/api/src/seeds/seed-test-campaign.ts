@@ -5,7 +5,7 @@
  *   one lead per --phone → every active AGENT assigned to the campaign.
  *
  *   node apps/api/dist/seeds/seed-test-campaign.js --tenant-slug ysgn \
- *     --phone +919902352425 [--phone +91...] [--first-name Nithin] [--client-name "YSGN Energy"]
+ *     --phone +919902352425 --first-name Nithin [--phone +91... --first-name Surya ...] [--client-name "YSGN Energy"]
  *
  * Idempotent on campaign name: re-running adds missing leads and re-assigns
  * agents but does not duplicate the flow or campaign. Internal testing only —
@@ -38,10 +38,14 @@ const CAMPAIGN_NAME = 'Wendy test (India)';
  * this flow, so the live score sat at 0 and the score-gated transfer could
  * never fire. Facts are booleans extracted from the transcript by
  * `EngineController.recomposeSummary` (see its FACT_GLOSSARY for the exact
- * definitions). Transfer at 70 = bill payer + paying too much + any one more.
+ * definitions). The customer's "yes, put me through" (`wantsSpecialist`) is
+ * worth 35 and everything else together is 65, so the score-gated transfer can
+ * only fire once they have actually agreed — on the first real call it fired
+ * mid-sentence, before the question was asked. Transfer at 70 = yes + bill
+ * payer + paying too much (80); without the yes the best case is book-only.
  */
 const ENERGY_SCORING: ScoringConfig = {
-  weights: { decisionMaker: 30, payingTooMuch: 25, billHigh: 15, notSwitchedRecently: 15, wantsSpecialist: 15 },
+  weights: { decisionMaker: 25, payingTooMuch: 20, billHigh: 10, notSwitchedRecently: 10, wantsSpecialist: 35 },
   thresholds: { transfer: 70, bookOnly: 50, nurture: 30 },
 };
 const FLOW_NAME = 'Energy Bill Review + NBN (Wendy Anwar)';
@@ -74,7 +78,10 @@ async function main() {
     console.error('Usage: --tenant-slug <slug> --phone <+91...> [--phone ...] [--first-name <name>] [--client-name <name>]');
     process.exit(2);
   }
-  const firstName = arg('first-name') ?? 'Nithin';
+  // Names pair with phones in order: --phone A --first-name Alice --phone B --first-name Bob.
+  const firstNames = args('first-name');
+  const firstName = firstNames[0] ?? 'Nithin';
+  const nameFor = (i: number) => firstNames[i] ?? (i === 0 ? firstName : `Test${i + 1}`);
   const clientName = arg('client-name') ?? 'YSGN Energy';
 
   await mongoose.connect(config.mongoUri);
@@ -233,11 +240,11 @@ async function main() {
       continue;
     }
     await db.collection('leads').insertOne({
-      tenantId, clientId, listId, campaignId, phone: e164, firstName: i === 0 ? firstName : `Test${i + 1}`, lastName: i === 0 ? '' : 'Number',
+      tenantId, clientId, listId, campaignId, phone: e164, firstName: nameFor(i), lastName: firstNames[i] || i === 0 ? '' : 'Number',
       suburb: 'Bengaluru', state: 'KA', timezone: 'Asia/Kolkata', lineType: 'MOBILE', custom: {}, state_: 'FRESH', attempts: 0, facts: {}, score: 0,
       dncListed: false, timeline: [{ at: now, kind: 'IMPORT', detail: 'seed-test-campaign' }], createdAt: now, updatedAt: now,
     });
-    console.log(`created lead ${e164} (${i === 0 ? firstName : `Test${i + 1}`})`);
+    console.log(`created lead ${e164} (${nameFor(i)})`);
   }
 
   // Assign every active agent as a closer on this campaign (skills holds campaign ids)

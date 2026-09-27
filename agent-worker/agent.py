@@ -295,10 +295,13 @@ class Qualifier(Agent):
         session = self.session_ref
         if session is not None:
             try:
-                await asyncio.wait_for(
-                    session.say("Great — let me get a specialist on the line for you, one moment.", allow_interruptions=False),
-                    timeout=15.0,
-                )
+                # Queue the line and the hold music behind it, but do NOT wait
+                # for the line to finish before asking the server for an agent:
+                # the cascade (accept window × hops) is the long pole, and on
+                # the first real call this await sat behind the AI's previous
+                # utterance, timed out at 15 s, skipped the comfort audio and
+                # delayed the transfer request by the same 15 s.
+                session.say("Great — let me get a specialist on the line for you, one moment.", allow_interruptions=False)
                 handle = session.say(
                     "",
                     audio=_comfort_audio(stop, self.output_sample_rate, self.hold_music_pcm),

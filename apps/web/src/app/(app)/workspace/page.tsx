@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentShiftState, FloorCallCard, PauseCode } from '@cocally/shared';
+import type { AgentShiftState, FloorCallCard, PauseCode, SupervisableCall } from '@cocally/shared';
 import { api, secondsSince, secondsUntil, serverNow } from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAppStore } from '@/lib/store';
@@ -78,6 +78,31 @@ export default function WorkspacePage() {
     loadShift().catch(() => undefined);
     if (!showFloor) return;
     api.get('/workspace/team').then((r) => setTeam(r.data)).catch(() => undefined);
+    // Seed the live floor from the server on every mount. The socket only
+    // carries changes, so a call that started while this page was not open
+    // (the user was on another tab) would otherwise never appear until its
+    // next turn — or at all, if it was already bridged.
+    api
+      .get('/supervision/calls')
+      .then((r) => {
+        const seeded: Record<string, FloorCallCard> = {};
+        for (const c of r.data as SupervisableCall[]) {
+          if (c.manual || c.agentId) continue; // humans' calls live in the team roster, not the AI floor
+          seeded[c.callId] = {
+            callId: c.callId,
+            leadId: c.leadId,
+            campaignId: c.campaignId,
+            leadName: c.leadName,
+            state: c.state,
+            currentStage: 'ai',
+            score: c.score,
+            startedAt: c.startedAt,
+            claimable: false,
+          };
+        }
+        setFloor((prev) => ({ ...seeded, ...prev }));
+      })
+      .catch(() => undefined);
     const timer = setInterval(() => {
       api.get('/workspace/team').then((r) => setTeam(r.data)).catch(() => undefined);
     }, 15_000);
@@ -383,7 +408,7 @@ export default function WorkspacePage() {
                     </span>
                   </div>
                   <p className="mt-1 text-xs" style={{ color: 'var(--text-dim)' }}>
-                    {card.state} · {card.currentStage}
+                    {card.state.toLowerCase().replace(/_/g, ' ')} · {Math.floor(secondsSince(card.startedAt) / 60)}m
                   </p>
                 </div>
               ))}

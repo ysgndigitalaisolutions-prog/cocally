@@ -491,6 +491,10 @@ export class EngineController {
       }
     }
     if (extracted.appointmentSlot) lead.facts['appointmentSlot'] = extracted.appointmentSlot;
+    // `facts` is a Mixed path: in-place writes are invisible to change tracking.
+    lead.markModified('facts');
+    const score = computeScore(campaign.scoring, lead.facts);
+    lead.score = score;
     await lead.save();
 
     if (extracted.objection) {
@@ -517,7 +521,6 @@ export class EngineController {
       if (resolved) resolved.recovered = true;
     }
 
-    const score = computeScore(campaign.scoring, lead.facts);
     call.finalScore = score;
 
     const name = lead.firstName ?? 'there';

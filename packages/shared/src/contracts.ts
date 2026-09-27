@@ -60,6 +60,8 @@ export interface AgentShiftState {
 /** A supervisor's live view of one in-progress call. */
 export interface SupervisableCall {
   callId: string;
+  leadId: string;
+  campaignId: string;
   agentId: string | null;
   agentName: string | null;
   leadName: string;
@@ -67,6 +69,8 @@ export interface SupervisableCall {
   state: CallState;
   startedAt: number;
   manual: boolean;
+  /** Live qualification score (0 for a human-fronted call). */
+  score: number;
   /** True when a supervisor is already attached to this call. */
   supervised: SupervisionMode | null;
 }

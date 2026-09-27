@@ -29,6 +29,16 @@ async function bootstrap(): Promise<void> {
   // The large limit applies to the CSV import route only; everything else,
   // including the unauthenticated login route, gets the 1 MB default.
   app.use('/api/v1/leads/import', express.json({ limit: IMPORT_BODY_LIMIT, verify: rawBodyVerify }));
+  // LiveKit posts `Content-Type: application/webhook+json`, which the default
+  // JSON parser skips, leaving no raw body to verify the signature against.
+  app.use(
+    '/api/v1/telephony/livekit/webhook',
+    express.json({
+      type: ['application/json', 'application/webhook+json'],
+      limit: DEFAULT_BODY_LIMIT,
+      verify: rawBodyVerify,
+    }),
+  );
   app.use(express.json({ limit: DEFAULT_BODY_LIMIT, verify: rawBodyVerify }));
   app.use(express.urlencoded({ limit: DEFAULT_BODY_LIMIT, extended: true }));
   if (config.trustProxy) app.getHttpAdapter().getInstance().set('trust proxy', 1);

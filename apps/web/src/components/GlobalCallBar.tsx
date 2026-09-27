@@ -1313,16 +1313,34 @@ export default function GlobalCallBar() {
                   <div className="mb-4 grid gap-4 md:grid-cols-2">
                     {(briefing.summary || briefing.facts.length > 0) && (
                       <div className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
-                        <p className="mb-1 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Summary</p>
-                        {briefing.summary && <p>{briefing.summary}</p>}
-                        {briefing.facts.length > 0 && (
-                          <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5">
-                            {briefing.facts.map((fact) => (
-                              <li key={fact.label} style={{ color: fact.confirmed ? 'var(--good)' : 'var(--text-dim)' }}>
-                                {fact.confirmed ? '✓' : '·'} {fact.label}
-                              </li>
-                            ))}
+                        <div className="mb-2 flex items-baseline justify-between gap-3">
+                          <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Summary</p>
+                          <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                            Score <span className="font-mono text-sm font-semibold" style={{ color: 'var(--text)' }}>{briefing.score}</span>
+                          </p>
+                        </div>
+                        {briefing.facts.length > 0 ? (
+                          <ul className="grid grid-cols-1 gap-y-1 sm:grid-cols-2 sm:gap-x-4">
+                            {briefing.facts.map((fact) => {
+                              const isFlag = fact.value === 'true' || fact.value === 'false';
+                              return (
+                                <li key={fact.label} className="flex gap-2" style={{ color: fact.confirmed ? 'var(--text)' : 'var(--text-dim)' }}>
+                                  <span aria-hidden style={{ color: fact.confirmed ? 'var(--good)' : 'var(--bad)' }}>{fact.confirmed ? '✓' : '✗'}</span>
+                                  <span>
+                                    {fact.label}
+                                    {!isFlag && <span style={{ color: 'var(--text-dim)' }}>: {fact.value}</span>}
+                                  </span>
+                                </li>
+                              );
+                            })}
                           </ul>
+                        ) : (
+                          briefing.summary && <p>{briefing.summary}</p>
+                        )}
+                        {!briefing.rebuttals.length && (
+                          <p className="mt-2 text-xs" style={{ color: 'var(--text-dim)' }}>
+                            Objection: {briefing.objection ? briefing.objection.replace(/_/g, ' ') : 'none'}
+                          </p>
                         )}
                       </div>
                     )}
