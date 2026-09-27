@@ -6,7 +6,7 @@ Project: `cocally-509318`, region `australia-southeast1`. One `.env` file drives
 
 | | VM (default) | Cloud Run |
 |---|---|---|
-| Shape | One Compute Engine VM, Docker Compose: caddy, api, web, worker, mongo | Three Cloud Run services + MongoDB Atlas |
+| Shape | One Compute Engine VM, Docker Compose: caddy, api, web, worker; database on MongoDB Atlas (`MONGODB_URI`, required) | Three Cloud Run services + MongoDB Atlas |
 | Monthly, Sydney | e2-standard-2 ~USD 55, e2-standard-4 ~USD 110, Mongo on the box | api + worker always on ~USD 240, plus Atlas M10 ~USD 60 |
 | Ops | OS patches are yours; nightly Mongo dump is scripted | No servers; one-click revision rollback |
 | Chosen for the pilot | **yes** | later, if a client wants it |
@@ -63,7 +63,7 @@ On Cloud Run, run the same command as a Cloud Run job with the api image (`--com
 SSH='gcloud compute ssh cocally-app --zone australia-southeast1-b --tunnel-through-iap'
 $SSH -- 'cd /opt/cocally && sudo docker compose -f docker-compose.prod.yml logs -f api'
 $SSH -- 'cd /opt/cocally && sudo docker compose --env-file .env.prod -f docker-compose.prod.yml up -d api'   # restart one service
-$SSH -- 'cd /opt/cocally && ./backup-mongo.sh'                                                               # ad-hoc backup
+$SSH -- 'cd /opt/cocally && ./backup-mongo.sh'                                                               # ad-hoc backup (dumps Atlas to /opt/cocally/backups)
 ```
 
 Roll back by re-running an earlier Deploy workflow run, or by setting `IMAGE_TAG=<sha>` on the VM and running pull + up. Change a secret by editing `.env` locally and re-running `setup.sh`, then `up -d api worker`.

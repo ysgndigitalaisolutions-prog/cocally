@@ -31,14 +31,13 @@ services:
       NODE_ENV: production
       PORT: "4000"
       TRUST_PROXY: "true"
-      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo:27017/cocally}
+      # MongoDB Atlas. No local fallback: a silent local database is how data goes missing.
+      MONGODB_URI: ${MONGODB_URI:?MONGODB_URI must be set in .env.prod}
       CORS_ORIGIN: https://${DOMAIN}
       PUBLIC_BASE_URL: https://${DOMAIN}
       RECORDINGS_DIR: /app/recordings-data
     volumes:
       - recordings:/app/recordings-data
-    depends_on:
-      mongo: { condition: service_healthy }
     <<: *logging
 
   web:
@@ -57,22 +56,7 @@ services:
       api: { condition: service_healthy }
     <<: *logging
 
-  mongo:
-    image: mongo:7
-    restart: unless-stopped
-    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "1"]
-    volumes:
-      - mongo_data:/data/db
-      - ./backups:/backups
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    <<: *logging
-
 volumes:
-  mongo_data:
   recordings:
   caddy_data:
   caddy_config:
