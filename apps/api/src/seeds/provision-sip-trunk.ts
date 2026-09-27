@@ -6,7 +6,7 @@
  *
  *   node apps/api/dist/seeds/provision-sip-trunk.js \
  *     --address sip.carrier.net.au[:5060] --username <user> --password <pass> \
- *     --numbers +61280000001,+61380000001 [--transport udp|tcp|tls] [--name "Carrier AU"] \
+ *     --numbers +61238196956 [--transport udp|tcp|tls] [--name "Carrier AU"] \
  *     [--inbound] [--inbound-addresses 203.0.113.0/24] [--srtp]
  *
  * Prints the outbound trunk id → set it as LIVEKIT_SIP_TRUNK_ID. With --inbound
@@ -46,9 +46,9 @@ async function main(): Promise<void> {
   // Carriers authenticate either by digest (username+password) or by IP
   // allow-list (no credentials; they whitelist LiveKit's static ranges — see
   // destinationCountry below). Both are valid; only address+numbers are required.
-  const destinationCountry = (arg('destination-country') ?? process.env.SIP_DESTINATION_COUNTRY ?? 'AU').toUpperCase();
+  const destinationCountry = (arg('destination-country') ?? process.env.SIP_DESTINATION_COUNTRY ?? 'IN').toUpperCase();
   if (!address || numbers.length === 0 || transport === undefined) {
-    console.error('Usage: --address <host[:port]> [--username <u> --password <p>] --numbers +61...,+61... [--transport udp|tcp|tls] [--destination-country AU|IN|JP|...] [--name ...] [--inbound] [--inbound-addresses cidr,...] [--srtp]');
+    console.error('Usage: --address <host[:port]> [--username <u> --password <p>] --numbers +CC... [--transport udp|tcp|tls] [--destination-country AU|IN|JP|...] [--name ...] [--inbound] [--inbound-addresses cidr,...] [--srtp]');
     process.exit(2);
   }
   if ((username && !password) || (!username && password)) {
@@ -62,8 +62,8 @@ async function main(): Promise<void> {
   }
   const host = url.replace(/^wss?:\/\//, 'https://');
   const sip = new SipClient(host, apiKey, apiSecret);
-  const bad = numbers.filter((n) => !/^\+61\d{9}$/.test(n));
-  if (bad.length) console.warn(`warning: numbers not in AU E.164 form: ${bad.join(', ')}`);
+  const bad = numbers.filter((n) => !/^\+\d{8,15}$/.test(n));
+  if (bad.length) console.warn(`warning: numbers not in E.164 form (+countrycode…): ${bad.join(', ')}`);
 
   const mediaEncryption = flag('srtp') ? SIPMediaEncryption.SIP_MEDIA_ENCRYPT_REQUIRE : SIPMediaEncryption.SIP_MEDIA_ENCRYPT_DISABLE;
   const existing = (await sip.listSipOutboundTrunk()).find((t) => t.name === name);

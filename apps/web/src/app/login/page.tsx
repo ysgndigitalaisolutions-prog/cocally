@@ -3,10 +3,19 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { api } from '@/lib/api';
+import { toE164 } from '@/lib/phone';
 import { homeFor } from '@/lib/roles';
+
+const COUNTRY_CODES = [
+  { code: '+91', label: 'India' },
+  { code: '+61', label: 'Australia' },
+  { code: '+1', label: 'US/Canada' },
+  { code: '+44', label: 'UK' },
+];
 
 export default function LoginPage() {
   const router = useRouter();
+  const [countryCode, setCountryCode] = useState('+91');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
@@ -20,7 +29,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const { data } = await api.post('/auth/login', {
-        identifier,
+        identifier: toE164(countryCode, identifier),
         password,
         ...(totpCode ? { totpCode } : {}),
       });
@@ -54,17 +63,30 @@ export default function LoginPage() {
         <form onSubmit={submit} className="space-y-4">
           <div>
             <label className="mb-1 block text-sm font-medium">Phone number</label>
-            <input
-              className="input"
-              type="text"
-              inputMode="tel"
-              autoComplete="username"
-              placeholder="04xx xxx xxx or +91 …"
-              value={identifier}
-              onChange={(e) => setIdentifier(e.target.value)}
-              required
-            />
-            <p className="mt-1 text-xs text-slate-400">Australian mobiles as 04xx…; any other country with its + code.</p>
+            <div className="flex gap-2">
+              <select
+                className="input w-32 shrink-0"
+                value={countryCode}
+                onChange={(e) => setCountryCode(e.target.value)}
+                aria-label="Country code"
+              >
+                {COUNTRY_CODES.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.code} {c.label}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="input"
+                type="text"
+                inputMode="tel"
+                autoComplete="username"
+                placeholder="98xxx xxxxx"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                required
+              />
+            </div>
           </div>
           <div>
             <label className="mb-1 block text-sm font-medium">Password</label>
