@@ -60,7 +60,7 @@ export interface ManualLeadRow {
  * `dial()` + `connect()` place a real carrier call over whichever outbound SIP
  * trunk `LIVEKIT_SIP_TRUNK_ID` points at: the agent's browser joins the
  * LiveKit room first (dial()), then `connect()` sends the SIP INVITE with the
- * selected CLI on `From` — see claude-dev/2026-07-23-human-dialing-requirements.md
+ * selected CLI on `From` — see claude-dev/archive/2026-07/2026-07-23-human-dialing-requirements.md
  * R1/R2. The agent dispositions the call exactly as they would a bridged AI
  * transfer once it ends.
  */
@@ -240,7 +240,7 @@ export class ManualDialService {
    * The actual SIP leg is placed by `connect()`, called once the agent's
    * browser has confirmed it is in the room with its mic published. Dialling
    * before the agent joins risks the customer answering to silence; see
-   * claude-dev/2026-07-23-human-dialing-requirements.md R1.
+   * claude-dev/archive/2026-07/2026-07-23-human-dialing-requirements.md R1.
    */
   async dial(
     tenantId: string,

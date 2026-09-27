@@ -60,7 +60,7 @@ const envSchema = z.object({
   CEREBRAS_API_KEY: optionalString(),
 
   // --- Live telephony (only required when TELEPHONY_DRIVER=SIP). See
-  //     claude-dev/2026-07-19-live-call-build-plan.md for the full design. ---
+  //     claude-dev/archive/2026-07/2026-07-19-live-call-build-plan.md for the full design. ---
   /** Public HTTPS base URL Twilio/LiveKit call back into (e.g. ngrok / prod host). */
   PUBLIC_BASE_URL: optionalUrl(),
   /** Shared bearer the Python LiveKit Agents worker uses to reach POST /engine/turn. */

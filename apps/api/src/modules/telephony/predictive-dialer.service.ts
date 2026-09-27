@@ -386,7 +386,7 @@ export class PredictiveDialerService {
     try {
       // AMD only — no AI conversation on this leg. The SIP runtime slots in
       // behind the same amdClassify() call once the carrier is wired; see
-      // claude-dev/2026-07-23-human-dialing-requirements.md.
+      // claude-dev/archive/2026-07/2026-07-23-human-dialing-requirements.md.
       const runtime = new SimulationRuntime({});
       const { amdClass, latencyMs } = await runtime.amdClassify();
       call.amdClass = amdClass;

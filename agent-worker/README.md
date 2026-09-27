@@ -52,7 +52,7 @@ That's the whole demo. Stop the worker with Ctrl-C.
 - **Isn't (yet):** wired into the CoCally engine, and it doesn't place real phone
   calls. Those are the next two steps:
 
-### Next steps (per [`../claude-dev/2026-07-19-live-call-build-plan.md`](../claude-dev/2026-07-19-live-call-build-plan.md))
+### Next steps (per [`../claude-dev/archive/2026-07/2026-07-19-live-call-build-plan.md`](../claude-dev/archive/2026-07/2026-07-19-live-call-build-plan.md))
 
 1. **Engine integration** — replace the inline `INSTRUCTIONS`/LLM with a call to
    the NestJS `POST /engine/turn` each turn, so `composeSystemPrompt`, fact

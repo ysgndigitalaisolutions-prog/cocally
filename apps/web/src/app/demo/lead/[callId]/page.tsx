@@ -11,7 +11,7 @@ type Status = 'idle' | 'connecting' | 'connected' | 'ended' | 'error';
 
 /**
  * Public, no-login page a person opens to play the "lead" being called in
- * the no-SIP live voice demo — see claude-dev/2026-07-22-live-voice-build-progress.md.
+ * the no-SIP live voice demo — see claude-dev/archive/2026-07/2026-07-22-live-voice-build-progress.md.
  * Joins the same LiveKit room as the AI worker and, later, the bridged agent.
  */
 export default function LeadCallPage() {

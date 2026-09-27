@@ -21,7 +21,7 @@ interface ManualLeadRow {
  * either a browser "lead" join link or a real Twilio SIP dial-out to a phone
  * number. Separate from the agent workspace — agents only ever see the
  * resulting transfer offer + on-call audio, never the dial trigger itself.
- * See claude-dev/2026-07-22-live-voice-build-progress.md.
+ * See claude-dev/archive/2026-07/2026-07-22-live-voice-build-progress.md.
  */
 export default function LiveDemoPage() {
   const [campaigns, setCampaigns] = useState<CampaignOption[]>([]);

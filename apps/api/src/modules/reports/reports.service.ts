@@ -62,7 +62,7 @@ interface CampaignSummaryRow {
 
 /**
  * CSV report export for BPO client reporting — the platform had no export
- * path at all (see claude-dev/2026-07-23-progress-and-next-steps.md P1 #13).
+ * path at all (see claude-dev/archive/2026-07/2026-07-23-progress-and-next-steps.md P1 #13).
  * Deliberately plain: query, shape rows, `toCsv()`. No pre-aggregation
  * cache — reports run far less often than the live dashboard panels these
  * queries are modelled on (`analytics.service.ts`).

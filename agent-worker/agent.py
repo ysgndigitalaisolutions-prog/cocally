@@ -10,7 +10,7 @@ Two ways it runs:
   • Real call: the CoCally API dials a lead via LiveKit SIP + Twilio and passes
     the call id in the room metadata; the worker fetches the authoritative brief
     (prompt + disclosure + rebuttals) from the API so conversation content lives
-    in one place. See claude-dev/2026-07-19-live-call-build-plan.md.
+    in one place. See claude-dev/archive/2026-07/2026-07-19-live-call-build-plan.md.
 
 Run:
     pip install -r requirements.txt

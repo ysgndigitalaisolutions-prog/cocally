@@ -53,6 +53,6 @@ Upload the contents of `website/` to the web root (`public_html/`) via cPanel/FT
 
 ## Content notes
 
-- **Pricing figures are indicative placeholders** ($499 / $999 / custom, $0.10–0.12 per AI-minute) — confirm against the real rate card before launch. The COGS model in `claude-dev/2026-07-19-cogs-model.md` supports these margins but the public numbers were chosen for the page, not quoted from a signed price list.
+- **Pricing figures are indicative placeholders** ($499 / $999 / custom, $0.10–0.12 per AI-minute) — confirm against the real rate card before launch. The COGS model in `claude-dev/archive/2026-07/2026-07-19-cogs-model.md` supports these margins but the public numbers were chosen for the page, not quoted from a signed price list.
 - Stats used: ~230ms transfer bridge (pilot-verified), 100% auto-QA, 1,200 dials/day (Scenario B ramp), 2–3 day onboarding.
 - Keep `llms.txt`, the FAQ JSON-LD and the visible FAQ answers in sync when editing claims.

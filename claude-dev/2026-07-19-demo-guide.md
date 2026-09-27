@@ -1,6 +1,6 @@
 # CoCally — Demo Guide & UI Parameter Reference
 
-> Written 19 July 2026. Two parts: **(1)** a run-sheet for demoing the product, **(2)** a plain-English glossary of every parameter on screen. Companion to [`product-features.md`](./product-features.md).
+> Written 19 July 2026. Two parts: **(1)** a run-sheet for demoing the product, **(2)** a plain-English glossary of every parameter on screen. Companion to [`product-features.md`](./archive/2026-07/product-features.md).
 
 ## Setup (do this before the demo)
 

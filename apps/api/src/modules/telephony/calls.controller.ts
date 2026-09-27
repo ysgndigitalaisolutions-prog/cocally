@@ -497,7 +497,7 @@ export class CallsController {
    * `AgentDispatchClient` call needed), fetches its brief from
    * `GET /engine/calls/:id/brief`, and speaks it. A person plays the "lead"
    * by opening the returned join link in a browser (mic, no login) — see
-   * claude-dev/2026-07-22-live-voice-build-progress.md for why this stands
+   * claude-dev/archive/2026-07/2026-07-22-live-voice-build-progress.md for why this stands
    * in for a real PSTN dial-out.
    */
   @Post('live-demo')

@@ -63,3 +63,12 @@ card shows a readable state plus minutes elapsed.
 4. Workspace → clock in → Available (with "takes calls" on). 5. AI dial; answer as the bill
 payer, say you pay too much and haven't switched; say yes to the specialist. Expect the
 browser to ring. 6. Hang up: the desk row should clear within seconds.
+
+## Database moved to MongoDB Atlas (evening, 27 Sep)
+
+- Atlas `Cluster0` upgraded Free → **Flex**, AWS Sydney `ap-southeast-2`, backups on. DB user `cocally_vm`; URI (with `/cocally`) in `deploy/gcp/.env` only.
+- VM data copied with `mongodump` → `mongorestore`; Atlas verified: 28 collections, 1 tenant, 2 users, 1 campaign, 3 leads, 8 calls.
+- **Bug found:** `setup.sh` never wrote `MONGODB_URI` into `.env.prod`, and compose defaulted to `mongodb://mongo:27017`, so the VM would have stayed on the local DB silently. Fixed: setup.sh requires and writes it; compose requires it (`${MONGODB_URI:?…}`); the `mongo` service and `mongo_data` volume are gone from the stack; `backup-mongo.sh` now dumps Atlas via a throwaway `mongo:7` container.
+- Rollout order: `setup.sh` first, then push (`--remove-orphans` removes the old container). The `cocally-prod_mongo_data` volume stays on disk as a fallback; delete after a week.
+- The Atlas password appeared in chat via an editor selection; rotate the `cocally_vm` password after the pilot settles.
+- Docs: `deploy/DEPLOY.md` §1a (Atlas setup + migration), `.env.example`, `.env.prod.example`.

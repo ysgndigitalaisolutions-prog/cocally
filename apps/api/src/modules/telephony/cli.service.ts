@@ -10,7 +10,7 @@ import { CliNumber, CliNumberDocument } from '../../schemas/cli-number.schema';
 const MIN_SAMPLE_FOR_QUARANTINE = 20;
 /** Below this rolling answer rate, with sample size met, the number is presumed carrier-labelled ("Spam Likely") and pulled from rotation. */
 const QUARANTINE_ANSWER_RATE_THRESHOLD = 0.08;
-/** Guardrail from claude-dev/2026-07-23-progress-and-next-steps.md: keep any single DID under ~150-200 dials/day. */
+/** Guardrail from claude-dev/archive/2026-07/2026-07-23-progress-and-next-steps.md: keep any single DID under ~150-200 dials/day. */
 export const CLI_DAILY_DIAL_GUARDRAIL = 180;
 
 /**

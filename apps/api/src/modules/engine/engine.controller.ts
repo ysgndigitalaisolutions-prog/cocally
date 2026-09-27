@@ -108,7 +108,7 @@ class AmdReportDto {
  * This returns SPOKEN instructions (natural conversation), unlike
  * composeSystemPrompt() which formats the same content for the JSON-envelope
  * turn loop. The worker speaks these; NestJS records the transcript and scores
- * post-call. See claude-dev/2026-07-19-live-call-build-plan.md.
+ * post-call. See claude-dev/archive/2026-07/2026-07-19-live-call-build-plan.md.
  */
 @Controller('engine')
 export class EngineController {
