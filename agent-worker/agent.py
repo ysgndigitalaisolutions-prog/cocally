@@ -107,6 +107,9 @@ def _reasoning_effort(model: str) -> str | None:
 # said *something* — a genuinely silent answer is a dead line, a mailbox that
 # beeped before we were listening, or a screening device.
 AMD_SILENCE_TIMEOUT_S = 6.0
+# Synthetic user turn that lets the LLM open a call (see the end of
+# `entrypoint`). Never posted to the transcript.
+CALL_CONNECTED_MARKER = "[call connected]"
 # How long to keep comfort audio running while waiting for the human agent's
 # WebRTC leg. The API's own accept window is `AGENT_TRANSFER_ACCEPT_SECONDS`
 # (default 20s) but `_do_transfer` only returns BRIDGED *after* someone
@@ -1045,6 +1048,16 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     except (ValueError, TypeError):
         pass
 
+    # A `call-<id>` room with no metadata is not a call: the API creates every
+    # real call room with `{callId}` before dialling. This shape appears when a
+    # browser (a supervisor's Monitor tab) joins a room LiveKit already tore
+    # down after the hang-up — LiveKit re-creates it empty, dispatches us, and
+    # the AI would sit waiting for a customer who left minutes ago.
+    if call_id is None and ctx.room.name.startswith("call-"):
+        logger.info("room %s has no callId metadata — stale call room, leaving", ctx.room.name)
+        ctx.shutdown(reason="stale call room")
+        return
+
     brief = await _fetch_brief(call_id) if call_id else None
     # A manual (human) dial or a predictive bridge has no AI leg. The worker is
     # dispatched into every room LiveKit creates, so it has to leave on its own
@@ -1202,7 +1215,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             if role not in ("user", "assistant"):
                 return
             text = item.text_content if hasattr(item, "text_content") else None
-            if not text:
+            if not text or text == CALL_CONNECTED_MARKER:
                 return
             speaker = "ai" if role == "assistant" else "customer"
             qualifier.spawn(_post_and_react(speaker, text))
@@ -1265,17 +1278,22 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # Don't speak until someone can actually hear it — see
     # _wait_for_live_audio's docstring for why this matters most for a real
     # phone dial-out, where the SIP participant can appear before pickup.
-    await _wait_for_live_audio(ctx)
+    try:
+        await _wait_for_live_audio(ctx)
+    except RuntimeError as e:
+        # "room disconnected while waiting for participant": the only party
+        # left before anyone could hear us. Nothing to say to an empty room.
+        logger.info("room %s closed before the call connected (%s) — leaving", ctx.room.name, e)
+        ctx.shutdown(reason="room closed before connect")
+        return
     # AMD's zero point: the instant the customer's audio is actually flowing.
     qualifier.audio_live_at = time.monotonic()
-    if call_id:
-        # Fires only if no transcript at all arrives — `report_amd` latches, so
-        # a customer who speaks first turns this into a no-op.
-        qualifier.spawn(qualifier.amd_silence_watchdog())
 
     # The disclosure is law, not style: speak it verbatim, uninterruptible,
     # and record a compliance event — instead of trusting the LLM's first turn.
+    spoken = False
     if disclosure:
+        handle = None
         try:
             frames: list[rtc.AudioFrame] = []
             if disclosure_task is not None:
@@ -1290,17 +1308,39 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 else session.say(disclosure, allow_interruptions=False)
             )
             await asyncio.wait_for(handle, timeout=20.0)
+            spoken = True
             logger.info("disclosure spoken (%s, %.2fs)", "pre-rendered" if frames else "live", time.monotonic() - t0)
-            if call_id:
-                qualifier.spawn(_post_compliance(call_id, "RECORDING_DISCLOSURE", disclosure))
-            # The scripted line already ends with "is now a good moment?" — so
-            # the next thing that happens is the customer answering. No LLM
-            # round trip at the most latency-sensitive moment of the call.
-            return
+        except asyncio.TimeoutError:
+            # The audio was queued and has been playing for 20s; only the
+            # bookkeeping await hung. Re-greeting here is what produced two
+            # different hellos in a row on a real call — treat it as spoken.
+            spoken = True
+            logger.warning("disclosure playout wait timed out; assuming it played, not re-greeting")
         except Exception as e:  # noqa: BLE001 — fall back to the prompted disclosure
-            logger.warning("scripted disclosure failed (%s); relying on the prompt", e)
+            spoken = handle is not None and handle.done() and not handle.interrupted
+            logger.warning("scripted disclosure failed (%s); %s", e, "already played" if spoken else "relying on the prompt")
+        if spoken and call_id:
+            qualifier.spawn(_post_compliance(call_id, "RECORDING_DISCLOSURE", disclosure))
 
-    await session.generate_reply(instructions=first_turn)
+    if call_id:
+        # Fires only if no transcript at all arrives — `report_amd` latches, so
+        # a customer who speaks first turns this into a no-op. Started only now,
+        # after our own opening line: a person who politely waits for the
+        # ~8s disclosure to finish is not "silence".
+        qualifier.spawn(qualifier.amd_silence_watchdog())
+
+    if spoken:
+        # The scripted line already ends with "is now a good moment?" — so
+        # the next thing that happens is the customer answering. No LLM
+        # round trip at the most latency-sensitive moment of the call.
+        return
+
+    # No scripted disclosure (inbound / demo rooms) or it could not be played:
+    # let the LLM open. `instructions=` alone goes into the context as a system
+    # message, and Cerebras rejects a request with no user message at all
+    # ("No user query found in messages") — every such opening was failing over
+    # to Groq after a ~17s retry storm. A one-line user turn keeps it valid.
+    await session.generate_reply(user_input=CALL_CONNECTED_MARKER, instructions=first_turn)
 
 
 if __name__ == "__main__":

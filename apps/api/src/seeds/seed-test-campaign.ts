@@ -13,7 +13,7 @@
  */
 import 'reflect-metadata';
 import mongoose, { Types } from 'mongoose';
-import { DEFAULT_SCORING_CONFIG } from '@cocally/shared';
+import type { ScoringConfig } from '@cocally/shared';
 import { config } from '../common/config';
 import { normalizePhone, regionOf } from '../modules/leads/phone.util';
 
@@ -31,6 +31,19 @@ function args(name: string): string[] {
 const arg = (name: string) => args(name)[0];
 
 const CAMPAIGN_NAME = 'Wendy test (India)';
+
+/**
+ * Scoring for the energy bill-review script below. The shared default is the
+ * solar campaign (owner / noPanels / roof...), which never matched a word of
+ * this flow, so the live score sat at 0 and the score-gated transfer could
+ * never fire. Facts are booleans extracted from the transcript by
+ * `EngineController.recomposeSummary` (see its FACT_GLOSSARY for the exact
+ * definitions). Transfer at 70 = bill payer + paying too much + any one more.
+ */
+const ENERGY_SCORING: ScoringConfig = {
+  weights: { decisionMaker: 30, payingTooMuch: 25, billHigh: 15, notSwitchedRecently: 15, wantsSpecialist: 15 },
+  thresholds: { transfer: 70, bookOnly: 50, nurture: 30 },
+};
 const FLOW_NAME = 'Energy Bill Review + NBN (Wendy Anwar)';
 
 const PROMPT = `You are "Sam", a warm, natural assistant calling on behalf of {{clientName}}, an Australian energy and internet comparison service. You are an AI assistant and you never claim to be human. Goal: a friendly 3-5 minute bill review that qualifies the customer for a better gas or electricity plan and, if there is time, a better NBN plan, then hands them to a product specialist (a human) on this same call.
@@ -180,7 +193,7 @@ async function main() {
         { outcome: 'NO_ANSWER', delayMinutes: 5, shiftTimeBand: false, maxAttempts: 3 },
         { outcome: 'ANSWERED_VOICEMAIL', delayMinutes: 10, shiftTimeBand: false, maxAttempts: 2 },
       ],
-      frequencyCapDays: 0, scoring: DEFAULT_SCORING_CONFIG,
+      frequencyCapDays: 0, scoring: ENERGY_SCORING,
       rebuttals: [
         { objection: 'already_with_broker', rebuttal: 'Reassure: this is a free review, no commitment; continue the questions.' },
         { objection: 'no_bill_handy', rebuttal: 'Reassure: the bill is not needed for this call; a rough quarterly amount is enough.' },
@@ -194,7 +207,7 @@ async function main() {
     console.log(`created campaign "${CAMPAIGN_NAME}" (IN pack, ACTIVE, frequency cap off, retries every 5 min)`);
   } else {
     // Also repairs campaigns seeded by the first version of this script, which wrote an invalid transcriptionMode.
-    await db.collection('campaigns').updateOne({ _id: campaign._id }, { $set: { activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', updatedAt: now } });
+    await db.collection('campaigns').updateOne({ _id: campaign._id }, { $set: { activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, updatedAt: now } });
     console.log(`reusing campaign "${CAMPAIGN_NAME}"`);
   }
   const campaignId = campaign._id as Types.ObjectId;

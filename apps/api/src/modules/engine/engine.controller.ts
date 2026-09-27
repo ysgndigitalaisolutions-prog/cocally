@@ -278,7 +278,12 @@ export class EngineController {
     // and a load-modify-save on the same document raced into VersionErrors
     // that dropped turns (and the opt-out check for them).
     await this.callModel.updateOne({ _id: call._id }, { $push: { transcript: turn } }).exec();
+    // Keep the in-memory copy current for the extraction below, but tell
+    // Mongoose the array is NOT dirty: `recomposeSummary` and `recordOptOut`
+    // both `call.save()`, and a save after an in-memory push re-issues the
+    // `$push` — every turn was landing in the transcript twice.
     call.transcript.push(turn);
+    call.unmarkModified('transcript');
 
     const tenantId = call.tenantId.toString();
     const agentId = call.agentId?.toString() ?? null;
@@ -428,6 +433,11 @@ export class EngineController {
       dwellingHouse: 'true if the customer lives in a house (standalone dwelling), false/omit if apartment/unit',
       roofSuitable: 'true if the customer\'s roof is described as suitable for solar (unshaded, good condition, etc.)',
       appointmentInterest: 'true if the customer is willing to book a free assessment/appointment',
+      // Energy bill-review campaigns (see seeds/seed-test-campaign.ts ENERGY_SCORING).
+      decisionMaker: 'true if the customer confirms they are the one who looks after / pays the energy bill',
+      payingTooMuch: 'true if the customer feels they are paying too much for energy',
+      notSwitchedRecently: 'true if the customer has NOT compared or changed energy providers in the last 6-12 months (set true when they say they have not)',
+      wantsSpecialist: 'true if the customer agrees to be put through to a specialist now',
     };
     const factDescriptions = factKeys.map((k) => `- ${k}: ${FACT_GLOSSARY[k] ?? '(campaign-specific fact, infer from its name)'}`).join('\n');
     const transcriptText = call.transcript.map((t) => `${t.speaker === 'ai' ? 'AI' : 'Lead'}: ${t.redactedText}`).join('\n');
