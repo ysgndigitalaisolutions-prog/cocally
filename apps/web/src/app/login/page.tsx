@@ -65,7 +65,8 @@ export default function LoginPage() {
             <label className="mb-1 block text-sm font-medium">Phone number</label>
             <div className="flex gap-2">
               <select
-                className="input w-32 shrink-0"
+                className="input"
+                style={{ width: '8.5rem', flex: 'none' }}
                 value={countryCode}
                 onChange={(e) => setCountryCode(e.target.value)}
                 aria-label="Country code"
@@ -78,6 +79,7 @@ export default function LoginPage() {
               </select>
               <input
                 className="input"
+                style={{ flex: 1, minWidth: 0 }}
                 type="text"
                 inputMode="tel"
                 autoComplete="username"
