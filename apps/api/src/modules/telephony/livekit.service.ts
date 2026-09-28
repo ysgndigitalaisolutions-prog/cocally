@@ -6,6 +6,7 @@ import {
   EgressClient,
   EncodedFileOutput,
   EncodedFileType,
+  GCPUpload,
   RoomServiceClient,
   S3Upload,
   SipClient,
@@ -349,8 +350,16 @@ export class LivekitService {
     const key = `${tenantId}/${stamp}/${callId}.ogg`;
 
     const output = new EncodedFileOutput({ fileType: EncodedFileType.OGG, filepath: key });
-    const { bucket, s3Region, s3AccessKey, s3Secret, s3Endpoint } = config.recording;
-    if (bucket && s3AccessKey && s3Secret) {
+    const { bucket, s3Region, s3AccessKey, s3Secret, s3Endpoint, gcpCredentials } = config.recording;
+    if (bucket && gcpCredentials) {
+      // Native GCS upload. The S3 route fails against GCS with
+      // SignatureDoesNotMatch: the Egress uploader always sends the AWS SDK's
+      // default CRC32 checksum, which GCS interop does not accept.
+      const json = gcpCredentials.trim().startsWith('{')
+        ? gcpCredentials
+        : Buffer.from(gcpCredentials, 'base64').toString('utf8');
+      output.output = { case: 'gcp', value: new GCPUpload({ bucket, credentials: json }) };
+    } else if (bucket && s3AccessKey && s3Secret) {
       output.output = {
         case: 's3',
         value: new S3Upload({

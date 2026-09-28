@@ -23,7 +23,7 @@
 
 - LiveKit Cloud publishes static source ranges only for Canada, EU, India, Japan, US: `143.223.88.0/21`, `161.115.160.0/19`, `153.57.128.0/18`. **Australia has none.**
 - LiveKit outbound trunks have `destination_country`; "calls originate from a server within the specified country". Setting it to **`IN`** makes our calls leave from the India ranges. Verified by pointing a throwaway trunk at our own VM with a UDP listener on 5060: the INVITE arrived from **143.223.94.27** (inside 143.223.88.0/21).
-- **Telvoq whitelisted only that single address, not the ranges.** It works today because LiveKit happens to use it. LiveKit may use any address in the ranges, so calls can start failing with `403 Forbidden` at any time. **Open request to Telvoq: enter the three ranges as CIDR.** If their platform cannot take CIDR, ask what it accepts.
+- Telvoq initially whitelisted only that single address. **Resolved 28 Sep: all three CIDR ranges are whitelisted.**
 - Failover caveat: if LiveKit's India region is unavailable, calls originate from a nearby region outside the ranges and will be refused.
 
 ## 4. How Telvoq's edge behaves (for debugging)
@@ -68,7 +68,7 @@ Do this **after** the AI conversation is proven on Twilio (Telvoq cannot reach t
 
 ## 8. Still open with Telvoq
 
-1. CIDR ranges instead of the single IP (**risk of intermittent 403 until done**).
+1. ~~CIDR ranges instead of the single IP~~ **Done 28 Sep**: all three ranges whitelisted. 403 risk closed; `destination_country` may now be IN, JP, US, EU or CA.
 2. Sydney/Singapore POP (latency; London hairpin today).
 3. DID inbound routing to the LiveKit AU SIP endpoint (needed for callbacks/inbound later).
 4. Confirm the 06:33 codec failure is not reproducible on a real handset (one occurrence).

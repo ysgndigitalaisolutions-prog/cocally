@@ -162,7 +162,11 @@ export class CallProgressService {
 
     // AI-fronted call: only now bring the AI in. Nothing is billed for it
     // while the phone rings, and a call that never connects never has one.
-    if (!bridged && !call.manual && !call.predictive && call.flowVersionId) await this.dispatchAi(callId);
+    // Only when explicit dispatch is configured; otherwise the worker is
+    // already in the room (auto-dispatch) — see config LIVEKIT_AGENT_NAME.
+    if (config.livekit.agentName && !bridged && !call.manual && !call.predictive && call.flowVersionId) {
+      await this.dispatchAi(callId);
+    }
   }
 
   /** Send the AI worker in exactly once per call, however many answer signals arrive. */

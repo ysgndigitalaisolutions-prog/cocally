@@ -72,11 +72,14 @@ const envSchema = z.object({
   /** LiveKit outbound SIP trunk id (dial-out) once the carrier trunk is wired. */
   LIVEKIT_SIP_TRUNK_ID: optionalString(),
   /**
-   * Name the AI worker registers under (its `AGENT_NAME`). The worker is only
-   * sent into a room when the API asks — after the customer answers — so no
-   * agent minutes are billed while a phone rings. Must match the worker.
+   * Explicit AI dispatch, OFF by default. When set, the API sends the worker
+   * registered under this name into the room once the customer answers.
+   * Leave it empty with the current worker: it registers without a name,
+   * LiveKit sends it into every call room, and it waits for the SIP leg to be
+   * answered before greeting (reconciled 29 Sep: voice path from the hotfix
+   * line). Setting a name here without a matching worker leaves calls silent.
    */
-  LIVEKIT_AGENT_NAME: z.string().default('cocally-ai'),
+  LIVEKIT_AGENT_NAME: z.string().default(''),
   /**
    * Carrier "tech prefix" prepended to the dialled digits on outbound calls,
    * e.g. 1701 → +61412000123 is sent as 170161412000123 (no plus). Blank for
@@ -110,6 +113,12 @@ const envSchema = z.object({
   RECORDING_S3_ACCESS_KEY: optionalString(),
   RECORDING_S3_SECRET: optionalString(),
   RECORDING_S3_ENDPOINT: optionalString(),
+  /**
+   * Google Cloud service-account key (JSON, or base64 of the JSON). When set,
+   * Egress uploads natively to GCS instead of through the S3 interop API —
+   * GCS rejects the default S3 checksums the Egress uploader sends.
+   */
+  RECORDING_GCP_CREDENTIALS: optionalString(),
 
   // --- ACMA Do Not Call Register ---------------------------------------
   /**
@@ -205,6 +214,7 @@ export const config = {
     s3AccessKey: parsed.RECORDING_S3_ACCESS_KEY,
     s3Secret: parsed.RECORDING_S3_SECRET,
     s3Endpoint: parsed.RECORDING_S3_ENDPOINT,
+    gcpCredentials: parsed.RECORDING_GCP_CREDENTIALS,
   },
   dncr: {
     enabled: parsed.DNCR_ENABLED,

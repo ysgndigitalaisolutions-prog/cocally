@@ -10,7 +10,7 @@ Two ways it runs:
   • Real call: the CoCally API dials a lead via LiveKit SIP + Twilio and passes
     the call id in the room metadata; the worker fetches the authoritative brief
     (prompt + disclosure + rebuttals) from the API so conversation content lives
-    in one place. See claude-dev/archive/2026-07/2026-07-19-live-call-build-plan.md.
+    in one place. See claude-dev/2026-07-19-live-call-build-plan.md.
 
 Run:
     pip install -r requirements.txt
@@ -39,6 +39,7 @@ import aiohttp
 from dotenv import load_dotenv
 from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, RoomInputOptions, function_tool
+from livekit.agents.llm import StopResponse
 from livekit.plugins import deepgram, openai, silero
 
 # Local end-of-turn model: decides "they finished speaking" from the words, not
@@ -78,15 +79,45 @@ ENGINE_SERVICE_TOKEN = os.getenv("ENGINE_SERVICE_TOKEN")
 LLM_MODEL = os.getenv("LLM_MODEL") or "qwen/qwen3.8-27b"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "160"))  # short spoken turns → TTS starts sooner
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | elevenlabs | cartesia
+# STT + turn-taking. "flux" (default) is Deepgram's conversational model: it
+# decides end-of-turn itself from the audio and words (~260 ms after the person
+# stops) and emits an *eager* end-of-turn earlier still, which the framework
+# uses to start the LLM before the turn is final. "nova" is the previous stack
+# (nova-2-phonecall + the local end-of-turn model): measured on 28 Sep it spent
+# ~450 ms per turn just waiting for the final transcript. Kept as a fallback.
+STT_MODEL = (os.getenv("STT_MODEL") or "flux").lower()  # flux | nova
+# Who decides that the customer has *started* and *stopped* speaking when STT
+# is Flux. "stt": Flux's own StartOfTurn/EndOfTurn drive the framework. On the
+# 28 Sep test call Flux raised StartOfTurn on line echo/noise with no EndOfTurn
+# after it; the framework pauses the agent's audio on start-of-speech and only
+# resumes on end-of-speech, so replies stopped mid-word ("is that Al—") and
+# stayed silent until the customer said "Hello?". "vad" (default): the local
+# VAD drives start/end of speech and interruptions, exactly as on the nova
+# stack, while Flux still delivers the fast transcript. Flux's eager end-of-turn
+# is not used in this mode.
+STT_TURN = (os.getenv("STT_TURN") or "vad").lower()  # vad | stt
+# Seconds after the customer stops speaking before the worker forces the turn
+# if no reply has started (see the stall guard in entrypoint). Normal turns
+# start a reply within ~1 s, so 2.5 s only ever fires on an STT stall.
+STALL_GUARD_S = float(os.getenv("STALL_GUARD_S", "2.5"))
+# Fixed wait after the VAD's end-of-speech before the turn is committed, in
+# STT_TURN=vad mode. The framework also waits for Flux's final transcript, so
+# this is a floor, not the whole gap. Measured 28 Sep with 0.3: end of turn
+# 0.48-0.66 s (VAD min silence 0.25 + this). 0.2 trims ~100 ms; raise it again
+# if test calls show the AI cutting in on mid-sentence pauses.
+ENDPOINT_MIN_DELAY = float(os.getenv("ENDPOINT_MIN_DELAY", "0.2"))
+# Approved line when a transfer finds nobody. Spoken by the worker, not the
+# model, so the model cannot carry on the script after a failed hand-off.
+NO_AGENT_LINE = (
+    "I'm sorry, everyone's a little busy right now. "
+    "I'll have someone call you back shortly. Thanks for your time today."
+)
+# Comma-separated words the STT should favour (brand/retailer names). Both
+# Deepgram models accept them; fixes "Simply Energy" -> "simply an async".
+STT_KEYTERMS = [k.strip() for k in (os.getenv("STT_KEYTERMS") or "").split(",") if k.strip()]
 TTS_VOICE = os.getenv("TTS_VOICE")  # provider-specific voice/model id; sensible default per provider
 NOISE_CANCELLATION = os.getenv("NOISE_CANCELLATION", "1") not in ("0", "false", "no")
 WORKER_IDLE_PROCESSES = int(os.getenv("WORKER_IDLE_PROCESSES", "2"))
-# Explicit dispatch: registered under a name, the worker is never sent into a
-# room automatically. The API dispatches it once the customer answers
-# (`LivekitService.dispatchAgent`), so a ringing phone costs no agent minutes
-# and manual / human-bridged calls never get an AI at all. Must match the
-# API's LIVEKIT_AGENT_NAME.
-AGENT_NAME = os.getenv("AGENT_NAME", "cocally-ai")
 
 # Same variable the API reads (`config.floor.holdMusicUrl`). Set it in BOTH
 # environments: the API hands it to the agent's browser for hold, this worker
@@ -108,17 +139,11 @@ def _reasoning_effort(model: str) -> str | None:
 
 # ── Timings ────────────────────────────────────────────────────────────────
 #
-# AMD_SILENCE_TIMEOUT_S: nothing said for this long after our opening line is
-# reported as SILENCE, and the API tells us to hang up. A person has just been
-# asked "is now a good moment?" — ten seconds of nothing is a dead line, a
-# mailbox that beeped before we were listening, or a screening device, and
-# every one of those seconds is paid for.
-AMD_SILENCE_TIMEOUT_S = 10.0
-# AMD_VOICEMAIL_WINDOW_S: how long after the AI joins it keeps listening for a
-# voicemail greeting even after a first guess of HUMAN. Greetings often open
-# like a person ("Hi, it's Sam…") and only say "leave a message" a few seconds
-# in; deciding on the first words alone kept the AI talking to those machines.
-AMD_VOICEMAIL_WINDOW_S = 5.0
+# AMD_SILENCE_TIMEOUT_S: nothing said within this long of live audio is
+# reported as SILENCE. Six seconds is past the point where a human would have
+# said *something* — a genuinely silent answer is a dead line, a mailbox that
+# beeped before we were listening, or a screening device.
+AMD_SILENCE_TIMEOUT_S = 6.0
 # Synthetic user turn that lets the LLM open a call (see the end of
 # `entrypoint`). Never posted to the transcript.
 CALL_CONNECTED_MARKER = "[call connected]"
@@ -191,27 +216,6 @@ _VOICEMAIL_PATTERNS = re.compile(
     r"|message bank",
     re.I,
 )
-# Carrier announcements: nobody is there and nobody will be. Common on Indian
-# lists ("switched off", "not reachable") and on AU mobiles out of coverage.
-# Reported as VOICEMAIL — the same hang-up and later retry.
-_NETWORK_PATTERNS = re.compile(
-    r"switched off"
-    r"|not reachable"
-    r"|(is|be) unreachable"
-    r"|out of (range|coverage|service)"
-    r"|(number|mobile|phone|subscriber) you (have )?(dialled|dialed|called|are calling|are trying)"
-    r"|does not exist"
-    r"|(not|no longer) in service"
-    r"|has been disconnected"
-    r"|cannot be (reached|connected|completed)"
-    r"|please try (again )?later"
-    r"|temporarily unavailable",
-    re.I,
-)
-
-
-def _is_machine(text: str) -> bool:
-    return bool(_VOICEMAIL_PATTERNS.search(text) or _NETWORK_PATTERNS.search(text))
 _IVR_PATTERNS = re.compile(
     r"press (one|two|three|four|five|six|seven|eight|nine|zero|[0-9*#])"
     r"|for (sales|service|support|accounts|billing|enquiries|reception)"
@@ -228,7 +232,7 @@ def _classify_amd(text: str) -> str:
     """First-transcript → AMD class. Order matters: a voicemail greeting can
     contain menu-ish words ("press 1 to leave a message"), so voicemail is
     tested first."""
-    if _is_machine(text):
+    if _VOICEMAIL_PATTERNS.search(text):
         return "VOICEMAIL"
     if _IVR_PATTERNS.search(text):
         return "IVR"
@@ -258,11 +262,7 @@ class Qualifier(Agent):
         # Wall-clock (monotonic) instant the customer's audio actually started
         # flowing — the zero point for AMD latency.
         self.audio_live_at: float | None = None
-        # Current AMD class (None until the first transcript or the silence
-        # watchdog). May move once, to VOICEMAIL, inside the voicemail window.
-        self._amd_class: str | None = None
-        self._heard_speech = False
-        self._amd_finals: list[str] = []
+        self._amd_reported = False
         # Decoded hold music, if `HOLD_MUSIC_URL` was fetchable. Prefetched at
         # startup so the transfer hand-off never pays for the download. Decoded
         # AT `output_sample_rate` — the two must stay in step or the music plays
@@ -293,7 +293,32 @@ class Qualifier(Agent):
         Args:
             reason: one short line on why they qualify (for the agent's card).
         """
-        return await self._do_transfer(reason)
+        text = await self._do_transfer(reason)
+        if text is None:
+            # The worker has already spoken (or is speaking) every line this
+            # path needs. Without StopResponse the model writes its own reply
+            # to the tool result — on 28 Sep 19:10 that was "Noted. One
+            # more..." after a declined transfer, cut off by the hang-up.
+            raise StopResponse()
+        return text
+
+    async def on_user_turn_completed(self, turn_ctx, new_message) -> None:  # noqa: ANN001
+        # Once a transfer is under way or the call is closing, the model gets
+        # no more turns: the worker owns every line from here (hand-off,
+        # apology, goodbye).
+        if self._transfer_triggered or self._closing:
+            # StopResponse drops the turn before `conversation_item_added`
+            # fires, so post the customer's words here: the transcript stays
+            # complete and an opt-out said while waiting for an agent still
+            # reaches the server's opt-out rail.
+            text = (getattr(new_message, "text_content", None) or "").strip()
+            if text and self._call_id and not self._closing:
+                async def _post_blocked_turn() -> None:
+                    body = await _post_transcript(self._call_id, "customer", text)
+                    await self.handle_engine_response(body)
+
+                self.spawn(_post_blocked_turn())
+            raise StopResponse()
 
     async def maybe_auto_transfer(self, reason: str) -> None:
         """Called when the engine's real campaign-weighted score crosses the
@@ -307,18 +332,21 @@ class Qualifier(Agent):
             return
         logger.info("auto-transfer triggered (call=%s): %s", self._call_id, reason)
         text = await self._do_transfer(reason)
-        if self.session_ref is not None:
+        if text and self.session_ref is not None:
             await self.session_ref.say(text)
 
-    async def _do_transfer(self, reason: str) -> str:
+    async def _do_transfer(self, reason: str) -> str | None:
+        """Run the hand-off. Returns None when the worker has spoken the lines
+        itself (every real-call path), or a line for the caller to speak (the
+        no-phone playground only)."""
         # The opt-out latch wins over everything. A customer who has asked to be
         # removed is never handed to a human specialist, no matter what the LLM
         # decided in the same breath or what the score says — and the server has
         # already suppressed them by the time we get here.
         if self._closing:
-            return "Of course — I'll take care of that."
+            return None
         if self._transfer_triggered:
-            return "One moment, please."
+            return None
         self._transfer_triggered = True
         logger.info("request_transfer(call=%s): %s", self._call_id, reason)
         if not self._call_id:
@@ -349,6 +377,7 @@ class Qualifier(Agent):
                 logger.warning("could not start pre-transfer comfort audio: %s", e)
 
         result = await _post_transfer(self._call_id, reason)
+        logger.info("transfer result %s (call=%s)", result, self._call_id)
         if result == "BRIDGED":
             # The human's browser is about to join this same room and take
             # over the mic; the AI leg ends so there's only one voice. The
@@ -359,15 +388,15 @@ class Qualifier(Agent):
                     running=(stop, handle),
                 )
             )
-            return "One moment."
+            return None
+        # NO_AGENT, DECLINED or FAILED: nobody is taking the call. The server
+        # has already booked the callback. Close with the approved line spoken
+        # by the worker, wait for it to finish, then hang up — never let the
+        # model continue the script (28 Sep 19:10 bug).
         stop.set()
-        # NO_AGENT or FAILED: no one is free — be honest, close warmly, and
-        # actually hang up (the server has already booked the callback).
-        self.spawn(_no_agent_close(self._ctx, self._call_id, self.session_ref))
-        return (
-            "I'm sorry, everyone's a little busy right now — "
-            "I'll have someone call you back shortly. Thanks for your time today."
-        )
+        self._closing = True
+        self.spawn(_no_agent_close(self._ctx, self._call_id, self.session_ref, NO_AGENT_LINE))
+        return None
 
     # ── Opt-out rail ───────────────────────────────────────────────────────
 
@@ -447,34 +476,12 @@ class Qualifier(Agent):
 
     # ── AMD ────────────────────────────────────────────────────────────────
 
-    def on_transcript(self, text: str, is_final: bool) -> None:
-        """Every STT result from the customer's leg, interim ones included.
-
-        The first one sets the class immediately (a person gets an answer
-        without waiting for a classifier). For the next `AMD_VOICEMAIL_WINDOW_S`
-        the running transcript is still checked for a mailbox or carrier
-        announcement, and a HUMAN guess is upgraded to VOICEMAIL if one shows up.
-        """
-        if self._closing or not self._call_id:
+    def report_amd(self, text: str | None) -> None:
+        """Classify and report, exactly once per call, fire-and-forget."""
+        if self._amd_reported or not self._call_id:
             return
-        self._heard_speech = True
-        heard = " ".join([*self._amd_finals, text])
-        if is_final:
-            self._amd_finals.append(text)
-        if self._amd_class is None:
-            self._report_amd(_classify_amd(heard), heard)
-            return
-        in_window = (
-            self.audio_live_at is not None
-            and time.monotonic() - self.audio_live_at <= AMD_VOICEMAIL_WINDOW_S
-        )
-        if self._amd_class != "VOICEMAIL" and in_window and _is_machine(heard):
-            self._report_amd("VOICEMAIL", heard)
-
-    def _report_amd(self, amd_class: str, text: str | None) -> None:
-        """Record the class and report it, fire-and-forget. The API's reply
-        says whether to hang up."""
-        self._amd_class = amd_class
+        self._amd_reported = True
+        amd_class = _classify_amd(text) if text else "SILENCE"
         started = self.audio_live_at
         latency_ms = int(max(0.0, (time.monotonic() - started)) * 1000) if started else None
         # The API caps latencyMs at 60s; a longer measurement means our zero
@@ -482,49 +489,18 @@ class Qualifier(Agent):
         if latency_ms is not None and latency_ms > 60_000:
             latency_ms = None
         logger.info(
-            "AMD %s in %sms (call=%s) heard=%r",
+            "AMD %s in %sms (call=%s) first-transcript=%r",
             amd_class, latency_ms if latency_ms is not None else "?", self._call_id, (text or "")[:80],
         )
-        self.spawn(self._report_amd_and_react(amd_class, latency_ms))
-
-    async def _report_amd_and_react(self, amd_class: str, latency_ms: int | None) -> None:
-        body = await _post_amd(self._call_id, amd_class, latency_ms)
-        if body and body.get("hangup"):
-            await self.hang_up_on_machine(amd_class)
-
-    async def hang_up_on_machine(self, amd_class: str) -> None:
-        """A mailbox or carrier announcement answered (and the campaign says
-        don't leave a message), or the line stayed silent.
-
-        Every second spent talking to a machine is paid for (agent, STT, TTS,
-        LLM, recording) and earns nothing, so cut the disclosure mid-word and
-        end the call. The API already stamped `amdClass`, which makes the
-        finaliser record ANSWERED_VOICEMAIL and schedule the retry.
-        """
-        if self._closing:
-            return
-        self._closing = True
-        self._transfer_triggered = True
-        logger.info("%s (call=%s) — hanging up", amd_class, self._call_id)
-        session = self.session_ref
-        if session is not None:
-            try:
-                # force: the disclosure is deliberately uninterruptible by the
-                # caller, but a machine is not a caller.
-                session.interrupt(force=True)
-            except Exception as e:  # noqa: BLE001 — nothing here may block the hangup
-                logger.debug("interrupt before voicemail hangup failed: %s", e)
-        await _drop_customer_leg(self._ctx, self._call_id)
-        self._ctx.shutdown(reason=amd_class.lower())  # sync — not awaitable
+        self.spawn(_post_amd(self._call_id, amd_class, latency_ms))
 
     async def amd_silence_watchdog(self) -> None:
-        """Nothing at all said within `AMD_SILENCE_TIMEOUT_S` of our opening line."""
+        """No transcript at all within `AMD_SILENCE_TIMEOUT_S` of live audio."""
         try:
             await asyncio.sleep(AMD_SILENCE_TIMEOUT_S)
         except asyncio.CancelledError:
             return
-        if not self._heard_speech and not self._closing:
-            self._report_amd("SILENCE", None)
+        self.report_amd(None)
 
 
 # ── Engine HTTP ────────────────────────────────────────────────────────────
@@ -585,11 +561,9 @@ async def _post_dtmf(call_id: str, digit: str) -> dict | None:
     return None
 
 
-async def _post_amd(call_id: str, amd_class: str, latency_ms: int | None) -> dict | None:
-    """Report the AMD class. The reply's `hangup` is the campaign's voicemail
-    policy speaking: True means stop talking to the machine and end the call."""
+async def _post_amd(call_id: str, amd_class: str, latency_ms: int | None) -> None:
     if not (ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
-        return None
+        return
     url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/amd"
     headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
     payload: dict = {"amdClass": amd_class}
@@ -599,11 +573,8 @@ async def _post_amd(call_id: str, amd_class: str, latency_ms: int | None) -> dic
         async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json=payload, timeout=10) as r:
             if not r.ok:
                 logger.warning("amd post %s -> HTTP %s", call_id, r.status)
-                return None
-            return await r.json()
     except Exception as e:  # noqa: BLE001 — reporting is telemetry; a live call outranks it
         logger.warning("amd post failed: %s", e)
-        return None
 
 
 async def _post_metrics(call_id: str, payload: dict) -> None:
@@ -827,6 +798,31 @@ async def _wait_for_live_audio(ctx: agents.JobContext, timeout: float = 45.0) ->
     by a mid-conversation greeting or nothing at all.
     """
     participant = await ctx.wait_for_participant()
+
+    if getattr(participant, "kind", None) == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        # A phone leg publishes its audio track while the phone is still
+        # ringing (ringback and carrier early media flow on it), so the track
+        # alone says nothing about pickup. LiveKit stamps the participant with
+        # `sip.callStatus`; only "active" means somebody answered. Waiting on
+        # the track instead had the greeting start 12–16 s before pickup on
+        # every real call.
+        if participant.attributes.get("sip.callStatus") == "active":
+            return
+        answered = asyncio.Event()
+
+        def _on_attrs(changed: dict, p: rtc.Participant) -> None:
+            if p.identity == participant.identity and changed.get("sip.callStatus") == "active":
+                answered.set()
+
+        ctx.room.on("participant_attributes_changed", _on_attrs)
+        try:
+            await asyncio.wait_for(answered.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("%s never reported sip.callStatus=active in %.0fs — speaking anyway", participant.identity, timeout)
+        finally:
+            ctx.room.off("participant_attributes_changed", _on_attrs)
+        return
+
     for pub in participant.track_publications.values():
         if pub.kind == rtc.TrackKind.KIND_AUDIO and pub.track is not None:
             return
@@ -992,30 +988,42 @@ async def _handoff(
     )
 
 
-async def _no_agent_close(ctx: agents.JobContext, call_id: str | None = None, session: AgentSession | None = None) -> None:
-    # Let the apology line finish, then hang up: leaving the SIP leg up left
-    # the customer on a silent line until they gave up.
-    await _wait_until_quiet(session)
-    await asyncio.sleep(1.5)
+async def _no_agent_close(
+    ctx: agents.JobContext,
+    call_id: str | None = None,
+    session: AgentSession | None = None,
+    line: str = NO_AGENT_LINE,
+) -> None:
+    """Speak the approved apology, let it finish, then hang up.
+
+    The old version waited for the line to go quiet and hung up — but the
+    apology was the model's to say, and the model instead carried on the script
+    ("Noted. One more...") and was cut off mid-sentence by this hang-up.
+    """
+    if session is not None:
+        try:
+            # Cut anything still queued: the tail of the model's last reply and
+            # the hold music. force=True because both are uninterruptible.
+            session.interrupt(force=True)
+        except Exception as e:  # noqa: BLE001 — nothing here may block the close
+            logger.debug("interrupt before no-agent close failed: %s", e)
+        try:
+            await asyncio.wait_for(session.say(line, allow_interruptions=False), timeout=15.0)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("failed to speak the no-agent line: %s", e)
+    await asyncio.sleep(0.8)
     await _drop_customer_leg(ctx, call_id)
     ctx.shutdown(reason="no agent available")  # sync — not awaitable
 
 
-def _build_tts(provider: str | None = None, voice: str | None = None):  # noqa: ANN202 — plugin TTS types differ
-    """Pick the TTS. `provider`/`voice` come from the tenant's voice setting
-    (Platform screen, delivered in the brief); unset falls back to the env
-    (TTS_PROVIDER / TTS_VOICE). Time-to-first-byte is the single biggest lever
-    on how "instant" the agent feels, so the fastest streaming voices are
-    first-class:
+def _build_tts():  # noqa: ANN202 — plugin TTS types differ
+    """Pick the TTS by env. Time-to-first-byte is the single biggest lever on
+    how "instant" the agent feels, so the fastest streaming voices are first-class:
       deepgram   aura-2  (~200 ms TTFB, default; same vendor as STT)
       elevenlabs eleven_flash_v2_5 (~75 ms TTFB)
       cartesia   sonic-2 (~90 ms TTFB)
     A missing plugin/key falls back to Deepgram with a log line, never a crash."""
-    provider = (provider or TTS_PROVIDER or "deepgram").lower()
-    # TTS_VOICE is an id for the env's provider; never hand it to another one.
-    if not voice and provider == TTS_PROVIDER:
-        voice = TTS_VOICE
-    if provider == "elevenlabs" and os.environ.get("ELEVENLABS_API_KEY"):
+    if TTS_PROVIDER == "elevenlabs" and os.environ.get("ELEVENLABS_API_KEY"):
         try:
             from livekit.plugins import elevenlabs
 
@@ -1023,26 +1031,102 @@ def _build_tts(provider: str | None = None, voice: str | None = None):  # noqa: 
             # pass the key explicitly or it raises and we silently fall back.
             return elevenlabs.TTS(
                 model="eleven_flash_v2_5",
-                voice_id=voice or "EXAVITQu4vr4xnSDxMaL",
+                voice_id=TTS_VOICE or "EXAVITQu4vr4xnSDxMaL",
                 api_key=os.environ["ELEVENLABS_API_KEY"],
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("elevenlabs TTS unavailable (%s) — using Deepgram", e)
-    if provider == "cartesia" and os.environ.get("CARTESIA_API_KEY"):
+    if TTS_PROVIDER == "cartesia" and os.environ.get("CARTESIA_API_KEY"):
         try:
             from livekit.plugins import cartesia
 
-            return cartesia.TTS(model="sonic-2", **({"voice": voice} if voice else {}))
+            return cartesia.TTS(model="sonic-2", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
         except Exception as e:  # noqa: BLE001
             logger.warning("cartesia TTS unavailable (%s) — using Deepgram", e)
-    if provider not in ("deepgram", "elevenlabs", "cartesia") or (
-        provider != "deepgram" and not os.environ.get(f"{provider.upper()}_API_KEY")
-    ):
-        logger.warning("TTS provider %r not usable here (unknown or no API key) — using Deepgram", provider)
     # Aura-1 (asteria) was tuned for lowest-latency demo speed and reads as
     # fast/clipped on a real call. Aura-2 luna is calmer; hera/orpheus are
     # alternatives. Deepgram has no speech-rate knob — pick the voice instead.
-    return deepgram.TTS(model=(voice if provider == "deepgram" and voice else "aura-2-luna-en"))
+    return deepgram.TTS(model=TTS_VOICE or "aura-2-luna-en")
+
+
+def _build_stt():  # noqa: ANN202 — plugin STT types differ
+    """STT by env. Returns (stt, turn_handling) because the two are one decision:
+
+    flux  Deepgram Flux (`STTv2`). End-of-turn comes from the model itself, so
+          turn detection is "stt" and the local end-of-turn model is not used.
+          `eager_eot_threshold` makes Flux flag a *probable* end of turn early;
+          the framework starts LLM + TTS on it (preemptive generation) and
+          throws the draft away if the person carries on. `eot_timeout_ms` is
+          the cap on a mid-sentence pause (Flux default 3 s — too long on a
+          call; 1.5 s matches the previous max_delay budget).
+    nova  nova-2-phonecall + the local EnglishModel end-of-turn detector: the
+          pre-28-Sep stack, for A/B or if Flux is unavailable on the key.
+    """
+    keyterm_kw = {"keyterm": STT_KEYTERMS} if STT_KEYTERMS else {}
+    if STT_MODEL == "flux":
+        try:
+            stt_engine = deepgram.STTv2(
+                model="flux-general-en",
+                eager_eot_threshold=0.5,
+                eot_threshold=0.7,
+                eot_timeout_ms=1500,
+                **keyterm_kw,
+            )
+            if STT_TURN == "stt":
+                endpointing = {
+                    # Flux has already decided the turn is over when END_OF_SPEECH
+                    # arrives; the framework still sleeps `min_delay` measured from
+                    # the VAD's end-of-speech anchor. 0.1 s keeps a hair of margin
+                    # for the last STT packet without adding a visible pause.
+                    "mode": "fixed",
+                    "min_delay": 0.1,
+                    "max_delay": 1.5,
+                }
+            else:
+                endpointing = {
+                    # VAD end-of-speech + a short fixed wait (ENDPOINT_MIN_DELAY);
+                    # the framework still waits for Flux's final transcript
+                    # (~260 ms after speech ends) and the stall guard caps that.
+                    "mode": "fixed",
+                    "min_delay": ENDPOINT_MIN_DELAY,
+                    "max_delay": 1.5,
+                }
+            turn_handling = {
+                "turn_detection": STT_TURN,
+                "endpointing": endpointing,
+                "interruption": {"mode": "adaptive", "min_duration": 0.3},
+                "preemptive_generation": {"enabled": True, "preemptive_tts": True},
+            }
+            return stt_engine, turn_handling
+        except Exception as e:  # noqa: BLE001 — never let a plugin gap take the floor down
+            logger.warning("Deepgram Flux unavailable (%s) — using nova-2-phonecall", e)
+    # nova-2-phonecall (not nova-2/nova-3 general) is Deepgram's model tuned for
+    # narrowband/noisy telephone audio — the generic model was observed stalling
+    # >20s waiting for a clean silence gap that a real phone line's background
+    # noise never gave it. utterance_end_ms turns on Deepgram's word-timing-based
+    # UtteranceEnd signal as a second, noise-robust path to finalize a turn.
+    stt_engine = deepgram.STT(
+        model="nova-2-phonecall", utterance_end_ms=1000, endpointing_ms=25, **keyterm_kw
+    )
+    turn_handling = {
+        # Word-level end-of-turn model: "they have finished" comes from the
+        # sentence, not from a silence timer.
+        "turn_detection": EnglishModel(),
+        "endpointing": {
+            "mode": "dynamic",  # adapts to this caller's pace instead of one fixed wait
+            "min_delay": 0.3,  # framework default 0.5s — snappier turn-taking
+            "max_delay": 1.5,  # was 2.0: the wait when the model thinks they are mid-thought
+        },
+        "interruption": {
+            "mode": "adaptive",  # ML backchannel detection ("yeah"/"hmm" won't cut the agent off)
+            "min_duration": 0.3,  # framework default 0.5s — stop audio faster on a real interruption
+        },
+        "preemptive_generation": {
+            "enabled": True,  # start the LLM before the turn is even confirmed
+            "preemptive_tts": True,  # also start speaking before confirmation — biggest first-audio win
+        },
+    }
+    return stt_engine, turn_handling
 
 
 # OpenAI-compatible providers. Cerebras and Groq serve the same two open models
@@ -1107,7 +1191,13 @@ def _make_llm():
         raise RuntimeError("no LLM provider key set (CEREBRAS_API_KEY or GROQ_API_KEY)")
     logger.info("LLM chain: %s", " -> ".join(f"{p}:{_PROVIDERS[p]['models'][f]}" for p, f in chain))
     instances = [_openai_compat_llm(p, f) for p, f in chain]
-    return instances[0] if len(instances) == 1 else _llm.FallbackAdapter(instances)
+    if len(instances) == 1:
+        return instances[0]
+    # attempt_timeout bounds the wait for the FIRST token from one provider
+    # before the next one is tried (framework default 5 s). Cerebras' first
+    # token is 350-900 ms on real calls, so 2.5 s is >2x its p95 and turns a
+    # stalled provider into ~3 s of dead air instead of 5-6 s.
+    return _llm.FallbackAdapter(instances, attempt_timeout=2.5, retry_interval=0.2)
 
 
 def prewarm(proc: agents.JobProcess) -> None:
@@ -1119,7 +1209,11 @@ def prewarm(proc: agents.JobProcess) -> None:
         # missing a quiet speaker; short min-silence lets endpointing be fast.
         activation_threshold=0.55,
         min_speech_duration=0.05,
-        min_silence_duration=0.35,
+        # 250 ms: the VAD's end-of-speech is the zero point every end-of-turn
+        # delay is measured from, and it also gates barge-in. Flux/the EOU
+        # model decide whether the person is actually done, so this only needs
+        # to bridge the gap between two words, not two sentences.
+        min_silence_duration=0.25,
     )
     # NOTE: the turn-detector model is NOT built here. In livekit-agents 1.6 its
     # constructor needs the job's inference executor (get_job_context()), so
@@ -1128,37 +1222,16 @@ def prewarm(proc: agents.JobProcess) -> None:
     # the entrypoint is cheap.
 
 
-async def _presynthesize(tts, text: str) -> list[rtc.AudioFrame]:  # noqa: ANN001
-    """Render a fixed line to audio ahead of time so it can play the instant
-    the customer picks up, instead of paying a TTS round trip on "hello"."""
-    frames: list[rtc.AudioFrame] = []
-    try:
-        async for chunk in tts.synthesize(text):
-            frames.append(chunk.frame)
-    except Exception as e:  # noqa: BLE001 — fall back to live synthesis
-        logger.warning("pre-synthesis failed (%s); the disclosure will be synthesised live", e)
-        return []
-    return frames
-
-
-async def _replay(frames: list[rtc.AudioFrame]) -> AsyncIterator[rtc.AudioFrame]:
-    for f in frames:
-        yield f
-
-
 async def entrypoint(ctx: agents.JobContext) -> None:
     await ctx.connect()
 
     # Real calls carry the CoCally call id in room metadata; demo calls don't.
-    # (The API's dispatch carries it too, as job metadata — the fallback.)
     call_id = None
-    for raw in (ctx.room.metadata, getattr(ctx.job, "metadata", None)):
-        try:
-            call_id = json.loads(raw or "{}").get("callId")
-        except (ValueError, TypeError, AttributeError):
-            call_id = None
-        if call_id:
-            break
+    try:
+        meta = json.loads(ctx.room.metadata or "{}")
+        call_id = meta.get("callId")
+    except (ValueError, TypeError):
+        pass
 
     # A `call-<id>` room with no metadata is not a call: the API creates every
     # real call room with `{callId}` before dialling. This shape appears when a
@@ -1190,60 +1263,25 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if brief
         else "Greet the person, give the AI + recording disclosure in one sentence, and ask if now is a good moment."
     )
-    logger.info(
-        "starting agent (call=%s, brief=%s, llm=%s:%s, tts=%s)",
-        call_id, bool(brief), LLM_PROVIDER, LLM_MODEL,
-        (((brief or {}).get("voice") or {}).get("provider")) or TTS_PROVIDER,
-    )
+    logger.info("starting agent (call=%s, brief=%s, stt=%s/%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, STT_TURN, LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER)
 
-    voice_cfg = (brief or {}).get("voice") or {}
-    tts_engine = _build_tts(voice_cfg.get("provider"), voice_cfg.get("voiceId"))
-    # Render the disclosure while the session starts (the AI is dispatched on
-    # answer, so this overlaps the few hundred ms of session setup).
+    tts_engine = _build_tts()
     disclosure = (brief or {}).get("disclosureLine")
-    disclosure_task = asyncio.create_task(_presynthesize(tts_engine, disclosure)) if disclosure else None
 
+    stt_engine, turn_handling = _build_stt()
     session = AgentSession(
-        # Groq (OpenAI-compatible endpoint) for low-latency LLM; Deepgram for
-        # STT + Aura TTS. See LLM_MODEL for the model choice. Reasoning is
-        # switched off/low explicitly: the plugin only does that for OpenAI's
-        # own model names, and hidden thinking tokens are dead air on a call.
-        # `openai.LLM.with_groq` was removed from the plugin
-        # (livekit-agents 1.6.x) — built manually via base_url instead.
-        # nova-2-phonecall (not nova-2/nova-3 general) is Deepgram's model
-        # tuned for narrowband/noisy telephone audio — the generic model was
-        # observed stalling >20s waiting for a clean silence gap that a real
-        # phone line's background noise never gave it. utterance_end_ms turns
-        # on Deepgram's word-timing-based UtteranceEnd signal as a second,
-        # noise-robust path to finalize a turn instead of relying solely on
-        # endpointing's raw-silence VAD, which is exactly what stalled.
-        stt=deepgram.STT(model="nova-2-phonecall", utterance_end_ms=1000, endpointing_ms=25),
+        # Cerebras/Groq (OpenAI-compatible endpoints) for the LLM — see
+        # _make_llm. Reasoning is switched off/low explicitly: hidden thinking
+        # tokens are dead air on a call. STT + turn-taking come from _build_stt
+        # (Deepgram Flux by default); TTS from _build_tts.
+        stt=stt_engine,
         llm=_make_llm(),
         tts=tts_engine,
         vad=ctx.proc.userdata["vad"],
-        # Uncompromising-on-latency tuning. The framework already implements
-        # the full VAD-barge-in / cancellable-generation / adaptive-backchannel
-        # pattern internally (confirmed: "adaptive interruption detector" and
-        # "using preemptive generation" already fire per-turn) — these knobs
-        # tune it, not reimplement it.
-        turn_handling={
-            # Word-level end-of-turn model (prewarmed): "they have finished"
-            # comes from the sentence, not from a silence timer.
-            "turn_detection": EnglishModel(),
-            "endpointing": {
-                "mode": "dynamic",  # adapts to this caller's pace instead of one fixed wait
-                "min_delay": 0.3,  # framework default 0.5s — snappier turn-taking
-                "max_delay": 2.0,  # framework default 3.0s — cap worst-case wait
-            },
-            "interruption": {
-                "mode": "adaptive",  # ML backchannel detection ("yeah"/"hmm" won't cut the agent off)
-                "min_duration": 0.3,  # framework default 0.5s — stop audio faster on a real interruption
-            },
-            "preemptive_generation": {
-                "enabled": True,  # start the LLM before the turn is even confirmed
-                "preemptive_tts": True,  # also start speaking before confirmation — biggest first-audio win
-            },
-        },
+        # The framework already implements the full VAD-barge-in /
+        # cancellable-generation / adaptive-backchannel pattern internally;
+        # these knobs tune it, not reimplement it.
+        turn_handling=turn_handling,
     )
 
     # Per-turn latency budget: log a warning the moment any stage blows past
@@ -1268,9 +1306,55 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             "totalMs": round((turn.get("eou", 0) + turn.get("llm", 0) + turn.get("tts", 0)) * 1000),
             "llmModel": LLM_MODEL,
             "ttsProvider": TTS_PROVIDER,
+            "sttModel": STT_MODEL,
         }
         turn.clear()
         await _post_metrics(call_id, payload)
+
+    # State transitions are the cheapest way to see a false interruption in the
+    # log: agent speaking -> listening with no user transcript after it.
+    #
+    # Turn stall guard. Both Deepgram stacks have been seen holding a final
+    # transcript for 10-17 s on a noisy phone line (nova 28 Sep 17:59, Flux
+    # 28 Sep 19:08: "Gas, then." never finalised, the customer said "Hello?"
+    # after 16 s). The framework waits for the final transcript with no cap.
+    # So: when the VAD says the customer stopped and STALL_GUARD_S later the
+    # agent still has not started a reply and the customer has not resumed,
+    # commit the turn with whatever transcript exists (interim if the final
+    # never came). Worst case a stall now costs ~3 s, not a "Hello?".
+    stall_task: asyncio.Task | None = None
+
+    def _cancel_stall() -> None:
+        nonlocal stall_task
+        if stall_task is not None:
+            stall_task.cancel()
+            stall_task = None
+
+    async def _stall_guard() -> None:
+        await asyncio.sleep(STALL_GUARD_S)
+        if qualifier._transfer_triggered or qualifier._closing:
+            return
+        if session.user_state != "listening" or session.agent_state != "listening":
+            return
+        logger.warning("turn stall guard: no reply %.1fs after end of speech — committing user turn (call=%s)", STALL_GUARD_S, call_id)
+        try:
+            session.commit_user_turn(transcript_timeout=1.0, stt_flush_duration=1.0)
+        except Exception as e:  # noqa: BLE001 — the guard must never take the call down
+            logger.warning("stall guard commit failed: %s", e)
+
+    @session.on("agent_state_changed")
+    def _on_agent_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
+        logger.info("agent %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
+        if getattr(event, "new_state", "") in ("thinking", "speaking"):
+            _cancel_stall()
+
+    @session.on("user_state_changed")
+    def _on_user_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
+        nonlocal stall_task
+        logger.info("user %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
+        _cancel_stall()
+        if getattr(event, "old_state", "") == "speaking" and getattr(event, "new_state", "") == "listening":
+            stall_task = asyncio.create_task(_stall_guard())
 
     @session.on("metrics_collected")
     def _on_metrics(event) -> None:  # noqa: ANN001 — livekit-agents event type
@@ -1341,13 +1425,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # AMD from the FIRST transcript we see — interim partials included,
         # which is the whole point (waiting for `conversation_item_added`, i.e.
         # a *finalised* turn, would give up most of the latency advantage over a
-        # carrier classifier). Later results in the voicemail window can still
-        # upgrade HUMAN to VOICEMAIL — see `Qualifier.on_transcript`.
+        # carrier classifier). `report_amd` latches, so the later partials and
+        # the final turn are no-ops.
         @session.on("user_input_transcribed")
         def _on_transcript(event) -> None:  # noqa: ANN001 — livekit-agents event type
             text = (getattr(event, "transcript", "") or "").strip()
             if text:
-                qualifier.on_transcript(text, bool(getattr(event, "is_final", False)))
+                qualifier.report_amd(text)
 
         # ── DTMF ───────────────────────────────────────────────────────────
         # `sip_dtmf_received` is the rtc SDK's SIP keypad event (livekit 1.0.23,
@@ -1413,21 +1497,17 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     if disclosure:
         handle = None
         try:
-            frames: list[rtc.AudioFrame] = []
-            if disclosure_task is not None:
-                try:
-                    frames = await asyncio.wait_for(disclosure_task, timeout=2.0)
-                except Exception:  # noqa: BLE001 — not ready in time: synthesise live
-                    frames = []
             t0 = time.monotonic()
-            handle = (
-                session.say(disclosure, audio=_replay(frames), allow_interruptions=False)
-                if frames
-                else session.say(disclosure, allow_interruptions=False)
-            )
+            # Live synthesis only. Replaying pre-rendered frames through
+            # `say(audio=...)` never resolved the handle on a real call (every
+            # call hit the 20 s timeout below), which pushed the silence
+            # watchdog out by 20 s and mislabelled live customers as SILENCE.
+            # ElevenLabs flash starts streaming in ~250 ms, so the pre-render
+            # bought almost nothing anyway.
+            handle = session.say(disclosure, allow_interruptions=False)
             await asyncio.wait_for(handle, timeout=20.0)
             spoken = True
-            logger.info("disclosure spoken (%s, %.2fs)", "pre-rendered" if frames else "live", time.monotonic() - t0)
+            logger.info("disclosure spoken (live, %.2fs)", time.monotonic() - t0)
         except asyncio.TimeoutError:
             # The audio was queued and has been playing for 20s; only the
             # bookkeeping await hung. Re-greeting here is what produced two
@@ -1441,8 +1521,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             qualifier.spawn(_post_compliance(call_id, "RECORDING_DISCLOSURE", disclosure))
 
     if call_id:
-        # Fires only if no transcript at all arrives — a customer who speaks
-        # at any point turns this into a no-op. Started only now,
+        # Fires only if no transcript at all arrives — `report_amd` latches, so
+        # a customer who speaks first turns this into a no-op. Started only now,
         # after our own opening line: a person who politely waits for the
         # ~8s disclosure to finish is not "silence".
         qualifier.spawn(qualifier.amd_silence_watchdog())
@@ -1490,7 +1570,6 @@ if __name__ == "__main__":
             # Warm processes with models already loaded, so a burst of answered
             # calls does not queue behind model loading.
             num_idle_processes=WORKER_IDLE_PROCESSES,
-            agent_name=AGENT_NAME,
             **({"port": _port} if _port else {}),
         )
     )
