@@ -85,6 +85,16 @@ TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | eleve
 # (nova-2-phonecall + the local end-of-turn model): measured on 28 Sep it spent
 # ~450 ms per turn just waiting for the final transcript. Kept as a fallback.
 STT_MODEL = (os.getenv("STT_MODEL") or "flux").lower()  # flux | nova
+# Who decides that the customer has *started* and *stopped* speaking when STT
+# is Flux. "stt": Flux's own StartOfTurn/EndOfTurn drive the framework. On the
+# 28 Sep test call Flux raised StartOfTurn on line echo/noise with no EndOfTurn
+# after it; the framework pauses the agent's audio on start-of-speech and only
+# resumes on end-of-speech, so replies stopped mid-word ("is that Al—") and
+# stayed silent until the customer said "Hello?". "vad" (default): the local
+# VAD drives start/end of speech and interruptions, exactly as on the nova
+# stack, while Flux still delivers the fast transcript. Flux's eager end-of-turn
+# is not used in this mode.
+STT_TURN = (os.getenv("STT_TURN") or "vad").lower()  # vad | stt
 # Comma-separated words the STT should favour (brand/retailer names). Both
 # Deepgram models accept them; fixes "Simply Energy" -> "simply an async".
 STT_KEYTERMS = [k.strip() for k in (os.getenv("STT_KEYTERMS") or "").split(",") if k.strip()]
@@ -997,9 +1007,8 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
                 eot_timeout_ms=1500,
                 **keyterm_kw,
             )
-            turn_handling = {
-                "turn_detection": "stt",
-                "endpointing": {
+            if STT_TURN == "stt":
+                endpointing = {
                     # Flux has already decided the turn is over when END_OF_SPEECH
                     # arrives; the framework still sleeps `min_delay` measured from
                     # the VAD's end-of-speech anchor. 0.1 s keeps a hair of margin
@@ -1007,7 +1016,19 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
                     "mode": "fixed",
                     "min_delay": 0.1,
                     "max_delay": 1.5,
-                },
+                }
+            else:
+                endpointing = {
+                    # VAD end-of-speech + a short fixed wait; Flux's final transcript
+                    # arrives ~260 ms after speech ends, so 0.3 s covers it without
+                    # the 450 ms nova used to spend waiting.
+                    "mode": "fixed",
+                    "min_delay": 0.3,
+                    "max_delay": 1.5,
+                }
+            turn_handling = {
+                "turn_detection": STT_TURN,
+                "endpointing": endpointing,
                 "interruption": {"mode": "adaptive", "min_duration": 0.3},
                 "preemptive_generation": {"enabled": True, "preemptive_tts": True},
             }
@@ -1177,7 +1198,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if brief
         else "Greet the person, give the AI + recording disclosure in one sentence, and ask if now is a good moment."
     )
-    logger.info("starting agent (call=%s, brief=%s, stt=%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER)
+    logger.info("starting agent (call=%s, brief=%s, stt=%s/%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, STT_TURN, LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER)
 
     tts_engine = _build_tts()
     disclosure = (brief or {}).get("disclosureLine")
@@ -1224,6 +1245,16 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         }
         turn.clear()
         await _post_metrics(call_id, payload)
+
+    # State transitions are the cheapest way to see a false interruption in the
+    # log: agent speaking -> listening with no user transcript after it.
+    @session.on("agent_state_changed")
+    def _on_agent_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
+        logger.info("agent %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
+
+    @session.on("user_state_changed")
+    def _on_user_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
+        logger.info("user %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
 
     @session.on("metrics_collected")
     def _on_metrics(event) -> None:  # noqa: ANN001 — livekit-agents event type

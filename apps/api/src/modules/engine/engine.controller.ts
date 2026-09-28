@@ -178,7 +178,10 @@ export class EngineController {
       // The worker speaks the scripted disclosure itself before the LLM's first
       // turn (see `disclosureLine`). Telling the model to disclose "on its first
       // turn" made it re-introduce itself on turn two of real calls (28 Sep).
-      `- You have ALREADY introduced yourself as an AI assistant for ${campaign.name} and said the call may be recorded. Never repeat that introduction unless the person asks who you are; if they do, answer in one short sentence: "${aiDisclosure}"`,
+      // Keep the client/campaign name out of this line: with it in, the model
+      // addressed the customer by the campaign name ("Are you Wendy Test India
+      // who looks after…", 28 Sep). The person is `firstName`, nobody else.
+      `- The person you are speaking to is ${vars.firstName || 'the customer'}. You have ALREADY greeted them, said you are an AI assistant and that the call may be recorded. Never repeat that introduction unless they ask who you are; if they do, answer in one short sentence: "${aiDisclosure}"`,
       '- Keep every reply under 25 words: at most one short acknowledgement, then one question. Short replies are what make you feel quick and natural on the phone.',
       '- Never re-ask something already answered.',
       '- If they object, acknowledge warmly and use the playbook below; never argue.',

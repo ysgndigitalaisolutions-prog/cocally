@@ -16,37 +16,42 @@ Two different delays add up to what a caller feels:
 
 "Ultra low latency" is both under control at the same time. Fixing the turn gap while the audio hairpins through London still feels slow.
 
-## 2. The audio path is the AU problem, and it's the Telvoq trunk
+## 2. The audio path is the AU problem. Carrier is fixed: Telvoq
 
-Facts, all in the Telvoq findings note:
+Australia production runs on Telvoq; India runs on Twilio. That split is settled, so AU latency has to be solved within Telvoq and on our side. Facts, all in the Telvoq findings note:
 
-- Telvoq's SIP point of presence is **`lon1.telvoq.com`, London**. There is no Sydney or Singapore POP yet; we asked on 25 Sep, still pending.
-- Telvoq authenticates by **IP allow-list only**, no username/password. LiveKit Cloud publishes fixed IP ranges only for Canada, EU, India, Japan and the US. **Not Australia.** So our Telvoq trunk is created with `destination_country=IN`, which makes every call leave LiveKit from its **India** servers, because that's the nearest region with fixed IPs that Telvoq can whitelist.
+- Telvoq's SIP point of presence is **`lon1.telvoq.com`, London**. No Sydney or Singapore POP yet; asked on 25 Sep, still pending.
+- Telvoq authenticates by **IP allow-list only**, no username/password. LiveKit Cloud publishes fixed IP ranges only for Canada, EU, India, Japan and the US. **Not Australia.** So our Telvoq trunk is created with `destination_country=IN`: every call leaves LiveKit from its **India** servers, the nearest region with fixed IPs that Telvoq can whitelist.
 - The worker runs on the VM in **Sydney** (`australia-southeast1-b`).
 
-Put together, an AU call on the Telvoq trunk as configured today travels, for every packet of audio in each direction:
+Put together, an AU call today travels, for every packet of audio in each direction:
 
 ```
 AU phone  →  Telvoq London  →  LiveKit India (SIP egress)  →  LiveKit media  →  worker Sydney
 ```
 
-Rough one-way figures: AU→London ~140 ms, London→India ~60 ms, India→Sydney ~75 ms. Around **250 to 300 ms one way, 500 to 600 ms round trip**, before any model does anything. That is the whole turn-gap budget again, spent on geography. On the Twilio trunk the equivalent detour is via the US, around 150 ms one way, which is what the India demo calls had.
+Rough one-way figures: AU→London ~140 ms, London→India ~60 ms, India→Sydney ~75 ms. Around **250 to 300 ms one way, 500 to 600 ms round trip**, before any model does anything. That is the whole turn-gap budget again, spent on geography.
 
-### What fixes it, in order of preference
+### The two levers Telvoq holds
 
-1. **Carrier with a Sydney POP and digest (username/password) auth.** Digest auth removes the need for fixed IPs, so the trunk can use `destination_country=AU` and LiveKit originates from Sydney. Path becomes phone → carrier Sydney → LiveKit Sydney → worker Sydney. This is the only configuration that gets the audio path under ~40 ms.
-   - **Twilio** does this today: AU numbers, Sydney edge (`cocally-livekit-1c9f4.pstn.sydney.twilio.com`), digest auth already built into our trunk provisioning. Needs the account upgraded from trial and an AU number bought. The trunk code needs no change beyond the address and the number.
-   - **Telnyx** also has a Sydney POP and digest auth, similar cost. Not set up; would need a new account and a trunk.
-2. **Telvoq with a Sydney POP + CIDR whitelisting.** Ask Telvoq for both. Even with a Sydney POP, IP-only auth still forces `destination_country=IN`, so the path is Sydney worker → India → Sydney POP → phone: about 150 ms one way, better than London, still 4 times worse than option 1. Only becomes as good as option 1 if Telvoq offers digest auth, which they said they don't.
-3. **Telvoq as is.** Fine for proving the carrier and for inbound DID, wrong for a latency-sensitive pilot.
+| Ask | What it removes | Path after | One way, est. |
+|---|---|---|---|
+| **A. Sydney (or Singapore) POP** | The London leg | phone → Telvoq Sydney → LiveKit India → worker Sydney | ~150 ms (Sydney POP), ~120 ms (Singapore) |
+| **B. Digest auth (username/password)** | The India detour: with no IP allow-list we can set `destination_country=AU` and originate from Sydney | phone → Telvoq POP → LiveKit Sydney → worker Sydney | ~30 ms with a Sydney POP |
+| A + B | both | the shortest path possible | ~30 ms |
 
-**Recommendation:** run the AU pilot on Twilio Sydney (or Telnyx) for the audio path, keep Telvoq for its DID and as a fallback route, and revisit Telvoq if they ship an APAC POP and digest auth. This is a commercial decision, so it's Nithin's call; everything else in this doc assumes option 1.
+A alone is a real improvement (half the detour). B alone changes little while the POP is London. Both together is the target.
+
+### The levers on our side, if Telvoq stays IP-only
+
+- **Region pinning stays `IN` for now** (Nithin's decision, 28 Sep). `destination_country=JP` is a possible later test (Sydney→Tokyo is a shorter hop than Sydney→Mumbai, est. 30 to 60 ms one way) and is unblocked by the CIDR whitelisting, but it is parked until the Telvoq POP and auth questions are answered.
+- **Ask LiveKit for fixed IPs in Australia.** They publish them per region on request; if AU gets ranges, `destination_country=AU` works with IP-only auth and B is no longer needed. One support ticket; no cost to try.
+- **CIDR ranges: done.** Telvoq whitelisted `143.223.88.0/21`, `161.115.160.0/19`, `153.57.128.0/18` on 28 Sep. The intermittent-403 risk is closed and any of LiveKit's fixed-IP regions (IN, JP, US, EU, CA) can now be used.
 
 ### What to ask Telvoq, verbatim
 
-1. Do you have, or plan, a Sydney or Singapore POP for our route? Which hostname?
-2. Can our account use digest authentication instead of IP allow-listing?
-3. If IP-only, please whitelist the three CIDR ranges (`143.223.88.0/21`, `161.115.160.0/19`, `153.57.128.0/18`), not a single address.
+1. Do you have, or plan, a Sydney or Singapore POP for our route? Which hostname, and when?
+2. Can our account use digest authentication instead of IP allow-listing? If not, why not, and is there any alternative to fixed source IPs (for example a registered trunk)?
 
 ## 3. LiveKit region
 
@@ -72,7 +77,7 @@ Every hop to a US provider costs ~150 ms round trip from Sydney. The choice per 
 | **Turn handling** | LiveKit built-ins: preemptive generation + preemptive TTS on, adaptive interruption 0.3 s, VAD min silence 0.25 s. | worker | Already on. Don't hand-tune silence timers; Flux owns end-of-turn. |
 | **Prompt** | "Already introduced, never repeat", "under 25 words: one acknowledgement, one question". | API brief | Perceived speed. Shipped 28 Sep in `engine.controller.ts brief()`. |
 
-Expected turn gap with this stack from Sydney, AU carrier path fixed:
+Expected turn gap with this stack from Sydney (audio path is on top of these, see §2):
 
 | Stage | Cerebras today | With Vertex regional LLM |
 |---|---|---|
@@ -81,7 +86,7 @@ Expected turn gap with this stack from Sydney, AU carrier path fixed:
 | TTS first byte incl. RTT | ~250 ms | ~250 ms |
 | **Total** | **~1.0 s** | **~0.8 s** |
 
-Plus an audio path of ~30 ms one way instead of ~300. That is the "world class" band without self-hosting, which is out of scope.
+The audio path adds to this: ~300 ms one way on Telvoq today, ~30 ms once Telvoq delivers a Sydney POP and digest auth. The turn gap is ours to fix this week; the audio path is theirs.
 
 ## 6. Not worth doing
 
@@ -95,8 +100,8 @@ Plus an audio path of ~30 ms one way instead of ~300. That is the "world class" 
 | # | Step | Owner | Effect |
 |---|---|---|---|
 | 1 | Deploy the current branch (Flux + hotfix), one test call, confirm `stt` column in `timings.turns` drops to under 150 ms | Nithin deploys, Claude reads metrics | ~300 ms off the turn gap |
-| 2 | Decide AU carrier: Twilio Sydney (upgrade + AU number) or Telnyx; ask Telvoq the three questions in §2 | Nithin | ~500 ms off the audio round trip |
-| 3 | Provision the AU trunk with `destination_country=AU`, digest auth, Sydney address; switch `.env`; one AU test call | Nithin runs provisioning, Claude wires config | audio path ~30 ms |
+| 2 | Send Telvoq the two asks in §2 (POP, digest auth); open a LiveKit ticket for AU fixed IPs | Nithin | unblocks the audio-path fix |
+| 3 | As each lands: re-provision the Telvoq trunk (`destination_country=AU` once digest auth or AU ranges exist; Sydney POP address), switch `.env`, one AU test call | Nithin runs provisioning, Claude wires config | up to ~500 ms off the audio round trip |
 | 4 | Worker on its own VM | Nithin (infra) | removes jitter |
 | 5 | Enable Vertex AI on the project; Claude adds Gemini Flash-Lite as a provider; A/B on test calls | both | ~200 ms off LLM if it wins |
 | 6 | Optional: try Google TTS in Sydney with the client's ear on the voice | both | ~130 ms off TTS if the voice is accepted |
@@ -109,3 +114,9 @@ cd apps/api && NODE_PATH=$PWD/node_modules MONGODB_URI=... node <scratchpad>/lat
 ```
 
 Watch `eou`, `llm`, `tts`, `total` per turn, and `providersUsed.stt/llm/tts` on the call to know which stack produced them. The audio path isn't in the metrics; judge it on a test call by whether the AI starts talking over you, and confirm the route by checking the trunk's `destination_country` and the carrier address in `.env`.
+
+## 9. India: carrier and caller ID (added 28 Sep)
+
+Twilio cannot provide an Indian caller ID: Indian rules don't allow foreign providers to originate calls with Indian numbers. For the demo, Twilio on the US number is acceptable (the client expects the call); upgrade the account from trial (removes the trial announcement and the verified-numbers-only restriction) and move the trunk to the Singapore edge for the audio path.
+
+For a real India pilot to customers who aren't expecting the call, a licensed Indian carrier is needed, with DLT registration of the business and its numbers. Same integration shape as Telvoq (SIP trunk into LiveKit, region pinned to `IN`, which has fixed IPs): candidates Exotel, Knowlarity, Ozonetel, Tata Communications, or the client's existing telecom setup if they already hold numbers and DLT registration (fastest). This is a licensing/paperwork track measured in weeks; start it as soon as the pilot is agreed.
