@@ -101,6 +101,14 @@ export class Call {
   @Prop({ default: false })
   manual: boolean;
 
+  /**
+   * When the AI worker was sent into the room (on answer). Set atomically, so
+   * a webhook and the awaited INVITE both reporting the answer can never
+   * dispatch two AIs into one call.
+   */
+  @Prop()
+  aiDispatchedAt?: Date;
+
   /** True for calls placed by the ratio/adaptive human-agent predictive dialer. */
   @Prop({ default: false })
   predictive: boolean;

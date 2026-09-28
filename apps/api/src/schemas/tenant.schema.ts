@@ -32,6 +32,55 @@ export class Tenant {
 
   @Prop({ default: true })
   active: boolean;
+
+  /**
+   * AI voice for every call this tenant places. Set by CoCally on the
+   * Platform screen, not by the tenant. Unset = the worker's default
+   * (TTS_PROVIDER / TTS_VOICE).
+   */
+  @Prop({ type: Object })
+  voice?: TenantVoice;
+
+  /** What CoCally charges this tenant, in rupees. Set on the Platform screen. */
+  @Prop({ type: Object })
+  billing?: TenantBilling;
+}
+
+export const TTS_PROVIDERS = ['elevenlabs', 'cartesia', 'deepgram'] as const;
+export type TtsProvider = (typeof TTS_PROVIDERS)[number];
+
+export interface TenantVoice {
+  provider: TtsProvider;
+  /** Provider voice id (ElevenLabs voice id, Cartesia voice id, Deepgram Aura model). Blank = provider default. */
+  voiceId?: string;
+}
+
+/** One price band. The band a month falls in is set by its total AI minutes and applies to ALL of that month's usage. */
+export interface BillingTier {
+  /** Band starts at this many AI minutes in the month (the first band is 0). */
+  fromMinutes: number;
+  /** ₹ per minute of live AI-to-customer conversation. */
+  aiPerMinInr: number;
+  /** ₹ per dialled attempt. */
+  perDialInr: number;
+}
+
+/**
+ * CARRY_FORWARD: unused advance stays as credit until used.
+ * MONTHLY: the advance only covers its own month; what is left expires when the month's invoice is issued.
+ */
+export const ADVANCE_RULES = ['CARRY_FORWARD', 'MONTHLY'] as const;
+export type AdvanceRule = (typeof ADVANCE_RULES)[number];
+
+/** What CoCally charges this tenant, in rupees (before GST). Set on the Platform screen. */
+export interface TenantBilling {
+  tiers: BillingTier[];
+  /** ₹ advance the tenant pays at the start of each month. */
+  monthlyAdvanceInr: number;
+  advanceRule: AdvanceRule;
+  gstPercent: number;
+  /** Invoice "Bill to" block. */
+  billTo?: { name?: string; address?: string; gstin?: string; email?: string };
 }
 
 export type TenantDocument = HydratedDocument<Tenant>;

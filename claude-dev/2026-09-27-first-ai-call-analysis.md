@@ -72,3 +72,42 @@ browser to ring. 6. Hang up: the desk row should clear within seconds.
 - Rollout order: `setup.sh` first, then push (`--remove-orphans` removes the old container). The `cocally-prod_mongo_data` volume stays on disk as a fallback; delete after a week.
 - The Atlas password appeared in chat via an editor selection; rotate the `cocally_vm` password after the pilot settles.
 - Docs: `deploy/DEPLOY.md` §1a (Atlas setup + migration), `.env.example`, `.env.prod.example`.
+
+## Call recordings turned on (night, 27 Sep)
+
+- Bucket `gs://cocally-509318-recordings` (australia-southeast1, uniform access, public access prevented).
+- Writer: service account `cocally-recordings@…` with `roles/storage.objectCreator` on that bucket only; HMAC key in `deploy/gcp/.env` (`RECORDING_*`, endpoint `https://storage.googleapis.com`).
+- The org enforces `iam.disableServiceAccountKeyCreation`; it was reset for this project only (Nithin granted himself Organization Policy Administrator). Took ~20 min to propagate.
+- Live after `setup.sh` + redeploy. Files land as `<tenantId>/<date>/<callId>.ogg`. The in-app Recordings page reads the local dir, not the bucket — play from the Cloud Console for now.
+- To do: say "this call is recorded" in the disclosure; bucket lifecycle rule once the client's retention period is known.
+
+## Call bar cleanup
+
+The expanded call bar was one long column ending in small outline buttons, and nothing said it only closes once an outcome is logged. Now two columns: customer context on the left (summary + score, objection, rebuttals collapsible), actions on the right (live controls with keypad tucked away; after the call, a "Log the outcome" panel with the wrap-up timer, notes, filled Booked/Callback buttons and the other outcomes below, Do not call in red). Behaviour unchanged.
+
+## Cost work (28 Sep, early hours)
+
+Pricing check against the quote given to Shubham Mantri (₹8.50/AI min, ₹0.80/dial, ₹50k advance, carrier billed to the client): our AI minute costs ≈ ₹5.90 at ₹98/$ (ElevenLabs ≈ half). Leaks were ringing (AI joined before answer), voicemail (~25 s of full stack before detection, disclosure spoken to the machine) and the unbilled human leg.
+
+- **AI joins on answer.** Worker registers as `AGENT_NAME=cocally-ai` (explicit dispatch); the API dispatches it from `CallProgressService.markAnswered` (atomic `aiDispatchedAt` claim, so the webhook + INVITE both reporting the answer can't send two AIs). Dispatch failure hangs the call up rather than leaving silence. Live-demo dispatches explicitly. Manual / predictive calls no longer get an AI dispatched at all. Recording now starts on answer, not before the INVITE.
+- **Voicemail hang-up.** `POST /engine/calls/:id/amd` returns `hangup: true` for VOICEMAIL unless the campaign's policy is `AI_DROP`; the worker force-interrupts the disclosure, drops the SIP leg and exits. Outcome is ANSWERED_VOICEMAIL (24 h retry) as before.
+- **Per-tenant voice.** `Tenant.voice {provider, voiceId}` goes out in the brief; `_build_tts(provider, voice)` falls back to env and then Deepgram. `Tenant.billing` holds the ₹ rates.
+- **Platform screen** (`/platform`, `PLATFORM_ADMIN_EMAILS` only — not a role): per-tenant dials, answered, voicemail, transfers, AI/agent minutes, cost breakdown (usage × editable rate card in `PlatformSettings`), billed ₹, margin, fixed cost; edit voice, billing, pause, daily quota (audited in the tenant's log). Durations are capped where the finaliser missed a hang-up (AI time ends at last transcript line + 30 s). Checked read-only against Atlas: Sept tests = 10.2 AI min, ≈ ₹45.
+
+Watch on the first live call: the gap between the customer's "hello" and the disclosure (dispatch + session start, expected ~1–2 s).
+
+### Voicemail detection tightened (same night)
+
+- Keeps listening for 5 s after the AI joins: a first guess of HUMAN ("Hi, it's Sam…") is upgraded to VOICEMAIL if "leave a message" etc. follows (`Qualifier.on_transcript`).
+- Carrier announcements ("switched off", "not reachable", "out of coverage", "the number you have dialled…", "not in service", "please try again later") count as VOICEMAIL → hang up, 24 h retry. A person saying "I'm busy" stays HUMAN.
+- Silence: nothing said for 10 s after the opening line → SILENCE → API returns `hangup` → worker hangs up (outcome NO_ANSWER).
+- Limitation: STT is English. A Hindi/regional carrier announcement is still transcribed as *something*, so it reads as HUMAN and neither rule fires; the carrier usually drops those calls within ~15–20 s. Only the English version (usually played after the Hindi one) matches.
+
+## Billing: advance ledger, invoices, tenant Usage & billing page (28 Sep)
+
+- `Tenant.billing` is now `{ tiers[], monthlyAdvanceInr, advanceRule (CARRY_FORWARD | MONTHLY), gstPercent, billTo }`; old flat rates are read as one band. Defaults = the pilot quote (Standard ₹8.50/₹0.80; Growth from 10,000 AI min ₹8.00/₹0.70; ₹50k advance; carry forward; 18% GST). The month's total AI minutes picks the band for ALL its usage (whole-volume, not graduated). AI time billed per second.
+- `CreditEntry` ledger (ADVANCE / USAGE / EXPIRY / ADJUSTMENT / REVERSAL, never edited) → balance. `Invoice` per tenant per IST month: DRAFT (refreshable from calls) → ISSUED (numbered CC-YYYY-NNNN, advance drawn at issue, MONTHLY rule expires the rest) → PAID; VOID returns the credit.
+- Super admin: Platform → client → "Billing & invoices" tab (running bill, invoice actions, record advance / adjustment, ledger, billing terms, printable invoice at /platform/invoices/:id); sender details editable. Every money action is in the tenant's audit log.
+- Tenant OWNER/ADMIN: new "Usage & billing" (/usage): usage figures, the running bill, band and distance to the next, advance balance + history, per-campaign breakdown, issued invoices (printable). Never shows CoCally cost or drafts.
+- Verified on in-memory Mongo: 12,000 AI min + 10,000 dials → Growth, ₹1,03,000 − ₹50,000 advance + GST = ₹62,540; void restores credit; monthly rule expires the unused advance. API boots with the new module; web `next build` passes.
+- Quote wording still to settle with the client: carry-forward (Terms) vs same-month (Section 2); implemented carry-forward, switchable per tenant.

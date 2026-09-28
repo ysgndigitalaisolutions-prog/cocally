@@ -11,6 +11,7 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
 import { WorkspaceModule } from '../workspace/workspace.module';
 import { EngineController } from './engine.controller';
 import { FlowExecutorService } from './flow-executor.service';
+import { Client, ClientSchema, Tenant, TenantSchema } from '../../schemas/tenant.schema';
 
 @Module({
   imports: [
@@ -24,6 +25,8 @@ import { FlowExecutorService } from './flow-executor.service';
       { name: Campaign.name, schema: CampaignSchema },
       { name: Lead.name, schema: LeadSchema },
       { name: FlowVersion.name, schema: FlowVersionSchema },
+      { name: Tenant.name, schema: TenantSchema },
+      { name: Client.name, schema: ClientSchema },
     ]),
   ],
   controllers: [EngineController],

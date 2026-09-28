@@ -11,6 +11,7 @@ import { RolesGuard } from './common/auth/roles.guard';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { PlatformModule } from './modules/platform/platform.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { CountryPacksModule } from './modules/country-packs/country-packs.module';
 import { EngineModule } from './modules/engine/engine.module';
@@ -58,6 +59,7 @@ import { WorkspaceModule } from './modules/workspace/workspace.module';
     ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 3000 }]),
     OpsModule,
     ReportsModule,
+    PlatformModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

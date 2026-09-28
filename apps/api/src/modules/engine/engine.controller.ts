@@ -9,6 +9,7 @@ import { Call, CallDocument } from '../../schemas/call.schema';
 import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { FlowVersion, FlowVersionDocument } from '../../schemas/flow.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
+import { Client, ClientDocument, Tenant, TenantDocument } from '../../schemas/tenant.schema';
 import { CountryPacksService } from '../country-packs/country-packs.service';
 import { SuppressionService } from '../leads/suppression.service';
 import { PalService } from '../providers/pal.service';
@@ -119,6 +120,8 @@ export class EngineController {
     @InjectModel(Campaign.name) private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(Lead.name) private readonly leadModel: Model<LeadDocument>,
     @InjectModel(FlowVersion.name) private readonly flowVersionModel: Model<FlowVersionDocument>,
+    @InjectModel(Tenant.name) private readonly tenantModel: Model<TenantDocument>,
+    @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     private readonly packs: CountryPacksService,
     private readonly gateway: RealtimeGateway,
     private readonly transfers: TransfersService,
@@ -149,12 +152,21 @@ export class EngineController {
     ]);
     if (!campaign || !lead) throw new NotFoundException('Call context missing');
 
+    // The AI introduces itself "on behalf of {{clientName}}". That is the
+    // client's brand, never the campaign name — otherwise it says "calling on
+    // behalf of Wendy test (India)" to a real customer.
+    const client = campaign.clientId ? await this.clientModel.findById(campaign.clientId).select('name').lean().exec() : null;
+    const clientName = client?.name ?? campaign.name;
+    const address = [lead.suburb, lead.state, lead.postcode].filter(Boolean).join(', ');
     const vars: Record<string, unknown> = {
       firstName: lead.firstName ?? '',
       lastName: lead.lastName ?? '',
       suburb: lead.suburb ?? '',
       state: lead.state ?? '',
-      clientName: campaign.name,
+      postcode: lead.postcode ?? '',
+      // Suburb/state/postcode only — leads carry no street line, so the read-back is a locality check.
+      address,
+      clientName,
       ...lead.facts,
     };
 
@@ -184,6 +196,8 @@ export class EngineController {
       .filter((l) => l !== '')
       .join('\n');
 
+    const tenant = await this.tenantModel.findById(call.tenantId).select('voice').lean().exec();
+
     return {
       callId: id,
       tenantId: call.tenantId.toString(),
@@ -191,13 +205,15 @@ export class EngineController {
       leadId: lead._id.toString(),
       leadName: [lead.firstName, lead.lastName].filter(Boolean).join(' ') || 'there',
       leadPhone: lead.phone,
-      clientName: campaign.name,
+      clientName,
       transcriptionMode: campaign.transcriptionMode,
       transferAcceptWindowSeconds: campaign.transferAcceptWindowSeconds,
       firstTurnHint: `Greet ${vars.firstName || 'them'}, give the AI + recording disclosure in one sentence, and ask if now is a good moment.`,
       /** Spoken verbatim by the worker before the LLM's first turn, and logged as a compliance event. */
       disclosureLine: `${campaign.aiSelfIdentification ? `Hi ${vars.firstName || 'there'}. ${aiDisclosure} ${recordingDisclosure}` : `Hi ${vars.firstName || 'there'}. ${recordingDisclosure}`} Is now a good moment for a quick chat?`,
       instructions,
+      /** Tenant's AI voice (Platform screen); null = the worker's default. */
+      voice: tenant?.voice ?? null,
     };
   }
 
@@ -369,13 +385,26 @@ export class EngineController {
     call.amdClass = dto.amdClass;
     if (dto.latencyMs !== undefined) call.amdLatencyMs = dto.latencyMs;
     // The call state machine is owned by the orchestrator and the LiveKit
-    // webhook receiver; this route only reports what answered, it does not
-    // advance or terminate the call. Voicemail policy (drop / hang up) stays
-    // with whoever owns the flow.
+    // webhook receiver; this route does not terminate the call itself. It
+    // tells the worker whether to hang up, per the campaign's voicemail policy.
     await call.save();
 
-    this.logger.log(`call ${id} AMD=${dto.amdClass}${dto.latencyMs !== undefined ? ` in ${dto.latencyMs}ms` : ''}`);
-    return { ok: true, amdClass: call.amdClass, amdLatencyMs: call.amdLatencyMs ?? null };
+    // A mailbox is not a prospect: every second the AI keeps talking to one is
+    // paid for (agent, STT, TTS, LLM, recording) and earns nothing. Hang up at
+    // once unless the campaign wants the AI to leave a message. Neither
+    // prerecorded drop nor AI drop plays on the live path yet, so only AI_DROP
+    // keeps the AI on the line (it will speak to the tone like any turn).
+    // Silence (nothing said for 10 s after our opening line) always hangs up.
+    let hangup = dto.amdClass === 'SILENCE';
+    if (dto.amdClass === 'VOICEMAIL') {
+      const campaign = await this.campaignModel.findById(call.campaignId).select('voicemailPolicy').lean().exec();
+      hangup = campaign?.voicemailPolicy !== 'AI_DROP';
+    }
+
+    this.logger.log(
+      `call ${id} AMD=${dto.amdClass}${dto.latencyMs !== undefined ? ` in ${dto.latencyMs}ms` : ''}${hangup ? ' → hanging up' : ''}`,
+    );
+    return { ok: true, amdClass: call.amdClass, amdLatencyMs: call.amdLatencyMs ?? null, hangup };
   }
 
   /**

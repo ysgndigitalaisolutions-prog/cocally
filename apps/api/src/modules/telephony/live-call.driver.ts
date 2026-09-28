@@ -180,17 +180,10 @@ export class LiveCallDriver implements OnModuleInit {
         campaignName: campaign.name,
       });
 
-      // Recording is started before the INVITE so nothing at the head of the
-      // conversation is lost. A brand-new room with no publishers can refuse
-      // egress on some deployments; `startRecording` swallows that and returns
-      // null, and `CallProgressService.onParticipantJoined` retries once the
-      // customer is actually in the room. A recording failure must never take
-      // the call down with it.
-      const recording = await this.livekit.startRecording(callId, tenantId);
-      if (recording) {
-        call.recordingEgressId = recording.egressId;
-        call.recordingUri = recording.uri;
-      }
+      // Recording starts on answer (CallProgressService.markAnswered), not
+      // here: the AI only joins once the customer picks up, so there is
+      // nothing to capture while the phone rings, and a dial that is never
+      // answered no longer pays for an egress.
 
       call.state = 'RINGING';
       await call.save();

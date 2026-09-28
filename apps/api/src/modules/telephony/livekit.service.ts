@@ -2,6 +2,7 @@ import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common'
 import type { SupervisionMode } from '@cocally/shared';
 import {
   AccessToken,
+  AgentDispatchClient,
   EgressClient,
   EncodedFileOutput,
   EncodedFileType,
@@ -46,6 +47,11 @@ export class LivekitService {
   private get sipClient(): SipClient {
     const { url, apiKey, apiSecret } = this.assertConfigured();
     return new SipClient(url, apiKey, apiSecret);
+  }
+
+  private get dispatchClient(): AgentDispatchClient {
+    const { url, apiKey, apiSecret } = this.assertConfigured();
+    return new AgentDispatchClient(url, apiKey, apiSecret);
   }
 
   private get egressClient(): EgressClient {
@@ -220,6 +226,27 @@ export class LivekitService {
       await this.roomClient.deleteRoom(name);
     } catch (err) {
       this.logger.warn(`deleteRoom(${callId}) failed (may already be gone): ${(err as Error).message}`);
+    }
+  }
+
+  // ── AI worker ───────────────────────────────────────────────────────────
+
+  /**
+   * Send the AI worker into a call's room. The worker registers under an
+   * agent name, so LiveKit never dispatches it on its own: it joins only when
+   * this is called — once the customer has answered. That keeps agent minutes
+   * off every dial that rings out, and keeps the AI out of manual and
+   * human-bridged calls entirely.
+   */
+  async dispatchAgent(callId: string): Promise<boolean> {
+    try {
+      await this.dispatchClient.createDispatch(this.roomName(callId), config.livekit.agentName, {
+        metadata: JSON.stringify({ callId }),
+      });
+      return true;
+    } catch (err) {
+      this.logger.error(`dispatchAgent(${callId}) failed: ${(err as Error).message}`);
+      return false;
     }
   }
 

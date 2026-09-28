@@ -2,7 +2,8 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { LuChevronDown, LuChevronRight } from 'react-icons/lu';
+import { LuBuilding2, LuChevronDown, LuChevronRight } from 'react-icons/lu';
+import { api } from '@/lib/api';
 import type { SessionUser } from '@/lib/store';
 import { roleLabel } from '@/lib/roles';
 import { navItemFor, sectionContains, visibleSections, type NavItem, type NavSection } from '@/lib/nav';
@@ -21,8 +22,24 @@ interface Props {
  * that collapses, because its pages are visited once a week, not once a call.
  */
 export default function Sidebar({ user, pathname, onLogout }: Props) {
-  const sections = visibleSections(user);
-  const active = navItemFor(pathname);
+  const [platformAdmin, setPlatformAdmin] = useState(false);
+  // CoCally's own operators only (PLATFORM_ADMIN_EMAILS on the API) — not a
+  // tenant role, so it can't come from `user.roles`.
+  useEffect(() => {
+    api
+      .get<{ platformAdmin: boolean }>('/platform/me')
+      .then((r) => setPlatformAdmin(r.data.platformAdmin))
+      .catch(() => setPlatformAdmin(false));
+  }, [user.id]);
+  const platform: NavSection | null = platformAdmin
+    ? {
+        id: 'platform',
+        label: 'CoCally',
+        items: [{ href: '/platform', label: 'Platform', icon: LuBuilding2, roles: [] }],
+      }
+    : null;
+  const sections = [...visibleSections(user), ...(platform ? [platform] : [])];
+  const active = navItemFor(pathname) ?? (pathname.startsWith('/platform') ? platform?.items[0] : undefined);
   const account = sections.find((s) => s.id === 'account');
   const body = sections.filter((s) => s.id !== 'account');
 

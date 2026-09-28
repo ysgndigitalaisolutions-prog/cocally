@@ -78,3 +78,24 @@ body {
   background: var(--bad);
   color: var(--on-accent);
 }
+
+/* Invoices: print only the document, on white paper, whatever the theme. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+    box-shadow: none !important;
+    border: none !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

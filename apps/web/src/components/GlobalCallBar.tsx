@@ -30,6 +30,8 @@ const DISPOSITIONS: Array<[string, string]> = [
   ['FOLLOW_UP', 'Follow up'],
 ];
 const NEEDS_SCHEDULE = new Set(['BOOKED', 'CALLBACK']);
+const PRIMARY_DISPOSITIONS = DISPOSITIONS.filter(([v]) => NEEDS_SCHEDULE.has(v));
+const OTHER_DISPOSITIONS = DISPOSITIONS.filter(([v]) => !NEEDS_SCHEDULE.has(v));
 
 /**
  * joining    browser connecting to the room + publishing mic
@@ -1128,6 +1130,7 @@ export default function GlobalCallBar() {
   const leadName = briefing?.leadName || activeCall.leadName;
   const sourceLabel = activeCall.source === 'manual' ? 'Manual dial' : activeCall.source === 'predictive' ? 'Predictive dial' : 'Warm transfer';
   const live = phase === 'connected' || phase === 'ringing' || phase === 'dialing';
+  const hasBriefing = Boolean(briefing && (briefing.summary || briefing.facts.length > 0 || briefing.rebuttals.length > 0));
 
   return (
     <>
@@ -1187,50 +1190,26 @@ export default function GlobalCallBar() {
 
         {expanded && (
           <div className="max-h-[60vh] overflow-y-auto border-t px-6 py-4" style={{ borderColor: 'var(--border)' }}>
-            {message && <p className="mb-2 text-sm" style={{ color: 'var(--accent)' }}>{message}</p>}
-            {error && <p className="mb-2 text-sm" style={{ color: 'var(--bad)' }}>{error}</p>}
-
+            {/* Notices: one slim line each, only when there is something to say. */}
+            {(message || error) && (
+              <p className="mb-3 text-sm" style={{ color: error ? 'var(--bad)' : 'var(--accent)' }}>{error || message}</p>
+            )}
             {audioBlocked && (
-              <div className="mb-3 flex items-center justify-between rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
-                <span style={{ color: 'var(--accent)' }}>Audio is connected but your browser blocked autoplay.</span>
+              <div className="mb-3 flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm" style={{ background: 'var(--surface-2)' }}>
+                <span style={{ color: 'var(--accent)' }}>Your browser blocked call audio.</span>
                 <button onClick={enableAudio} className="btn btn-primary text-xs">Enable audio</button>
               </div>
             )}
-
-            {wrapUp && (
-              <div
-                className="mb-3 flex items-center justify-between rounded-lg border p-3 text-sm"
-                style={{ borderColor: wrapUpLeft <= 15 ? 'var(--bad)' : 'var(--accent)', background: 'var(--surface-2)' }}
-                role="status"
-              >
-                <span>
-                  Wrap-up — log this call before the timer runs out. You go back to Available automatically.
-                </span>
-                <span
-                  className="font-mono text-lg font-bold tabular-nums"
-                  style={{ color: wrapUpLeft <= 15 ? 'var(--bad)' : 'var(--accent)' }}
-                >
-                  {formatDuration(wrapUpLeft)}
-                </span>
-              </div>
-            )}
-
             {pendingTransfer && (
               <div
-                className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm"
+                className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm"
                 style={{ borderColor: 'var(--accent)', background: 'var(--surface-2)' }}
                 role="status"
               >
                 {pendingTransfer.accepted ? (
                   <span>
                     {pendingTransfer.toAgentName} accepted the {pendingTransfer.kind.toLowerCase()} transfer.
-                    {pendingTransfer.kind === 'WARM' && (
-                      <>
-                        {' '}
-                        The customer is parked on hold music, which is published in place of your microphone — brief{' '}
-                        {pendingTransfer.toAgentName} on another channel, then complete the handover.
-                      </>
-                    )}
+                    {pendingTransfer.kind === 'WARM' && ' The customer is on hold music — brief them, then complete the handover.'}
                   </span>
                 ) : (
                   <span>
@@ -1253,79 +1232,35 @@ export default function GlobalCallBar() {
               </div>
             )}
 
-            {live && (
-              <div className="mb-3 flex flex-wrap items-center gap-2">
-                <button className="btn btn-danger text-sm" disabled={busy} onClick={hangUp}>☎ Hang up</button>
-                {phase === 'connected' && (
-                  <>
-                    <button className="btn btn-ghost text-sm" onClick={toggleMic}>{micMuted ? 'Unmute' : 'Mute'}</button>
-                    <button
-                      className="btn text-sm"
-                      disabled={holdBusy}
-                      onClick={() => void toggleHold()}
-                      aria-pressed={onHold}
-                      style={
-                        onHold
-                          ? { background: 'var(--accent)', color: '#0b1220' }
-                          : { background: 'var(--surface-2)', color: 'var(--text)', border: '1px solid var(--border)' }
-                      }
-                    >
-                      {holdBusy ? '…' : onHold ? 'Resume customer' : 'Hold'}
-                    </button>
-                    <button
-                      className="btn btn-ghost text-sm"
-                      disabled={Boolean(pendingTransfer)}
-                      onClick={() => setShowTransfer(true)}
-                    >
-                      Transfer…
-                    </button>
-                  </>
-                )}
-                {phase === 'connected' && (
-                  <div className="flex items-center gap-1">
-                    {DTMF_KEYS.map((k) => (
-                      <button key={k} className="btn btn-ghost px-2 py-1 text-xs" aria-label={`Send DTMF ${k}`} onClick={() => sendDtmf(k)}>{k}</button>
-                    ))}
-                    {dtmfSent && <span className="ml-1 font-mono text-xs" style={{ color: 'var(--text-dim)' }}>{dtmfSent}</span>}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {onHold && (
-              <p className="mb-3 rounded-lg p-2 text-sm" style={{ background: 'var(--surface-2)', color: 'var(--accent)' }}>
-                The customer is parked. They hear hold audio, not you, and you cannot hear them.
-              </p>
-            )}
-
             {phase !== 'connected' && phase !== 'ended' ? (
-              <p className="text-sm" style={{ color: 'var(--text-dim)' }}>
-                {phase === 'joining' && 'Joining the call and enabling your mic…'}
-                {phase === 'dialing' && 'Ringing the carrier trunk…'}
-                {phase === 'ringing' && 'Ringing the customer…'}
-              </p>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm" style={{ color: 'var(--text-dim)' }}>
+                  {phase === 'joining' && 'Joining the call and enabling your mic…'}
+                  {phase === 'dialing' && 'Ringing the carrier trunk…'}
+                  {phase === 'ringing' && 'Ringing the customer…'}
+                </p>
+                {live && <button className="btn btn-danger text-sm" disabled={busy} onClick={hangUp}>Hang up</button>}
+              </div>
             ) : (
-              <>
-                {/* Lead "story": AI summary + facts + rebuttals when there's an
-                    AI leg behind this call; otherwise this is just quietly empty
-                    rather than a wall of "no data" notices. */}
-                {briefing && (briefing.summary || briefing.facts.length > 0 || briefing.rebuttals.length > 0) && (
-                  <div className="mb-4 grid gap-4 md:grid-cols-2">
-                    {(briefing.summary || briefing.facts.length > 0) && (
-                      <div className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
+              <div className={`grid gap-4 ${hasBriefing ? 'lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]' : ''}`}>
+                {/* Left: what we know about this customer. */}
+                {hasBriefing && briefing && (
+                  <div className="space-y-3 text-sm">
+                    {briefing.facts.length > 0 || briefing.summary ? (
+                      <section>
                         <div className="mb-2 flex items-baseline justify-between gap-3">
-                          <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Summary</p>
-                          <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                            Score <span className="font-mono text-sm font-semibold" style={{ color: 'var(--text)' }}>{briefing.score}</span>
-                          </p>
+                          <h3 className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Summary</h3>
+                          <span className="rounded-full px-2 py-0.5 font-mono text-xs font-bold" style={{ background: 'var(--surface-2)' }}>
+                            Score {briefing.score}
+                          </span>
                         </div>
                         {briefing.facts.length > 0 ? (
-                          <ul className="grid grid-cols-1 gap-y-1 sm:grid-cols-2 sm:gap-x-4">
+                          <ul className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
                             {briefing.facts.map((fact) => {
                               const isFlag = fact.value === 'true' || fact.value === 'false';
                               return (
                                 <li key={fact.label} className="flex gap-2" style={{ color: fact.confirmed ? 'var(--text)' : 'var(--text-dim)' }}>
-                                  <span aria-hidden style={{ color: fact.confirmed ? 'var(--good)' : 'var(--bad)' }}>{fact.confirmed ? '✓' : '✗'}</span>
+                                  <span aria-hidden style={{ color: fact.confirmed ? 'var(--good)' : 'var(--text-dim)' }}>{fact.confirmed ? '✓' : '–'}</span>
                                   <span>
                                     {fact.label}
                                     {!isFlag && <span style={{ color: 'var(--text-dim)' }}>: {fact.value}</span>}
@@ -1335,101 +1270,162 @@ export default function GlobalCallBar() {
                             })}
                           </ul>
                         ) : (
-                          briefing.summary && <p>{briefing.summary}</p>
+                          <p>{briefing.summary}</p>
                         )}
-                        {!briefing.rebuttals.length && (
-                          <p className="mt-2 text-xs" style={{ color: 'var(--text-dim)' }}>
-                            Objection: {briefing.objection ? briefing.objection.replace(/_/g, ' ') : 'none'}
-                          </p>
-                        )}
-                      </div>
+                      </section>
+                    ) : null}
+                    {briefing.objection && (
+                      <p style={{ color: 'var(--accent)' }}>
+                        Objection raised: <span className="font-semibold">{briefing.objection.replace(/_/g, ' ')}</span>
+                      </p>
                     )}
                     {briefing.rebuttals.length > 0 && (
-                      <div className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
-                        <p className="mb-1 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Script &amp; rebuttals</p>
-                        {briefing.objection && (
-                          <p className="mb-2" style={{ color: 'var(--accent)' }}>
-                            Flagged objection: <span className="font-semibold">{briefing.objection.replace(/_/g, ' ')}</span>
-                          </p>
-                        )}
-                        <ul className="space-y-2">
+                      <details className="group" open={Boolean(briefing.objection)}>
+                        <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+                          Rebuttals ({briefing.rebuttals.length})
+                        </summary>
+                        <ul className="mt-2 space-y-2">
                           {briefing.rebuttals.map((r) => (
                             <li
                               key={r.objection}
-                              className="rounded p-2"
-                              style={briefing.objection === r.objection ? { background: 'var(--surface)', border: '1px solid var(--accent)' } : undefined}
+                              className="rounded-md border-l-2 py-1 pl-3"
+                              style={{ borderColor: briefing.objection === r.objection ? 'var(--accent)' : 'var(--border)' }}
                             >
                               <p className="font-semibold capitalize">{r.objection.replace(/_/g, ' ')}</p>
                               <p style={{ color: 'var(--text-dim)' }}>{r.rebuttal}</p>
                             </li>
                           ))}
                         </ul>
-                      </div>
+                      </details>
                     )}
                   </div>
                 )}
 
-                {phase === 'ended' && !error && (
-                  <p className="mb-3 text-sm" style={{ color: 'var(--text-dim)' }}>
-                    Call ended — log what happened below.
-                  </p>
-                )}
-                {phase === 'connected' && (
-                  <p className="mb-3 text-sm" style={{ color: 'var(--text-dim)' }}>
-                    Hang up when you are done — the outcome is logged after the call ends.
-                  </p>
-                )}
-
-                <label className="sr-only" htmlFor="call-notes">Call notes</label>
-                <textarea
-                  id="call-notes"
-                  ref={notesRef}
-                  className="input mb-3 h-20"
-                  placeholder="Call notes (optional)…"
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                />
-
-                {phase !== 'ended' ? null : pending ? (
-                  <div className="rounded-lg p-4" style={{ background: 'var(--surface-2)' }}>
-                    <p className="mb-2 text-sm font-semibold">
-                      {pending.value === 'BOOKED' ? 'When is the appointment?' : 'When should we call back?'}
-                    </p>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input
-                        type="datetime-local"
-                        className="input max-w-xs"
-                        aria-label={pending.value === 'BOOKED' ? 'Appointment time' : 'Callback time'}
-                        value={pending.when}
-                        onChange={(e) => setPending({ ...pending, when: e.target.value })}
-                      />
-                      <button
-                        className="btn btn-primary text-sm"
-                        disabled={busy || !pending.when}
-                        onClick={() => submitDisposition(pending.value, pending.when)}
-                      >
-                        Confirm {pending.value === 'BOOKED' ? 'booking' : 'callback'}
-                      </button>
-                      <button className="btn btn-ghost text-sm" disabled={busy} onClick={() => setPending(null)}>Cancel</button>
+                {/* Right: what the agent does next. */}
+                <div className="rounded-xl p-4" style={{ background: 'var(--surface-2)' }}>
+                  {phase === 'connected' ? (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button className="btn btn-danger text-sm" disabled={busy} onClick={hangUp}>Hang up</button>
+                        <button className="btn btn-ghost text-sm" onClick={toggleMic}>{micMuted ? 'Unmute' : 'Mute'}</button>
+                        <button
+                          className="btn text-sm"
+                          disabled={holdBusy}
+                          onClick={() => void toggleHold()}
+                          aria-pressed={onHold}
+                          style={onHold ? { background: 'var(--accent)', color: '#0b1220' } : { border: '1px solid var(--border)' }}
+                        >
+                          {holdBusy ? '…' : onHold ? 'Resume customer' : 'Hold'}
+                        </button>
+                        <button className="btn btn-ghost text-sm" disabled={Boolean(pendingTransfer)} onClick={() => setShowTransfer(true)}>
+                          Transfer…
+                        </button>
+                      </div>
+                      {onHold && (
+                        <p className="mt-2 text-xs" style={{ color: 'var(--accent)' }}>
+                          The customer hears hold audio. You can't hear each other.
+                        </p>
+                      )}
+                      <details className="mt-3">
+                        <summary className="cursor-pointer select-none text-xs" style={{ color: 'var(--text-dim)' }}>
+                          Keypad{dtmfSent ? ` · sent ${dtmfSent}` : ''}
+                        </summary>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {DTMF_KEYS.map((k) => (
+                            <button key={k} className="btn btn-ghost px-2.5 py-1 text-xs" aria-label={`Send DTMF ${k}`} onClick={() => sendDtmf(k)}>{k}</button>
+                          ))}
+                        </div>
+                      </details>
+                    </>
+                  ) : (
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-base font-bold">Log the outcome</h3>
+                        <p className="text-xs" style={{ color: 'var(--text-dim)' }}>This closes the call.</p>
+                      </div>
+                      {wrapUp && (
+                        <span
+                          className="font-mono text-lg font-bold tabular-nums"
+                          style={{ color: wrapUpLeft <= 15 ? 'var(--bad)' : 'var(--accent)' }}
+                          role="timer"
+                          aria-label="Wrap-up time left"
+                        >
+                          {formatDuration(wrapUpLeft)}
+                        </span>
+                      )}
                     </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {DISPOSITIONS.map(([value, label]) => (
-                      <button
-                        key={value}
-                        className="btn btn-ghost text-sm"
-                        disabled={busy}
-                        onClick={() => chooseDisposition(value)}
-                        style={value === 'BOOKED' ? { borderColor: 'var(--good)', color: 'var(--good)' } : undefined}
-                      >
-                        {label}
-                        {NEEDS_SCHEDULE.has(value) && ' …'}
-                      </button>
+                  )}
+
+                  <label className="sr-only" htmlFor="call-notes">Call notes</label>
+                  <textarea
+                    id="call-notes"
+                    ref={notesRef}
+                    className={`input h-16 ${phase === 'connected' ? 'mt-3' : 'mb-3'}`}
+                    placeholder="Notes (optional)"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                  />
+
+                  {phase === 'ended' &&
+                    (pending ? (
+                      <div>
+                        <p className="mb-2 text-sm font-semibold">
+                          {pending.value === 'BOOKED' ? 'When is the appointment?' : 'When should we call back?'}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            type="datetime-local"
+                            className="input max-w-xs"
+                            aria-label={pending.value === 'BOOKED' ? 'Appointment time' : 'Callback time'}
+                            value={pending.when}
+                            onChange={(e) => setPending({ ...pending, when: e.target.value })}
+                          />
+                          <button
+                            className="btn btn-primary text-sm"
+                            disabled={busy || !pending.when}
+                            onClick={() => submitDisposition(pending.value, pending.when)}
+                          >
+                            Confirm {pending.value === 'BOOKED' ? 'booking' : 'callback'}
+                          </button>
+                          <button className="btn btn-ghost text-sm" disabled={busy} onClick={() => setPending(null)}>Back</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="grid grid-cols-2 gap-2">
+                          {PRIMARY_DISPOSITIONS.map(([value, label]) => (
+                            <button
+                              key={value}
+                              className="btn py-2.5 text-sm font-bold"
+                              disabled={busy}
+                              onClick={() => chooseDisposition(value)}
+                              style={{ background: value === 'BOOKED' ? 'var(--good)' : 'var(--accent)', color: '#0b1220' }}
+                            >
+                              {label}…
+                            </button>
+                          ))}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                          {OTHER_DISPOSITIONS.map(([value, label]) => (
+                            <button
+                              key={value}
+                              className="btn text-sm"
+                              disabled={busy}
+                              onClick={() => chooseDisposition(value)}
+                              style={{
+                                border: `1px solid ${value === 'DO_NOT_CALL' ? 'var(--bad)' : 'var(--border)'}`,
+                                color: value === 'DO_NOT_CALL' ? 'var(--bad)' : 'var(--text)',
+                                background: 'var(--surface)',
+                              }}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     ))}
-                  </div>
-                )}
-              </>
+                </div>
+              </div>
             )}
           </div>
         )}

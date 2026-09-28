@@ -13,6 +13,7 @@ import {
   LuPhone,
   LuPhoneCall,
   LuPlug,
+  LuReceipt,
   LuRadio,
   LuScrollText,
   LuShield,
@@ -29,7 +30,7 @@ export interface NavItem {
 }
 
 export interface NavSection {
-  id: 'desk' | 'operate' | 'setup' | 'account';
+  id: 'desk' | 'operate' | 'setup' | 'account' | 'platform';
   label: string;
   /** Collapsible sections start closed; the others always show their items. */
   collapsible?: boolean;
@@ -62,6 +63,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { href: '/leads', label: 'Leads', icon: LuList, roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
       { href: '/calls', label: 'Calls', icon: LuPhoneCall, roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
       { href: '/reports', label: 'Reports', icon: LuFileText, roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
+      { href: '/usage', label: 'Usage & billing', icon: LuReceipt, roles: ['OWNER', 'ADMIN'] },
     ],
   },
   {

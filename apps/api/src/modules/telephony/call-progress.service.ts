@@ -159,6 +159,27 @@ export class CallProgressService {
     await call.save();
     this.logger.log(`call ${callId} answered after ${call.ringMs}ms → ${call.state}`);
     this.emitStateChanged(call);
+
+    // AI-fronted call: only now bring the AI in. Nothing is billed for it
+    // while the phone rings, and a call that never connects never has one.
+    if (!bridged && !call.manual && !call.predictive && call.flowVersionId) await this.dispatchAi(callId);
+  }
+
+  /** Send the AI worker in exactly once per call, however many answer signals arrive. */
+  async dispatchAi(callId: string): Promise<void> {
+    const claimed = await this.callModel
+      .findOneAndUpdate(
+        { _id: new Types.ObjectId(callId), aiDispatchedAt: { $exists: false } },
+        { $set: { aiDispatchedAt: new Date() } },
+      )
+      .exec();
+    if (!claimed) return;
+    if (!(await this.livekit.dispatchAgent(callId))) {
+      // No AI will ever speak on this call: better a clean hang-up than a
+      // customer saying "hello?" into silence.
+      this.logger.error(`call ${callId}: AI could not be dispatched — hanging up`);
+      await this.livekit.hangup(callId);
+    }
   }
 
   /**

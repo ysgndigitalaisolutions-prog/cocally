@@ -493,8 +493,8 @@ export class CallsController {
 
   /**
    * Real-voice demo dial with no SIP/telephony: creates a Call + a LiveKit
-   * room the registered AI worker auto-joins (per-room dispatch, no explicit
-   * `AgentDispatchClient` call needed), fetches its brief from
+   * room, sends the AI worker in (explicit dispatch — for a phone dial, only
+   * once it is answered), which fetches its brief from
    * `GET /engine/calls/:id/brief`, and speaks it. A person plays the "lead"
    * by opening the returned join link in a browser (mic, no login) — see
    * claude-dev/archive/2026-07/2026-07-22-live-voice-build-progress.md for why this stands
@@ -543,10 +543,13 @@ export class CallsController {
 
     if (dto.dialMode === 'phone') {
       if (!dto.phoneNumber) throw new BadRequestException('phoneNumber is required for dialMode "phone"');
+      // Resolves on pickup (waitUntilAnswered), so the AI arrives as the call connects.
       await this.livekit.dialOut(callId, dto.phoneNumber);
+      await this.livekit.dispatchAgent(callId);
       return { callId, leadJoinPath: null, dialed: dto.phoneNumber };
     }
 
+    await this.livekit.dispatchAgent(callId);
     return { callId, leadJoinPath: `/demo/lead/${callId}` };
   }
 
