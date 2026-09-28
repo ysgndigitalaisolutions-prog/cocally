@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import BillSummary from '@/components/billing/BillSummary';
 import LedgerTable from '@/components/billing/LedgerTable';
-import { api } from '@/lib/api';
+import { opsApi as api } from '@/lib/ops-api';
 import {
   inr,
   monthLabel,
@@ -39,7 +39,7 @@ export default function TenantBillingAdmin({ tenantId, onChanged }: { tenantId: 
   const [note, setNote] = useState<{ text: string; bad?: boolean } | null>(null);
 
   const load = useCallback(async () => {
-    const r = await api.get<BillingPayload>(`/platform/tenants/${tenantId}/billing?month=${period}`);
+    const r = await api.get<BillingPayload>(`/tenants/${tenantId}/billing?month=${period}`);
     setData(r.data);
   }, [tenantId, period]);
 
@@ -126,7 +126,7 @@ export default function TenantBillingAdmin({ tenantId, onChanged }: { tenantId: 
             <ul className="divide-y text-sm" style={{ borderColor: 'var(--border)' }}>
               {data.invoices.map((i) => (
                 <li key={i.id} className="flex items-center justify-between gap-3 py-2">
-                  <Link href={`/platform/invoices/${i.id}`} className="font-semibold hover:underline">
+                  <Link href={`/ops/invoices/${i.id}`} className="font-semibold hover:underline">
                     {i.number ?? 'Draft'} · {monthLabel(i.period)}
                   </Link>
                   <span className="flex items-center gap-3">
@@ -184,7 +184,7 @@ function InvoiceActions({
         <button
           className="btn btn-primary"
           disabled={busy}
-          onClick={() => void act('Draft created from this month’s calls.', () => api.post(`/platform/tenants/${tenantId}/invoices`, { month: period }))}
+          onClick={() => void act('Draft created from this month’s calls.', () => api.post(`/tenants/${tenantId}/invoices`, { month: period }))}
         >
           Create draft invoice
         </button>
@@ -196,7 +196,7 @@ function InvoiceActions({
   }
 
   const view = (
-    <Link href={`/platform/invoices/${invoice.id}`} className="btn btn-ghost">
+    <Link href={`/ops/invoices/${invoice.id}`} className="btn btn-ghost">
       View / print
     </Link>
   );
@@ -220,7 +220,7 @@ function InvoiceActions({
             disabled={busy}
             onClick={() =>
               void act('Invoice issued. The client can now see it on Usage & billing.', () =>
-                api.post(`/platform/invoices/${invoice.id}/issue`, { dueDays, notes: invNotes || undefined }),
+                api.post(`/invoices/${invoice.id}/issue`, { dueDays, notes: invNotes || undefined }),
               )
             }
           >
@@ -229,7 +229,7 @@ function InvoiceActions({
           <button
             className="btn btn-ghost"
             disabled={busy}
-            onClick={() => void act('Draft refreshed from the latest calls.', () => api.post(`/platform/tenants/${tenantId}/invoices`, { month: period }))}
+            onClick={() => void act('Draft refreshed from the latest calls.', () => api.post(`/tenants/${tenantId}/invoices`, { month: period }))}
           >
             Refresh draft
           </button>
@@ -237,7 +237,7 @@ function InvoiceActions({
           <button
             className="btn btn-ghost"
             disabled={busy}
-            onClick={() => void act('Draft deleted.', () => api.post(`/platform/invoices/${invoice.id}/void`, { reason: 'draft discarded' }))}
+            onClick={() => void act('Draft deleted.', () => api.post(`/invoices/${invoice.id}/void`, { reason: 'draft discarded' }))}
           >
             Delete draft
           </button>
@@ -260,7 +260,7 @@ function InvoiceActions({
           <button
             className="btn btn-primary"
             disabled={busy}
-            onClick={() => void act('Marked paid.', () => api.post(`/platform/invoices/${invoice.id}/paid`, { reference: reference || undefined }))}
+            onClick={() => void act('Marked paid.', () => api.post(`/invoices/${invoice.id}/paid`, { reference: reference || undefined }))}
           >
             Mark paid
           </button>
@@ -277,7 +277,7 @@ function InvoiceActions({
           disabled={busy || !reason.trim()}
           onClick={() =>
             void act('Invoice voided; any advance it used is back on the balance.', () =>
-              api.post(`/platform/invoices/${invoice.id}/void`, { reason }),
+              api.post(`/invoices/${invoice.id}/void`, { reason }),
             )
           }
         >
@@ -319,7 +319,7 @@ function MoneyForms({ tenantId, defaultAdvance, busy, act }: { tenantId: string;
           disabled={busy || !(amount > 0)}
           onClick={() =>
             void act(`Advance of ${inr(amount, 0)} recorded.`, () =>
-              api.post(`/platform/tenants/${tenantId}/advances`, {
+              api.post(`/tenants/${tenantId}/advances`, {
                 amountInr: amount,
                 at: new Date(`${date}T12:00:00+05:30`).toISOString(),
                 note: ref || undefined,
@@ -347,7 +347,7 @@ function MoneyForms({ tenantId, defaultAdvance, busy, act }: { tenantId: string;
           className="btn btn-ghost"
           disabled={busy || !adj || !adjNote.trim()}
           onClick={() =>
-            void act('Adjustment recorded.', () => api.post(`/platform/tenants/${tenantId}/adjustments`, { amountInr: adj, note: adjNote }))
+            void act('Adjustment recorded.', () => api.post(`/tenants/${tenantId}/adjustments`, { amountInr: adj, note: adjNote }))
           }
         >
           Record adjustment
@@ -454,7 +454,7 @@ function BillingTerms({
           disabled={busy}
           onClick={() =>
             void act('Billing terms saved. They apply to drafts and the running bill from now on.', () =>
-              api.patch(`/platform/tenants/${tenantId}`, {
+              api.patch(`/tenants/${tenantId}`, {
                 billing: {
                   tiers: [...tiers].sort((a, b) => a.fromMinutes - b.fromMinutes),
                   monthlyAdvanceInr: advance,

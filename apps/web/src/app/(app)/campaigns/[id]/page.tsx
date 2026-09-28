@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { leadStateReason } from '@/lib/lead-state';
 import { DialerStatusCard } from '@/components/DialerStatus';
 import { PredictiveDialerStatusCard } from '@/components/PredictiveDialerStatus';
 import CampaignInsights from '@/components/CampaignInsights';
@@ -56,6 +57,8 @@ interface Lead {
   phone: string;
   firstName?: string;
   state_: string;
+  stateReason?: string;
+  timeline?: { kind: string; detail?: string }[];
 }
 
 export default function CampaignDetailPage() {
@@ -358,6 +361,11 @@ export default function CampaignDetailPage() {
                 <span>
                   {lead.firstName ?? 'Lead'} · <span className="font-mono text-xs">{lead.phone}</span> ·{' '}
                   <span style={{ color: 'var(--text-dim)' }}>{lead.state_}</span>
+                  {STOPPED_STATES.includes(lead.state_) && leadStateReason(lead) && (
+                    <span className="block text-xs" style={{ color: 'var(--text-dim)' }}>
+                      {leadStateReason(lead)}
+                    </span>
+                  )}
                 </span>
                 <button className="btn btn-ghost text-xs" onClick={() => devDial(lead._id)} title="Places one AI-fronted call to this lead now (real phone call when telephony is SIP)">
                   AI dial now
@@ -370,6 +378,9 @@ export default function CampaignDetailPage() {
     </div>
   );
 }
+
+/** States the dialer won't call again on its own — the ones where "why" matters. */
+const STOPPED_STATES = ['EXHAUSTED', 'DNC', 'NURTURE'];
 
 function Field({ label, value, onSave }: { label: string; value: number; onSave: (v: string) => void }) {
   const [draft, setDraft] = useState(String(value));

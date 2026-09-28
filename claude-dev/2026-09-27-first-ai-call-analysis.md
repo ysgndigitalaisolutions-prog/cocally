@@ -111,3 +111,17 @@ Watch on the first live call: the gap between the customer's "hello" and the dis
 - Tenant OWNER/ADMIN: new "Usage & billing" (/usage): usage figures, the running bill, band and distance to the next, advance balance + history, per-campaign breakdown, issued invoices (printable). Never shows CoCally cost or drafts.
 - Verified on in-memory Mongo: 12,000 AI min + 10,000 dials → Growth, ₹1,03,000 − ₹50,000 advance + GST = ₹62,540; void restores credit; monthly rule expires the unused advance. API boots with the new module; web `next build` passes.
 - Quote wording still to settle with the client: carry-forward (Terms) vs same-month (Section 2); implemented carry-forward, switchable per tenant.
+
+## Ops console (28 Sep)
+
+Full guide: `claude-dev/2026-09-28-ops-console.md`.
+
+Replaced the in-app Platform screen and the `PLATFORM_ADMIN_EMAILS` allow-list with a separate console at `/ops`:
+
+- **Operators** (`operators` collection): not tenant users; own sign-in at `/ops/login`; TOTP enrolment forced at first sign-in; tokens signed with a key derived from JWT_SECRET (`OPS_JWT_SECRET`), so tenant and ops tokens can't cross. First operator via `./deploy/gcp/create-operator.sh --email … --name …` (one-time link, 48 h); more from Ops → Settings.
+- **API** `/api/v1/operator/*` (`modules/operator`): overview + alerts (overdue invoices, paused/deactivated, billing not confirmed, usage above advance), tenants (create with owner invite, edit, pause, deactivate → sessions killed + login refused), tenant users (invite, reset link, reset 2FA, roles, deactivate; last owner protected; phones unique across tenants), campaigns (read-only), billing (moved from /platform), invoices across tenants, calls across tenants (filters, per-call cost and billed amount, redacted transcript by default, unredacted + recording playback audited), rate card, seller details, operators, audit.
+- **Audit**: `opsauditlogs` for every operator action; tenant-affecting ones mirrored into the tenant's `auditlogs` as `ops.*` by "<email> (CoCally)".
+- **Web** `/ops` (own layout and token key `cocally.ops.token`): Overview, Tenants (+ New), tenant page tabs (Billing & invoices, Calls, Users, Campaigns, Settings, Our cost, Audit), Calls + call detail, Invoices + print, Audit log, Settings (rate card, sender details, operators, my account). Tenant "Usage & billing" (/usage) stays.
+- Verified: 48-step HTTP end-to-end test on in-memory Mongo (all pass), API boots, web `next build` passes.
+- Recording playback needs the bucket writer SA to read too: `roles/storage.objectViewer` on `gs://cocally-509318-recordings` (not yet granted).
+- The YSGN tenant is CoCally's own test tenant; each client BPO gets its own tenant from the console.

@@ -66,17 +66,28 @@ The Deploy workflows are gated on the repository variable `DEPLOY_TARGET`, which
 
 Push to `prod`, or run the matching workflow manually: **Deploy (VM)** or **Deploy (Cloud Run)**. Each ends with a health gate on `/api/v1/ops/ready`. The VM path logs the VM into GHCR with the job's short-lived token to pull, then logs out.
 
-## 4. Provision the first tenant
+## 4. Ops console and tenants
 
-Fill `TENANT_*` and `OWNER_*` in `.env`, then:
+CoCally staff run everything across tenants from the **ops console** at
+`https://<domain>/ops`: tenants, their users, billing and invoices, calls,
+voice, limits, rate card and operators. Operators are separate accounts from
+tenant users (own sign-in, own session, authenticator always required).
+Full guide: `claude-dev/2026-09-28-ops-console.md`.
+
+Create the first operator once (after the first deploy):
 
 ```bash
-./deploy/gcp/provision-tenant.sh
+./deploy/gcp/create-operator.sh --email you@company.com --name "Your Name"
 ```
 
-It prints the owner's one-time invite link (48 h). Send it over WhatsApp or SMS. The owner sets a password, signs in with their phone number, enrols an authenticator app, and invites everyone else from **Users & access**.
+It prints a one-time link (48 h) to set a password. At the first sign-in on
+`/ops/login` the console asks you to scan an authenticator QR code. Further
+operators are added from Ops → Settings.
 
-On Cloud Run, run the same command as a Cloud Run job with the api image (`--command node --args apps/api/dist/seeds/provision-tenant.js,...`).
+Tenants are created from Ops → Tenants → New tenant. That creates the tenant,
+its first client and the Owner, and shows the Owner's one-time link. The owner
+signs in at `/login` with their phone number and must enrol an authenticator.
+(`provision-tenant.js` still exists for scripted setups.)
 
 ## 5. Day-to-day (VM)
 
@@ -109,6 +120,7 @@ Recording must stay off until `RECORDING_BUCKET` is set; the VM keeps a local co
 - Deactivating a user, changing a password, resetting an authenticator or changing roles bumps the user's token version, which signs out every existing session immediately.
 - Every sign-in, failed attempt, invite, reset and authenticator event is in the append-only audit log, visible to the Owner and Admin under Users & access.
 - Login is limited to 10 attempts per minute per IP.
+- CoCally operators are separate accounts on `/ops` (email + password + authenticator, always). Their sessions cannot call tenant routes and tenant sessions cannot call `/api/v1/operator/*`. Deactivating a tenant from the console signs out all its users at once and refuses their sign-in until it is reactivated. Every operator action is in the ops audit log, and those touching a tenant also appear in that tenant's own audit log.
 
 ## 7. What the API refuses in production
 

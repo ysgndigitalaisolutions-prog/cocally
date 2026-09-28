@@ -44,15 +44,22 @@ export class UsageService {
    * at the last transcript line + 30 s (or 2 min with no transcript), and no
    * call counts more than 30 min of AI or 4 h with a human.
    */
-  async usage(opts: { from: Date; to: Date; tenantId?: string; groupBy?: 'tenantId' | 'campaignId' }): Promise<Map<string, TenantUsage>> {
+  async usage(opts: {
+    from?: Date;
+    to?: Date;
+    tenantId?: string;
+    callIds?: string[];
+    groupBy?: 'tenantId' | 'campaignId' | '_id';
+  }): Promise<Map<string, TenantUsage>> {
     const { from, to } = opts;
     const groupBy = opts.groupBy ?? 'tenantId';
     const ms = (a: unknown, b: unknown) => ({ $max: [0, { $subtract: [a, b] }] });
     const pipeline: PipelineStage[] = [
       {
         $match: {
-          startedAt: { $gte: from, $lt: to },
+          ...(from && to ? { startedAt: { $gte: from, $lt: to } } : {}),
           ...(opts.tenantId ? { tenantId: new Types.ObjectId(opts.tenantId) } : {}),
+          ...(opts.callIds ? { _id: { $in: opts.callIds.map((id) => new Types.ObjectId(id)) } } : {}),
         },
       },
       {

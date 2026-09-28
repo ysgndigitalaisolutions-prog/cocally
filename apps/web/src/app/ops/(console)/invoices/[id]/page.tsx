@@ -1,20 +1,20 @@
 'use client';
 
-import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import InvoiceDocument from '@/components/billing/InvoiceDocument';
-import { api } from '@/lib/api';
 import type { Invoice } from '@/lib/billing';
+import { opsApi } from '@/lib/ops-api';
 
-export default function PlatformInvoicePage() {
+export default function OpsInvoicePage() {
   const { id } = useParams<{ id: string }>();
+  const router = useRouter();
   const [invoice, setInvoice] = useState<Invoice | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api
-      .get<Invoice>(`/platform/invoices/${id}`)
+    opsApi
+      .get<Invoice>(`/invoices/${id}`)
       .then((r) => setInvoice(r.data))
       .catch(() => setError('Invoice not found.'));
   }, [id]);
@@ -22,7 +22,7 @@ export default function PlatformInvoicePage() {
   return (
     <div className="space-y-4">
       <div className="no-print flex items-center justify-between">
-        <Link href="/platform" className="text-sm hover:underline" style={{ color: 'var(--text-dim)' }}>← Platform</Link>
+        <button className="text-sm hover:underline" style={{ color: 'var(--text-dim)' }} onClick={() => router.back()}>← Back</button>
         {invoice && <button className="btn btn-primary" onClick={() => window.print()}>Print / save PDF</button>}
       </div>
       {error && <p style={{ color: 'var(--bad)' }}>{error}</p>}

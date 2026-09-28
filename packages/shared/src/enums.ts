@@ -208,6 +208,7 @@ export function sipStatusToEndReason(status: number | undefined): CallEndReason 
       return 'BUSY';
     case 408: // Request Timeout
     case 480: // Temporarily Unavailable
+    case 487: // Request Terminated — our ring timeout cancelled the INVITE
       return 'NO_ANSWER';
     case 404: // Not Found
     case 410: // Gone

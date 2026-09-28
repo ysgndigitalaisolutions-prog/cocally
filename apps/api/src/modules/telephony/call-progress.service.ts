@@ -623,11 +623,16 @@ export class CallProgressService {
       case 'NO_ANSWER':
       case 'TIMEOUT':
         return 'NO_ANSWER';
+      case 'CARRIER_BLOCKED':
+        // 603 is mostly the person tapping "decline" (607/608 are spam
+        // filters). Either way the number works — retry it like a busy line
+        // rather than burning the lead on its only DISCONNECTED attempt. CLI
+        // health still sees the CARRIER_BLOCKED end reason and rotates numbers.
+        return 'BUSY';
       case 'INVALID_NUMBER':
       case 'REJECTED':
-      case 'CARRIER_BLOCKED':
-        // Not retryable at the same cadence as a miss: the number is bad or the
-        // network is refusing us, and hammering it makes both worse.
+        // Not retryable at the same cadence as a miss: the number is bad, and
+        // hammering it gets our CLIs flagged.
         return 'DISCONNECTED';
       case 'CONGESTION':
       case 'TRUNK_ERROR':

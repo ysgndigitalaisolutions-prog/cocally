@@ -333,6 +333,30 @@ export class BillingService {
     return invoices.map((i) => this.invoiceView(i));
   }
 
+  /** Invoices across tenants for the ops console, newest first, with the tenant's name. */
+  async listAllInvoices(opts: { status?: string; tenantId?: string; overdueOnly?: boolean } = {}) {
+    const q: Record<string, unknown> = {};
+    if (opts.status) q.status = opts.status;
+    if (opts.tenantId) q.tenantId = new Types.ObjectId(opts.tenantId);
+    if (opts.overdueOnly) {
+      q.status = 'ISSUED';
+      q.dueAt = { $lt: new Date() };
+    }
+    const invoices = await this.invoiceModel.find(q).sort({ period: -1, createdAt: -1 }).limit(500).lean().exec();
+    const tenants = await this.tenantModel
+      .find({ _id: { $in: [...new Set(invoices.map((i) => i.tenantId.toString()))].map((id) => new Types.ObjectId(id)) } })
+      .select('name')
+      .lean()
+      .exec();
+    const nameOf = new Map(tenants.map((t) => [t._id.toString(), t.name]));
+    const now = Date.now();
+    return invoices.map((i) => ({
+      ...this.invoiceView(i),
+      tenantName: nameOf.get(i.tenantId.toString()) ?? '—',
+      overdue: i.status === 'ISSUED' && Boolean(i.dueAt) && i.dueAt!.getTime() < now,
+    }));
+  }
+
   async getInvoice(id: string, tenantId?: string) {
     if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Invoice not found');
     const inv = await this.invoiceModel.findById(id).lean().exec();

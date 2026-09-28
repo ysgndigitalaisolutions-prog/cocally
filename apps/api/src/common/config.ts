@@ -78,12 +78,6 @@ const envSchema = z.object({
    */
   LIVEKIT_AGENT_NAME: z.string().default('cocally-ai'),
   /**
-   * Comma-separated emails of CoCally's own operators. They see the Platform
-   * screen (every tenant's usage, cost, voice and billing). Deliberately not a
-   * role: no tenant admin can grant it.
-   */
-  PLATFORM_ADMIN_EMAILS: z.string().default(''),
-  /**
    * Carrier "tech prefix" prepended to the dialled digits on outbound calls,
    * e.g. 1701 → +61412000123 is sent as 170161412000123 (no plus). Blank for
    * carriers that take plain E.164 (Twilio).
@@ -194,9 +188,6 @@ export const config = {
     sipDialPrefix: parsed.SIP_DIAL_PREFIX?.trim() || undefined,
     agentName: parsed.LIVEKIT_AGENT_NAME,
   },
-  platformAdminEmails: parsed.PLATFORM_ADMIN_EMAILS.split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean),
   twilio: {
     accountSid: parsed.TWILIO_ACCOUNT_SID,
     authToken: parsed.TWILIO_AUTH_TOKEN,

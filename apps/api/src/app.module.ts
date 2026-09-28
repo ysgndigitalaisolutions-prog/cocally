@@ -12,6 +12,7 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { PlatformModule } from './modules/platform/platform.module';
+import { OperatorModule } from './modules/operator/operator.module';
 import { CampaignsModule } from './modules/campaigns/campaigns.module';
 import { CountryPacksModule } from './modules/country-packs/country-packs.module';
 import { EngineModule } from './modules/engine/engine.module';
@@ -60,6 +61,7 @@ import { WorkspaceModule } from './modules/workspace/workspace.module';
     OpsModule,
     ReportsModule,
     PlatformModule,
+    OperatorModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

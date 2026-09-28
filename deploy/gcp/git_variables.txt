@@ -1,6 +1,6 @@
 # GitHub Actions repository VARIABLES for ysgndigitalaisolutions-prog/cocally (Variables tab, not Secrets).
 # Set at: https://github.com/ysgndigitalaisolutions-prog/cocally/settings/variables/actions
-# Written by deploy/gcp/setup.sh on 2026-09-27T17:03:47Z; rewritten on every run.
+# Written by deploy/gcp/setup.sh on 2026-09-28T04:25:44Z; rewritten on every run.
 
 DEPLOY_TARGET      = vm
 GCP_PROJECT_ID     = cocally-509318

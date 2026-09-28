@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { leadStateReason } from '@/lib/lead-state';
 
 interface TimelineEntry {
   at: string;
@@ -23,6 +24,7 @@ interface LeadDetail {
   postcode?: string;
   timezone: string;
   state_: string;
+  stateReason?: string;
   score: number;
   attempts: number;
   source?: string;
@@ -255,6 +257,11 @@ export function LeadDrawer({
                   score {lead.score} · {lead.attempts} attempt{lead.attempts === 1 ? '' : 's'} · {lead.timezone}
                 </span>
               </div>
+            )}
+            {lead && leadStateReason(lead) && (
+              <p className="mt-1 text-xs" style={{ color: 'var(--text-dim)' }}>
+                {leadStateReason(lead)}
+              </p>
             )}
           </div>
           <button className="btn btn-ghost text-sm" onClick={onClose} aria-label="Close">✕</button>

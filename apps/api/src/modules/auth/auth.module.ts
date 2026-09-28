@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { Tenant, TenantSchema } from '../../schemas/tenant.schema';
 import { User, UserSchema } from '../../schemas/user.schema';
 import { UserInvite, UserInviteSchema } from '../../schemas/user-invite.schema';
 import { AuditModule } from '../audit/audit.module';
@@ -10,6 +11,7 @@ import { AuthService } from './auth.service';
   imports: [MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },
       { name: UserInvite.name, schema: UserInviteSchema },
+      { name: Tenant.name, schema: TenantSchema },
     ]), AuditModule],
   controllers: [AuthController],
   providers: [AuthService],

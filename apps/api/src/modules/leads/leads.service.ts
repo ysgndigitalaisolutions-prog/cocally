@@ -30,10 +30,32 @@ const DEFAULT_RETRY_MATRIX: RetryRule[] = [
   { outcome: 'BUSY', delayMinutes: 30, shiftTimeBand: false, maxAttempts: 5 },
   { outcome: 'NO_ANSWER', delayMinutes: 240, shiftTimeBand: true, maxAttempts: 4 },
   { outcome: 'ANSWERED_VOICEMAIL', delayMinutes: 1440, shiftTimeBand: true, maxAttempts: 3 },
+  { outcome: 'ANSWERED_IVR', delayMinutes: 240, shiftTimeBand: true, maxAttempts: 3 },
   { outcome: 'DISCONNECTED', delayMinutes: 0, shiftTimeBand: false, maxAttempts: 1 },
   { outcome: 'FAILED', delayMinutes: 60, shiftTimeBand: false, maxAttempts: 3 },
   { outcome: 'ABANDONED', delayMinutes: 5, shiftTimeBand: false, maxAttempts: 999 },
 ];
+
+/**
+ * Testing switch: while false, a lead is never exhausted for running out of
+ * attempts — it keeps retrying on its rule's delay. Flip back to true before
+ * dialling real lists.
+ */
+const ENFORCE_ATTEMPT_LIMITS = false;
+
+/** How each call outcome reads to a supervisor when it is the reason a lead stopped being dialled. */
+const OUTCOME_LABELS: Record<CallOutcome, string> = {
+  ANSWERED_HUMAN: 'Answered',
+  ANSWERED_VOICEMAIL: 'Went to voicemail',
+  ANSWERED_IVR: 'Reached an automated menu',
+  BUSY: 'Busy or declined the call',
+  NO_ANSWER: 'No answer',
+  DISCONNECTED: 'Number unreachable or invalid',
+  FAILED: 'Call failed on our side',
+  CALLBACK_REQUESTED: 'Asked for a callback',
+  OPT_OUT: 'Asked not to be called',
+  ABANDONED: 'Answered, but no agent was free',
+};
 
 @Injectable()
 export class LeadsService {
@@ -300,7 +322,13 @@ export class LeadsService {
     if (!lead) return;
 
     const campaign = lead.campaignId ? await this.campaignModel.findById(lead.campaignId).lean().exec() : null;
-    const matrix = campaign?.retryMatrix?.length ? campaign.retryMatrix : DEFAULT_RETRY_MATRIX;
+    // A campaign's rules override the defaults per outcome; an outcome the
+    // campaign didn't list falls back to the default rather than exhausting
+    // the lead — otherwise one trunk error (FAILED) kills it on first dial.
+    const matrix = [
+      ...(campaign?.retryMatrix ?? []),
+      ...DEFAULT_RETRY_MATRIX.filter((d) => !campaign?.retryMatrix?.some((r) => r.outcome === d.outcome)),
+    ];
 
     // A FAILED outcome is our problem (trunk/congestion), not the lead's:
     // it must not shorten the lead's life the way a genuine miss does.
@@ -314,7 +342,7 @@ export class LeadsService {
     };
     const terminal = terminalStates[outcome];
     if (terminal) {
-      this.transition(lead, terminal, `Outcome ${outcome}`);
+      this.transition(lead, terminal, OUTCOME_LABELS[outcome]);
       await lead.save();
       return;
     }
@@ -344,8 +372,16 @@ export class LeadsService {
     }
 
     const rule = matrix.find((r) => r.outcome === outcome);
-    if (!rule || lead.attempts >= rule.maxAttempts) {
-      this.transition(lead, 'EXHAUSTED', rule ? 'Max attempts reached' : `No retry rule for ${outcome}`);
+    // FAILED never counts as an attempt, so it can't be what uses the lead up.
+    if (!rule || (ENFORCE_ATTEMPT_LIMITS && outcome !== 'FAILED' && lead.attempts >= rule.maxAttempts)) {
+      const label = OUTCOME_LABELS[outcome];
+      this.transition(
+        lead,
+        'EXHAUSTED',
+        rule
+          ? `${label} — ${lead.attempts} of ${rule.maxAttempts} attempts used`
+          : `${label} — no retry rule for this outcome`,
+      );
       await lead.save();
       return;
     }
@@ -362,6 +398,7 @@ export class LeadsService {
 
   transition(lead: LeadDocument, to: LeadState, detail: string): void {
     lead.state_ = to;
+    lead.stateReason = detail;
     lead.timeline.push({ at: new Date(), kind: 'STATE_CHANGE', detail, state: to });
   }
 

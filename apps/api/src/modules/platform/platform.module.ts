@@ -6,10 +6,8 @@ import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
 import { PlatformSettings, PlatformSettingsSchema } from '../../schemas/platform-settings.schema';
 import { Tenant, TenantSchema } from '../../schemas/tenant.schema';
 import { User, UserSchema } from '../../schemas/user.schema';
-import { AuditModule } from '../audit/audit.module';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
-import { PlatformController } from './platform.controller';
 import { PlatformService } from './platform.service';
 import { UsageService } from './usage.service';
 
@@ -24,9 +22,9 @@ import { UsageService } from './usage.service';
       { name: CreditEntry.name, schema: CreditEntrySchema },
       { name: Invoice.name, schema: InvoiceSchema },
     ]),
-    AuditModule,
   ],
-  controllers: [PlatformController, BillingController],
+  controllers: [BillingController],
   providers: [PlatformService, BillingService, UsageService],
+  exports: [PlatformService, BillingService, UsageService],
 })
 export class PlatformModule {}

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { LeadDrawer } from '@/components/LeadDrawer';
 import { api } from '@/lib/api';
+import { leadStateReason } from '@/lib/lead-state';
 import { useAppStore } from '@/lib/store';
 
 interface Campaign {
@@ -20,6 +21,8 @@ interface Lead {
   suburb?: string;
   state?: string;
   state_: string;
+  stateReason?: string;
+  timeline?: { kind: string; detail?: string }[];
   score: number;
   attempts: number;
   nextAttemptAt?: string;
@@ -370,9 +373,15 @@ export default function LeadsPage() {
                   <span
                     className="rounded-full px-2 py-0.5 text-xs font-semibold"
                     style={{ background: 'var(--surface-2)', color: STATE_COLORS[lead.state_] ?? 'var(--text-dim)' }}
+                    title={leadStateReason(lead)}
                   >
                     {lead.state_}
                   </span>
+                  {['EXHAUSTED', 'DNC', 'NURTURE'].includes(lead.state_) && leadStateReason(lead) && (
+                    <span className="mt-1 block text-xs" style={{ color: 'var(--text-dim)' }}>
+                      {leadStateReason(lead)}
+                    </span>
+                  )}
                 </td>
                 <td className="p-3 text-xs">
                   {lead.ownerId ? (

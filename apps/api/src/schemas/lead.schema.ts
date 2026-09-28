@@ -116,6 +116,10 @@ export class Lead {
   @Prop({ type: String, enum: LEAD_STATES, default: 'FRESH', index: true })
   state_: LeadState;
 
+  /** Plain-English why for the current state ("Declined the call 5 times"), shown next to it in the UI. */
+  @Prop()
+  stateReason?: string;
+
   @Prop({ default: 0 })
   attempts: number;
 

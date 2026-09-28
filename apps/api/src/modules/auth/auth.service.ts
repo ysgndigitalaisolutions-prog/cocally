@@ -7,6 +7,7 @@ import { Model, Types } from 'mongoose';
 import { authenticator } from 'otplib';
 import { config } from '../../common/config';
 import { TWO_FACTOR_REQUIRED_ROLES } from '../../common/auth/jwt-auth.guard';
+import { Tenant, TenantDocument } from '../../schemas/tenant.schema';
 import { User, UserDocument } from '../../schemas/user.schema';
 import { UserInvite, UserInviteDocument, type InvitePurpose } from '../../schemas/user-invite.schema';
 import { AuditService } from '../audit/audit.service';
@@ -54,6 +55,7 @@ export class AuthService {
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     @InjectModel(UserInvite.name) private readonly inviteModel: Model<UserInviteDocument>,
+    @InjectModel(Tenant.name) private readonly tenantModel: Model<TenantDocument>,
     private readonly jwtService: JwtService,
     private readonly audit: AuditService,
     private readonly userState: UserStateService,
@@ -86,6 +88,7 @@ export class AuthService {
     };
 
     if (!user || !user.active) return fail('unknown_or_inactive');
+    if (!(await this.tenantActive(user.tenantId))) return fail('tenant_deactivated', user.tenantId.toString(), user._id.toString());
     if (!user.passwordHash) return fail('password_not_set', user.tenantId.toString(), user._id.toString());
 
     const valid = await argon2.verify(user.passwordHash, password).catch(() => false);
@@ -295,6 +298,11 @@ export class AuthService {
     if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
       throw new BadRequestException('Password must contain both letters and numbers');
     }
+  }
+
+  private async tenantActive(tenantId: Types.ObjectId): Promise<boolean> {
+    const tenant = await this.tenantModel.findById(tenantId).select('active').lean().exec();
+    return tenant?.active !== false;
   }
 
   private async findByIdentifier(identifier: string): Promise<UserDocument | null> {

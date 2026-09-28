@@ -28,6 +28,12 @@ describe('sipStatusToEndReason', () => {
     expect(sipStatusToEndReason(480)).toBe('NO_ANSWER');
   });
 
+  it('treats a cancelled ring (487) as NO_ANSWER, not a rejection', () => {
+    // 487 is what comes back when we give up ringing — the phone rang out, it
+    // was not refused, so it must not be retried like a dead number.
+    expect(sipStatusToEndReason(487)).toBe('NO_ANSWER');
+  });
+
   it('maps dead numbers to INVALID_NUMBER so they stop being retried', () => {
     expect(sipStatusToEndReason(404)).toBe('INVALID_NUMBER');
     expect(sipStatusToEndReason(410)).toBe('INVALID_NUMBER');

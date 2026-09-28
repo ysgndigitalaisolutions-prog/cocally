@@ -30,7 +30,7 @@ export interface NavItem {
 }
 
 export interface NavSection {
-  id: 'desk' | 'operate' | 'setup' | 'account' | 'platform';
+  id: 'desk' | 'operate' | 'setup' | 'account';
   label: string;
   /** Collapsible sections start closed; the others always show their items. */
   collapsible?: boolean;

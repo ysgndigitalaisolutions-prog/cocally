@@ -398,7 +398,7 @@ export class CallsController {
           this.leads.transition(lead, 'NURTURE', `${dto.disposition} by ${user.email}`);
           break;
         case 'WRONG_NUMBER':
-          this.leads.transition(lead, 'EXHAUSTED', 'Wrong number');
+          this.leads.transition(lead, 'EXHAUSTED', `Wrong number (by ${user.email})`);
           break;
         case 'FOLLOW_UP':
         default:
