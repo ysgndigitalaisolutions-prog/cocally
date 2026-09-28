@@ -63,6 +63,7 @@ class TurnMetricsDto {
   @IsInt() @Min(0) totalMs: number;
   @IsOptional() @IsString() @MaxLength(80) llmModel?: string;
   @IsOptional() @IsString() @MaxLength(40) ttsProvider?: string;
+  @IsOptional() @IsString() @MaxLength(40) sttModel?: string;
 }
 
 class ComplianceEventDto {
@@ -174,7 +175,11 @@ export class EngineController {
       '',
       'CONVERSATION RULES:',
       '- Speak naturally, one short question at a time. Never sound like a form.',
-      `- Your FIRST turn must disclose you are an AI and the call may be recorded: "${aiDisclosure} ${recordingDisclosure}" Then ask if now is a good time.`,
+      // The worker speaks the scripted disclosure itself before the LLM's first
+      // turn (see `disclosureLine`). Telling the model to disclose "on its first
+      // turn" made it re-introduce itself on turn two of real calls (28 Sep).
+      `- You have ALREADY introduced yourself as an AI assistant for ${campaign.name} and said the call may be recorded. Never repeat that introduction unless the person asks who you are; if they do, answer in one short sentence: "${aiDisclosure}"`,
+      '- Keep every reply under 25 words: at most one short acknowledgement, then one question. Short replies are what make you feel quick and natural on the phone.',
       '- Never re-ask something already answered.',
       '- If they object, acknowledge warmly and use the playbook below; never argue.',
       '- When the person clearly qualifies and wants to proceed, call the request_transfer tool to bring in a human specialist.',
@@ -223,8 +228,14 @@ export class EngineController {
             },
           },
           $min: { 'timings.ttsFirstByte': dto.ttsTtfbMs, 'timings.sttFirstPartial': dto.transcriptionDelayMs },
-          ...(dto.llmModel || dto.ttsProvider
-            ? { $set: { ...(dto.llmModel ? { 'providersUsed.llm': dto.llmModel } : {}), ...(dto.ttsProvider ? { 'providersUsed.tts': dto.ttsProvider } : {}) } }
+          ...(dto.llmModel || dto.ttsProvider || dto.sttModel
+            ? {
+                $set: {
+                  ...(dto.llmModel ? { 'providersUsed.llm': dto.llmModel } : {}),
+                  ...(dto.ttsProvider ? { 'providersUsed.tts': dto.ttsProvider } : {}),
+                  ...(dto.sttModel ? { 'providersUsed.stt': dto.sttModel } : {}),
+                },
+              }
             : {}),
         },
       )

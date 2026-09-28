@@ -78,6 +78,16 @@ ENGINE_SERVICE_TOKEN = os.getenv("ENGINE_SERVICE_TOKEN")
 LLM_MODEL = os.getenv("LLM_MODEL") or "qwen/qwen3.8-27b"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "160"))  # short spoken turns → TTS starts sooner
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | elevenlabs | cartesia
+# STT + turn-taking. "flux" (default) is Deepgram's conversational model: it
+# decides end-of-turn itself from the audio and words (~260 ms after the person
+# stops) and emits an *eager* end-of-turn earlier still, which the framework
+# uses to start the LLM before the turn is final. "nova" is the previous stack
+# (nova-2-phonecall + the local end-of-turn model): measured on 28 Sep it spent
+# ~450 ms per turn just waiting for the final transcript. Kept as a fallback.
+STT_MODEL = (os.getenv("STT_MODEL") or "flux").lower()  # flux | nova
+# Comma-separated words the STT should favour (brand/retailer names). Both
+# Deepgram models accept them; fixes "Simply Energy" -> "simply an async".
+STT_KEYTERMS = [k.strip() for k in (os.getenv("STT_KEYTERMS") or "").split(",") if k.strip()]
 TTS_VOICE = os.getenv("TTS_VOICE")  # provider-specific voice/model id; sensible default per provider
 NOISE_CANCELLATION = os.getenv("NOISE_CANCELLATION", "1") not in ("0", "false", "no")
 WORKER_IDLE_PROCESSES = int(os.getenv("WORKER_IDLE_PROCESSES", "2"))
@@ -964,6 +974,75 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
     return deepgram.TTS(model=TTS_VOICE or "aura-2-luna-en")
 
 
+def _build_stt():  # noqa: ANN202 — plugin STT types differ
+    """STT by env. Returns (stt, turn_handling) because the two are one decision:
+
+    flux  Deepgram Flux (`STTv2`). End-of-turn comes from the model itself, so
+          turn detection is "stt" and the local end-of-turn model is not used.
+          `eager_eot_threshold` makes Flux flag a *probable* end of turn early;
+          the framework starts LLM + TTS on it (preemptive generation) and
+          throws the draft away if the person carries on. `eot_timeout_ms` is
+          the cap on a mid-sentence pause (Flux default 3 s — too long on a
+          call; 1.5 s matches the previous max_delay budget).
+    nova  nova-2-phonecall + the local EnglishModel end-of-turn detector: the
+          pre-28-Sep stack, for A/B or if Flux is unavailable on the key.
+    """
+    keyterm_kw = {"keyterm": STT_KEYTERMS} if STT_KEYTERMS else {}
+    if STT_MODEL == "flux":
+        try:
+            stt_engine = deepgram.STTv2(
+                model="flux-general-en",
+                eager_eot_threshold=0.5,
+                eot_threshold=0.7,
+                eot_timeout_ms=1500,
+                **keyterm_kw,
+            )
+            turn_handling = {
+                "turn_detection": "stt",
+                "endpointing": {
+                    # Flux has already decided the turn is over when END_OF_SPEECH
+                    # arrives; the framework still sleeps `min_delay` measured from
+                    # the VAD's end-of-speech anchor. 0.1 s keeps a hair of margin
+                    # for the last STT packet without adding a visible pause.
+                    "mode": "fixed",
+                    "min_delay": 0.1,
+                    "max_delay": 1.5,
+                },
+                "interruption": {"mode": "adaptive", "min_duration": 0.3},
+                "preemptive_generation": {"enabled": True, "preemptive_tts": True},
+            }
+            return stt_engine, turn_handling
+        except Exception as e:  # noqa: BLE001 — never let a plugin gap take the floor down
+            logger.warning("Deepgram Flux unavailable (%s) — using nova-2-phonecall", e)
+    # nova-2-phonecall (not nova-2/nova-3 general) is Deepgram's model tuned for
+    # narrowband/noisy telephone audio — the generic model was observed stalling
+    # >20s waiting for a clean silence gap that a real phone line's background
+    # noise never gave it. utterance_end_ms turns on Deepgram's word-timing-based
+    # UtteranceEnd signal as a second, noise-robust path to finalize a turn.
+    stt_engine = deepgram.STT(
+        model="nova-2-phonecall", utterance_end_ms=1000, endpointing_ms=25, **keyterm_kw
+    )
+    turn_handling = {
+        # Word-level end-of-turn model: "they have finished" comes from the
+        # sentence, not from a silence timer.
+        "turn_detection": EnglishModel(),
+        "endpointing": {
+            "mode": "dynamic",  # adapts to this caller's pace instead of one fixed wait
+            "min_delay": 0.3,  # framework default 0.5s — snappier turn-taking
+            "max_delay": 1.5,  # was 2.0: the wait when the model thinks they are mid-thought
+        },
+        "interruption": {
+            "mode": "adaptive",  # ML backchannel detection ("yeah"/"hmm" won't cut the agent off)
+            "min_duration": 0.3,  # framework default 0.5s — stop audio faster on a real interruption
+        },
+        "preemptive_generation": {
+            "enabled": True,  # start the LLM before the turn is even confirmed
+            "preemptive_tts": True,  # also start speaking before confirmation — biggest first-audio win
+        },
+    }
+    return stt_engine, turn_handling
+
+
 # OpenAI-compatible providers. Cerebras and Groq serve the same two open models
 # under different names; each provider rate-limits per model, so every entry
 # below is a separate bucket.
@@ -1026,7 +1105,13 @@ def _make_llm():
         raise RuntimeError("no LLM provider key set (CEREBRAS_API_KEY or GROQ_API_KEY)")
     logger.info("LLM chain: %s", " -> ".join(f"{p}:{_PROVIDERS[p]['models'][f]}" for p, f in chain))
     instances = [_openai_compat_llm(p, f) for p, f in chain]
-    return instances[0] if len(instances) == 1 else _llm.FallbackAdapter(instances)
+    if len(instances) == 1:
+        return instances[0]
+    # attempt_timeout bounds the wait for the FIRST token from one provider
+    # before the next one is tried (framework default 5 s). Cerebras' first
+    # token is 350-900 ms on real calls, so 2.5 s is >2x its p95 and turns a
+    # stalled provider into ~3 s of dead air instead of 5-6 s.
+    return _llm.FallbackAdapter(instances, attempt_timeout=2.5, retry_interval=0.2)
 
 
 def prewarm(proc: agents.JobProcess) -> None:
@@ -1038,7 +1123,11 @@ def prewarm(proc: agents.JobProcess) -> None:
         # missing a quiet speaker; short min-silence lets endpointing be fast.
         activation_threshold=0.55,
         min_speech_duration=0.05,
-        min_silence_duration=0.35,
+        # 250 ms: the VAD's end-of-speech is the zero point every end-of-turn
+        # delay is measured from, and it also gates barge-in. Flux/the EOU
+        # model decide whether the person is actually done, so this only needs
+        # to bridge the gap between two words, not two sentences.
+        min_silence_duration=0.25,
     )
     # NOTE: the turn-detector model is NOT built here. In livekit-agents 1.6 its
     # constructor needs the job's inference executor (get_job_context()), so
@@ -1088,52 +1177,25 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if brief
         else "Greet the person, give the AI + recording disclosure in one sentence, and ask if now is a good moment."
     )
-    logger.info("starting agent (call=%s, brief=%s, llm=%s:%s, tts=%s)", call_id, bool(brief), LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER)
+    logger.info("starting agent (call=%s, brief=%s, stt=%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER)
 
     tts_engine = _build_tts()
     disclosure = (brief or {}).get("disclosureLine")
 
+    stt_engine, turn_handling = _build_stt()
     session = AgentSession(
-        # Groq (OpenAI-compatible endpoint) for low-latency LLM; Deepgram for
-        # STT + Aura TTS. See LLM_MODEL for the model choice. Reasoning is
-        # switched off/low explicitly: the plugin only does that for OpenAI's
-        # own model names, and hidden thinking tokens are dead air on a call.
-        # `openai.LLM.with_groq` was removed from the plugin
-        # (livekit-agents 1.6.x) — built manually via base_url instead.
-        # nova-2-phonecall (not nova-2/nova-3 general) is Deepgram's model
-        # tuned for narrowband/noisy telephone audio — the generic model was
-        # observed stalling >20s waiting for a clean silence gap that a real
-        # phone line's background noise never gave it. utterance_end_ms turns
-        # on Deepgram's word-timing-based UtteranceEnd signal as a second,
-        # noise-robust path to finalize a turn instead of relying solely on
-        # endpointing's raw-silence VAD, which is exactly what stalled.
-        stt=deepgram.STT(model="nova-2-phonecall", utterance_end_ms=1000, endpointing_ms=25),
+        # Cerebras/Groq (OpenAI-compatible endpoints) for the LLM — see
+        # _make_llm. Reasoning is switched off/low explicitly: hidden thinking
+        # tokens are dead air on a call. STT + turn-taking come from _build_stt
+        # (Deepgram Flux by default); TTS from _build_tts.
+        stt=stt_engine,
         llm=_make_llm(),
         tts=tts_engine,
         vad=ctx.proc.userdata["vad"],
-        # Uncompromising-on-latency tuning. The framework already implements
-        # the full VAD-barge-in / cancellable-generation / adaptive-backchannel
-        # pattern internally (confirmed: "adaptive interruption detector" and
-        # "using preemptive generation" already fire per-turn) — these knobs
-        # tune it, not reimplement it.
-        turn_handling={
-            # Word-level end-of-turn model (prewarmed): "they have finished"
-            # comes from the sentence, not from a silence timer.
-            "turn_detection": EnglishModel(),
-            "endpointing": {
-                "mode": "dynamic",  # adapts to this caller's pace instead of one fixed wait
-                "min_delay": 0.3,  # framework default 0.5s — snappier turn-taking
-                "max_delay": 2.0,  # framework default 3.0s — cap worst-case wait
-            },
-            "interruption": {
-                "mode": "adaptive",  # ML backchannel detection ("yeah"/"hmm" won't cut the agent off)
-                "min_duration": 0.3,  # framework default 0.5s — stop audio faster on a real interruption
-            },
-            "preemptive_generation": {
-                "enabled": True,  # start the LLM before the turn is even confirmed
-                "preemptive_tts": True,  # also start speaking before confirmation — biggest first-audio win
-            },
-        },
+        # The framework already implements the full VAD-barge-in /
+        # cancellable-generation / adaptive-backchannel pattern internally;
+        # these knobs tune it, not reimplement it.
+        turn_handling=turn_handling,
     )
 
     # Per-turn latency budget: log a warning the moment any stage blows past
@@ -1158,6 +1220,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             "totalMs": round((turn.get("eou", 0) + turn.get("llm", 0) + turn.get("tts", 0)) * 1000),
             "llmModel": LLM_MODEL,
             "ttsProvider": TTS_PROVIDER,
+            "sttModel": STT_MODEL,
         }
         turn.clear()
         await _post_metrics(call_id, payload)
