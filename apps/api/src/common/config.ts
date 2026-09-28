@@ -104,6 +104,12 @@ const envSchema = z.object({
   RECORDING_S3_ACCESS_KEY: optionalString(),
   RECORDING_S3_SECRET: optionalString(),
   RECORDING_S3_ENDPOINT: optionalString(),
+  /**
+   * Google Cloud service-account key (JSON, or base64 of the JSON). When set,
+   * Egress uploads natively to GCS instead of through the S3 interop API —
+   * GCS rejects the default S3 checksums the Egress uploader sends.
+   */
+  RECORDING_GCP_CREDENTIALS: optionalString(),
 
   // --- ACMA Do Not Call Register ---------------------------------------
   /**
@@ -198,6 +204,7 @@ export const config = {
     s3AccessKey: parsed.RECORDING_S3_ACCESS_KEY,
     s3Secret: parsed.RECORDING_S3_SECRET,
     s3Endpoint: parsed.RECORDING_S3_ENDPOINT,
+    gcpCredentials: parsed.RECORDING_GCP_CREDENTIALS,
   },
   dncr: {
     enabled: parsed.DNCR_ENABLED,

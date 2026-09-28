@@ -732,6 +732,31 @@ async def _wait_for_live_audio(ctx: agents.JobContext, timeout: float = 45.0) ->
     by a mid-conversation greeting or nothing at all.
     """
     participant = await ctx.wait_for_participant()
+
+    if getattr(participant, "kind", None) == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        # A phone leg publishes its audio track while the phone is still
+        # ringing (ringback and carrier early media flow on it), so the track
+        # alone says nothing about pickup. LiveKit stamps the participant with
+        # `sip.callStatus`; only "active" means somebody answered. Waiting on
+        # the track instead had the greeting start 12–16 s before pickup on
+        # every real call.
+        if participant.attributes.get("sip.callStatus") == "active":
+            return
+        answered = asyncio.Event()
+
+        def _on_attrs(changed: dict, p: rtc.Participant) -> None:
+            if p.identity == participant.identity and changed.get("sip.callStatus") == "active":
+                answered.set()
+
+        ctx.room.on("participant_attributes_changed", _on_attrs)
+        try:
+            await asyncio.wait_for(answered.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("%s never reported sip.callStatus=active in %.0fs — speaking anyway", participant.identity, timeout)
+        finally:
+            ctx.room.off("participant_attributes_changed", _on_attrs)
+        return
+
     for pub in participant.track_publications.values():
         if pub.kind == rtc.TrackKind.KIND_AUDIO and pub.track is not None:
             return
@@ -1022,24 +1047,6 @@ def prewarm(proc: agents.JobProcess) -> None:
     # the entrypoint is cheap.
 
 
-async def _presynthesize(tts, text: str) -> list[rtc.AudioFrame]:  # noqa: ANN001
-    """Render a fixed line to audio ahead of time so it can play the instant
-    the customer picks up, instead of paying a TTS round trip on "hello"."""
-    frames: list[rtc.AudioFrame] = []
-    try:
-        async for chunk in tts.synthesize(text):
-            frames.append(chunk.frame)
-    except Exception as e:  # noqa: BLE001 — fall back to live synthesis
-        logger.warning("pre-synthesis failed (%s); the disclosure will be synthesised live", e)
-        return []
-    return frames
-
-
-async def _replay(frames: list[rtc.AudioFrame]) -> AsyncIterator[rtc.AudioFrame]:
-    for f in frames:
-        yield f
-
-
 async def entrypoint(ctx: agents.JobContext) -> None:
     await ctx.connect()
 
@@ -1084,9 +1091,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     logger.info("starting agent (call=%s, brief=%s, llm=%s:%s, tts=%s)", call_id, bool(brief), LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER)
 
     tts_engine = _build_tts()
-    # Render the disclosure while the phone is still ringing.
     disclosure = (brief or {}).get("disclosureLine")
-    disclosure_task = asyncio.create_task(_presynthesize(tts_engine, disclosure)) if disclosure else None
 
     session = AgentSession(
         # Groq (OpenAI-compatible endpoint) for low-latency LLM; Deepgram for
@@ -1298,21 +1303,17 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     if disclosure:
         handle = None
         try:
-            frames: list[rtc.AudioFrame] = []
-            if disclosure_task is not None:
-                try:
-                    frames = await asyncio.wait_for(disclosure_task, timeout=2.0)
-                except Exception:  # noqa: BLE001 — not ready in time: synthesise live
-                    frames = []
             t0 = time.monotonic()
-            handle = (
-                session.say(disclosure, audio=_replay(frames), allow_interruptions=False)
-                if frames
-                else session.say(disclosure, allow_interruptions=False)
-            )
+            # Live synthesis only. Replaying pre-rendered frames through
+            # `say(audio=...)` never resolved the handle on a real call (every
+            # call hit the 20 s timeout below), which pushed the silence
+            # watchdog out by 20 s and mislabelled live customers as SILENCE.
+            # ElevenLabs flash starts streaming in ~250 ms, so the pre-render
+            # bought almost nothing anyway.
+            handle = session.say(disclosure, allow_interruptions=False)
             await asyncio.wait_for(handle, timeout=20.0)
             spoken = True
-            logger.info("disclosure spoken (%s, %.2fs)", "pre-rendered" if frames else "live", time.monotonic() - t0)
+            logger.info("disclosure spoken (live, %.2fs)", time.monotonic() - t0)
         except asyncio.TimeoutError:
             # The audio was queued and has been playing for 20s; only the
             # bookkeeping await hung. Re-greeting here is what produced two
