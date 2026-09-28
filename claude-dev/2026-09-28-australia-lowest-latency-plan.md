@@ -103,6 +103,7 @@ The audio path adds to this: ~300 ms one way on Telvoq today, ~30 ms once Telvoq
 | 2 | Send Telvoq the two asks in §2 (POP, digest auth); open a LiveKit ticket for AU fixed IPs | Nithin | unblocks the audio-path fix |
 | 3 | As each lands: re-provision the Telvoq trunk (`destination_country=AU` once digest auth or AU ranges exist; Sydney POP address), switch `.env`, one AU test call | Nithin runs provisioning, Claude wires config | up to ~500 ms off the audio round trip |
 | 4 | Worker on its own VM | Nithin (infra) | removes jitter |
+| 4b | Flow state machine in the worker: transfer offered → accepted / declined / timed out → fixed approved line → close. Model never scripts past a failed action (see §10) | Claude | fixes the 19:08 hang-up-mid-sentence bug; removes an LLM round trip on transfer/close lines |
 | 5 | Enable Vertex AI on the project; Claude adds Gemini Flash-Lite as a provider; A/B on test calls | both | ~200 ms off LLM if it wins |
 | 6 | Optional: try Google TTS in Sydney with the client's ear on the voice | both | ~130 ms off TTS if the voice is accepted |
 
@@ -120,3 +121,25 @@ Watch `eou`, `llm`, `tts`, `total` per turn, and `providersUsed.stt/llm/tts` on 
 Twilio cannot provide an Indian caller ID: Indian rules don't allow foreign providers to originate calls with Indian numbers. For the demo, Twilio on the US number is acceptable (the client expects the call); upgrade the account from trial (removes the trial announcement and the verified-numbers-only restriction) and move the trunk to the Singapore edge for the audio path.
 
 For a real India pilot to customers who aren't expecting the call, a licensed Indian carrier is needed, with DLT registration of the business and its numbers. Same integration shape as Telvoq (SIP trunk into LiveKit, region pinned to `IN`, which has fixed IPs): candidates Exotel, Knowlarity, Ozonetel, Tata Communications, or the client's existing telecom setup if they already hold numbers and DLT registration (fastest). This is a licensing/paperwork track measured in weeks; start it as soon as the pilot is agreed.
+
+## 10. Review of the external "Cocally voice pipeline proposal" (received 29 Sep)
+
+A 21-page proposal written without inspecting our code, prompt, logs or listening to the recording (it says so). Generic LiveKit-stack guidance; about half is already shipped here. Kept for reference, not adopted as a plan.
+
+**Wrong or stale for us**
+- Assumes an AU pilot with AU customers and "start workers in Sydney". Pilot is India on Twilio; the worker already runs in Sydney. The real AU audio problem (Telvoq London POP, `destination_country=IN`) is not in it.
+- Does not know the actual defects: 17 s Flux finalisation stall, transfer-declined → script continues → hang-up mid-sentence, Groq free-tier 429s, Twilio trial limits.
+- Postgres + OpenTelemetry: we are on Atlas with per-turn metrics in `calls.timings.turns`. No migration.
+- Cartesia as TTS baseline: server-side ~equal to ElevenLabs Flash, US RTT dominates. No swap now.
+- "Start with preemptive generation disabled": measured to save a few hundred ms here; keep on.
+- p50 ≤ 600 ms gate: its own budget says overseas inference makes that unattainable. From Sydney with US providers, 0.8–1.0 s is the honest target (§5). Don't quote 600 ms to the client.
+
+**Already done**: Flux with eager EOT, endpointing delay below the 0.5 s default, keyterms, ≤25-word replies, LLM fallback chain, Gemini Flash-Lite as the next A/B, native voice models parked.
+
+**Adopted**
+1. Application owns the flow, not the model (row 4b in §7): state machine around transfer offered / accepted / declined / timed out and close, with fixed approved lines; only speech that actually played counts as said.
+2. Approved phrases for fixed lines (greeting and disclosure already use `session.say`; extend to "let me get a specialist" and the closing).
+3. Metrics: report tool-dependent turns separately from routine turns.
+4. Later (post-pilot): Speechmatics AU endpoint as an STT challenger for AU calls (cuts the US RTT per turn; needs its own turn-detection check since it doesn't own end-of-turn like Flux). Separate caller/agent recording tracks for analysis.
+
+**Ignored for now**: Retell/Vapi comparison, GPT Live, self-hosting, Nova Sonic 8-minute limit, the model catalogue tables.

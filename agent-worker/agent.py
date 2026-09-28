@@ -95,6 +95,10 @@ STT_MODEL = (os.getenv("STT_MODEL") or "flux").lower()  # flux | nova
 # stack, while Flux still delivers the fast transcript. Flux's eager end-of-turn
 # is not used in this mode.
 STT_TURN = (os.getenv("STT_TURN") or "vad").lower()  # vad | stt
+# Seconds after the customer stops speaking before the worker forces the turn
+# if no reply has started (see the stall guard in entrypoint). Normal turns
+# start a reply within ~1 s, so 2.5 s only ever fires on an STT stall.
+STALL_GUARD_S = float(os.getenv("STALL_GUARD_S", "2.5"))
 # Comma-separated words the STT should favour (brand/retailer names). Both
 # Deepgram models accept them; fixes "Simply Energy" -> "simply an async".
 STT_KEYTERMS = [k.strip() for k in (os.getenv("STT_KEYTERMS") or "").split(",") if k.strip()]
@@ -1248,13 +1252,48 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     # State transitions are the cheapest way to see a false interruption in the
     # log: agent speaking -> listening with no user transcript after it.
+    #
+    # Turn stall guard. Both Deepgram stacks have been seen holding a final
+    # transcript for 10-17 s on a noisy phone line (nova 28 Sep 17:59, Flux
+    # 28 Sep 19:08: "Gas, then." never finalised, the customer said "Hello?"
+    # after 16 s). The framework waits for the final transcript with no cap.
+    # So: when the VAD says the customer stopped and STALL_GUARD_S later the
+    # agent still has not started a reply and the customer has not resumed,
+    # commit the turn with whatever transcript exists (interim if the final
+    # never came). Worst case a stall now costs ~3 s, not a "Hello?".
+    stall_task: asyncio.Task | None = None
+
+    def _cancel_stall() -> None:
+        nonlocal stall_task
+        if stall_task is not None:
+            stall_task.cancel()
+            stall_task = None
+
+    async def _stall_guard() -> None:
+        await asyncio.sleep(STALL_GUARD_S)
+        if qualifier._transfer_triggered or qualifier._closing:
+            return
+        if session.user_state != "listening" or session.agent_state != "listening":
+            return
+        logger.warning("turn stall guard: no reply %.1fs after end of speech — committing user turn (call=%s)", STALL_GUARD_S, call_id)
+        try:
+            session.commit_user_turn(transcript_timeout=1.0, stt_flush_duration=1.0)
+        except Exception as e:  # noqa: BLE001 — the guard must never take the call down
+            logger.warning("stall guard commit failed: %s", e)
+
     @session.on("agent_state_changed")
     def _on_agent_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
         logger.info("agent %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
+        if getattr(event, "new_state", "") in ("thinking", "speaking"):
+            _cancel_stall()
 
     @session.on("user_state_changed")
     def _on_user_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
+        nonlocal stall_task
         logger.info("user %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
+        _cancel_stall()
+        if getattr(event, "old_state", "") == "speaking" and getattr(event, "new_state", "") == "listening":
+            stall_task = asyncio.create_task(_stall_guard())
 
     @session.on("metrics_collected")
     def _on_metrics(event) -> None:  # noqa: ANN001 — livekit-agents event type
