@@ -1310,7 +1310,7 @@ LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or ("cerebras" if os.getenv("CEREBRAS_
 #                        account (no key). Needs the Vertex AI API enabled and
 #                        roles/aiplatform.user on that account.
 #   LLM_PROVIDER=gemini  Gemini API with GOOGLE_API_KEY (no region choice).
-GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 VERTEX_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION") or "australia-southeast1"
 IS_GEMINI = LLM_PROVIDER in ("vertex", "gemini")
 # What the call record shows as the configured LLM.

@@ -57,3 +57,16 @@ Worker now supports `LLM_PROVIDER=vertex` (Gemini on Vertex AI, regional endpoin
 
 To switch on: enable `aiplatform.googleapis.com`, grant `roles/aiplatform.user` to the runtime service account, set `LLM_PROVIDER=vertex` in `deploy/gcp/.env`, run `setup.sh`, push to `prod`.
 Not verified: that the chosen model id is served in `australia-southeast1`, its first-token time there, and that it follows the script and calls the transfer tool as reliably as Qwen. First test calls decide.
+
+## Gemini benchmark, 30 Sep (Gemini API key, from India, call-sized prompt + transfer tool, thinking minimal)
+| Model | First token, warm median |
+|---|---|
+| Cerebras qwen-3.8-27b | 0.45 s |
+| Cerebras gpt-oss-120b | 0.48 s |
+| gemini-3.5-flash-lite | 1.04 s (0.98–1.47) |
+| gemini-3.1-flash-lite | 4.4 s |
+| gemini-3.5-flash | 5–65 s (throttled) |
+| gemini-2.5-flash-lite | retired for new users (404) |
+| gemini-3.8-flash | rejects thinking level "minimal" |
+Round trip to the Gemini API for a trivial request: 0.22 s, so about 0.8 s of Flash-Lite's first token is the service itself. A Sydney endpoint can remove at most the 0.2 s: Gemini would still be slower than Cerebras with its ocean crossing. The key may be on a low tier (the 3.5-flash numbers say so), so Vertex on a paid project could differ, but nothing here suggests it beats 0.4 s.
+**Conclusion: stay on Cerebras. Do not switch to Gemini for speed.** Worker default `GEMINI_MODEL` changed to `gemini-3.5-flash-lite` (2.5 is retired); the provider stays available behind `LLM_PROVIDER`.
