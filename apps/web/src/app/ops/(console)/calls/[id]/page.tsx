@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import { Gap, Legend, ms, StageBar, type Targets } from '@/components/ops/latency';
 import { fmtDateTime, Pill, secs } from '@/components/ops/ui';
 import { inr, num } from '@/lib/billing';
 import { opsApi, opsError } from '@/lib/ops-api';
@@ -34,6 +35,10 @@ interface CallDetail {
   billedLines: Array<{ label: string; quantity: number; unit: string; rateInr: number; amountInr: number }>;
   billedInr: number;
   complianceEvents: Array<{ kind?: string; at?: string; detail?: string }>;
+  turnMetrics: Array<{ at: string; eou: number; stt: number; llm: number; tts: number; total: number; llmServed?: string; promptTokens?: number; reply: boolean }>;
+  events: Array<{ at: string; kind: string; ms?: number; detail?: string }>;
+  providersUsed: Record<string, string>;
+  latencyTargets: Targets;
   recorded: boolean;
   recordingUri: string | null;
   transcriptRedacted: boolean;
@@ -143,6 +148,8 @@ export default function OpsCallPage() {
         </section>
       </div>
 
+      <TurnTimings call={call} />
+
       <section className="card space-y-3 p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-semibold">Recording</h2>
@@ -211,5 +218,76 @@ function Row({ label, children }: { label: React.ReactNode; children: React.Reac
       <span style={{ color: 'var(--text-dim)' }}>{label}</span>
       <span className="text-right tabular-nums">{children}</span>
     </p>
+  );
+}
+
+const EVENT_LABELS: Record<string, string> = {
+  answered: 'Worker heard the pickup',
+  greeting: 'Pickup → first AI word',
+  stall_guard: 'Stall guard forced a turn',
+  transfer: 'Transfer',
+  llm_fallback: 'LLM fallback',
+};
+
+/** Every AI turn on this call with its stage split, plus the worker's timeline events. */
+function TurnTimings({ call }: { call: CallDetail }) {
+  const t = call.latencyTargets;
+  const turns = call.turnMetrics ?? [];
+  const events = call.events ?? [];
+  if (!turns.length && !events.length) return null;
+  const started = new Date(call.timeline.startedAt).getTime();
+  const at = (iso: string) => secs(Math.max(0, (new Date(iso).getTime() - started) / 1000));
+  const pu = call.providersUsed ?? {};
+  return (
+    <section className="card overflow-x-auto p-0">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-5">
+        <h2 className="font-semibold">Voice timings</h2>
+        <Legend />
+      </div>
+      <p className="px-5 text-xs" style={{ color: 'var(--text-dim)' }}>
+        Stack: {pu.stt ?? 'nova'} · {pu.llm ?? '—'} · {pu.tts ?? '—'}. Gap = customer stops talking → AI&apos;s first audio. Green ≤ {ms(t.goodMs)}, amber &gt; {ms(t.slowMs)}, red &gt; {ms(t.stallMs)}.
+      </p>
+      {events.length > 0 && (
+        <ul className="flex flex-wrap gap-x-5 gap-y-1 px-5 pt-3 text-xs">
+          {events.map((e, i) => (
+            <li key={i}>
+              <span className="font-mono" style={{ color: 'var(--text-dim)' }}>{at(e.at)}</span>{' '}
+              <span className="font-semibold">{EVENT_LABELS[e.kind] ?? e.kind}</span>
+              {e.ms != null ? ` ${ms(e.ms)}` : ''}
+              {e.detail ? <span style={{ color: 'var(--text-dim)' }}> · {e.detail}</span> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      <table className="mt-3 w-full text-sm">
+        <thead>
+          <tr className="text-left text-xs uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+            <th className="px-5 py-2">At</th>
+            <th className="px-3 py-2">Split</th>
+            <th className="px-3 py-2 text-right">End of turn</th>
+            <th className="px-3 py-2 text-right">LLM</th>
+            <th className="px-3 py-2 text-right">Voice</th>
+            <th className="px-3 py-2 text-right">Gap</th>
+            <th className="px-5 py-2">Model</th>
+          </tr>
+        </thead>
+        <tbody>
+          {turns.map((x, i) => (
+            <tr key={i} className="border-t" style={{ borderColor: 'var(--border)' }}>
+              <td className="px-5 py-2 font-mono text-xs">{at(x.at)}</td>
+              <td className="w-48 px-3 py-2"><StageBar eou={x.eou} llm={x.llm} tts={x.tts} /></td>
+              <td className="px-3 py-2 text-right tabular-nums">{x.reply ? ms(x.eou) : <span style={{ color: 'var(--text-dim)' }}>AI-initiated</span>}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{ms(x.llm)}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{ms(x.tts)}</td>
+              <td className="px-3 py-2 text-right"><Gap v={x.total} t={t} /></td>
+              <td className="px-5 py-2 font-mono text-xs" style={{ color: 'var(--text-dim)' }}>
+                {x.llmServed ?? '—'}
+                {x.promptTokens ? ` · ${x.promptTokens} tok` : ''}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }

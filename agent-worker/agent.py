@@ -376,8 +376,10 @@ class Qualifier(Agent):
             except Exception as e:  # noqa: BLE001 — silence is bad, a crashed worker is worse
                 logger.warning("could not start pre-transfer comfort audio: %s", e)
 
+        t_req = time.monotonic()
         result = await _post_transfer(self._call_id, reason)
         logger.info("transfer result %s (call=%s)", result, self._call_id)
+        self.spawn(_post_event(self._call_id, "transfer", (time.monotonic() - t_req) * 1000, result))
         if result == "BRIDGED":
             # The human's browser is about to join this same room and take
             # over the mic; the AI leg ends so there's only one voice. The
@@ -588,6 +590,26 @@ async def _post_metrics(call_id: str, payload: dict) -> None:
                 logger.debug("metrics post %s -> HTTP %s", call_id, r.status)
     except Exception as e:  # noqa: BLE001
         logger.debug("metrics post failed: %s", e)
+
+
+async def _post_event(call_id: str | None, kind: str, ms: float | None = None, detail: str | None = None) -> None:
+    """Call timeline event for the ops console latency view (answered, greeting,
+    stall_guard, transfer). Telemetry only: failures are logged and dropped."""
+    if not (call_id and ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
+        return
+    url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/events"
+    headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
+    payload: dict = {"kind": kind}
+    if ms is not None:
+        payload["ms"] = max(0, round(ms))
+    if detail:
+        payload["detail"] = detail[:200]
+    try:
+        async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json=payload, timeout=10) as r:
+            if not r.ok:
+                logger.debug("event post %s -> HTTP %s", call_id, r.status)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("event post failed: %s", e)
 
 
 async def _post_compliance(call_id: str, kind: str, detail: str) -> None:
@@ -1223,6 +1245,7 @@ def prewarm(proc: agents.JobProcess) -> None:
 
 
 async def entrypoint(ctx: agents.JobContext) -> None:
+    job_t0 = time.monotonic()
     await ctx.connect()
 
     # Real calls carry the CoCally call id in room metadata; demo calls don't.
@@ -1292,7 +1315,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # metrics arrive in that order; they are stitched into one voice-to-voice
     # figure and posted to the engine so latency is a number on the dashboard,
     # not something dug out of worker logs after the fact.
-    turn: dict[str, float] = {}
+    turn: dict[str, float | str] = {}
 
     async def _flush_turn() -> None:
         if not call_id or "eou" not in turn or "tts" not in turn:
@@ -1307,6 +1330,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             "llmModel": LLM_MODEL,
             "ttsProvider": TTS_PROVIDER,
             "sttModel": STT_MODEL,
+            **({"llmServed": str(turn["llm_served"])[:80]} if turn.get("llm_served") else {}),
+            **({"promptTokens": int(turn["prompt_tokens"])} if turn.get("prompt_tokens") else {}),
         }
         turn.clear()
         await _post_metrics(call_id, payload)
@@ -1323,6 +1348,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # commit the turn with whatever transcript exists (interim if the final
     # never came). Worst case a stall now costs ~3 s, not a "Hello?".
     stall_task: asyncio.Task | None = None
+    greeted = False
 
     def _cancel_stall() -> None:
         nonlocal stall_task
@@ -1337,6 +1363,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if session.user_state != "listening" or session.agent_state != "listening":
             return
         logger.warning("turn stall guard: no reply %.1fs after end of speech — committing user turn (call=%s)", STALL_GUARD_S, call_id)
+        qualifier.spawn(_post_event(call_id, "stall_guard", STALL_GUARD_S * 1000, "no final transcript; turn forced"))
         try:
             session.commit_user_turn(transcript_timeout=1.0, stt_flush_duration=1.0)
         except Exception as e:  # noqa: BLE001 — the guard must never take the call down
@@ -1344,7 +1371,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     @session.on("agent_state_changed")
     def _on_agent_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
+        nonlocal greeted
         logger.info("agent %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
+        if not greeted and getattr(event, "new_state", "") == "speaking" and qualifier.audio_live_at is not None:
+            greeted = True
+            qualifier.spawn(_post_event(call_id, "greeting", (time.monotonic() - qualifier.audio_live_at) * 1000, "answer to first AI audio"))
         if getattr(event, "new_state", "") in ("thinking", "speaking"):
             _cancel_stall()
 
@@ -1374,6 +1405,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             (logger.warning if over else logger.debug)("llm_ttft=%.2fs cancelled=%s (call=%s)", m.ttft, m.cancelled, call_id)
             if not m.cancelled:
                 turn["llm"] = m.ttft
+                md = getattr(m, "metadata", None)
+                served = "/".join(x for x in (getattr(md, "model_provider", None), getattr(md, "model_name", None)) if x)
+                if served:
+                    turn["llm_served"] = served
+                turn["prompt_tokens"] = m.prompt_tokens
         elif kind == "tts_metrics":
             over = m.ttfb > LATENCY_BUDGET_S["tts_ttfb"]
             (logger.warning if over else logger.debug)("tts_ttfb=%.2fs cancelled=%s (call=%s)", m.ttfb, m.cancelled, call_id)
@@ -1490,6 +1526,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         return
     # AMD's zero point: the instant the customer's audio is actually flowing.
     qualifier.audio_live_at = time.monotonic()
+    qualifier.spawn(_post_event(call_id, "answered", (qualifier.audio_live_at - job_t0) * 1000, "worker joined to SIP answer"))
 
     # The disclosure is law, not style: speak it verbatim, uninterruptible,
     # and record a compliance event — instead of trusting the LLM's first turn.

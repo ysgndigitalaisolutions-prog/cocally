@@ -237,6 +237,14 @@ export class OpsController {
     return inv;
   }
 
+  // ── Latency ────────────────────────────────────────────────────────────
+
+  /** Voice latency for one tenant's AI calls (default: last 7 days). */
+  @Get('tenants/:id/latency')
+  tenantLatency(@Param('id') id: string, @Query('from') from?: string, @Query('to') to?: string, @Query('campaignId') campaignId?: string) {
+    return this.calls.latency({ tenantId: id, from: parseDate(from, 'from'), to: parseDate(to, 'to'), campaignId: campaignId || undefined });
+  }
+
   // ── Calls ──────────────────────────────────────────────────────────────
 
   @Get('calls')

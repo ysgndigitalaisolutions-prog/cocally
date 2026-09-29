@@ -27,3 +27,18 @@ Checks: `pnpm -r typecheck` clean; tests shared 20, web 17, api 19 all pass; wor
 
 ## After deploy
 One test call; check `timings.turns` end-of-turn drops from ~0.5 s toward ~0.4 s and no mid-sentence cut-ins. Ops console needs an operator user (`deploy/gcp/create-operator.sh`).
+
+## Ops console: per-tenant latency (added 29 Sep, same day)
+
+**Tenant → Latency tab** (`TenantLatency.tsx`, `GET /operator/tenants/:id/latency?from&to`). Today / 7 / 30 days:
+- Headline: typical turn gap (p50), worst 5% (p95), share of replies under 1 s, pickup → first AI word.
+- "Where the time goes": p50/p90/p95/max for end of turn, LLM first token, voice first audio, total gap, pickup → first word, AMD decision.
+- By provider stack (stt · llm · tts), by the model that actually answered (fallbacks show here), by day (IST), and per call with a stage bar, max, stalls and stall-guard fires.
+- Targets: green ≤ 1 s, amber > 1.5 s, red stall > 5 s (`LATENCY_TARGETS` in `ops-calls.service.ts`). Only "reply" turns (customer spoke, eou > 0) count; AI-initiated turns after a tool call are counted separately.
+
+**Call page → Voice timings**: every turn with its stage bar, the served model and prompt tokens, plus worker events. The call detail previously read `turnMetrics`/`metrics`, which never existed; it now reads `timings.turns`.
+
+**Worker → API**: `llmServed` (provider/model from the LLM metrics metadata) and `promptTokens` per turn; `POST /engine/calls/:id/events` with `answered`, `greeting` (pickup → first AI audio), `stall_guard`, `transfer` (result + wait). Stored in `timings.events` (last 100).
+
+**Recording playback**: ops and tenant recording links now sign Google Cloud Storage URLs (`common/gcs-sign.ts`, `common/recording-url.ts`), for all three stored URI shapes (s3://, https GCS, bare key). Signature verified against the bucket 29 Sep; it returns 403 until the recordings service account gets read access:
+`gcloud storage buckets add-iam-policy-binding gs://cocally-509318-recordings --member=serviceAccount:cocally-recordings@cocally-509318.iam.gserviceaccount.com --role=roles/storage.objectViewer`

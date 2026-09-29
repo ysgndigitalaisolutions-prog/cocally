@@ -4,7 +4,7 @@ import { DISPOSITIONS, LIVE_CALL_STATES, redactPii, type Disposition } from '@co
 import { IsIn, IsNotEmpty, IsNumber, IsOptional, IsString } from 'class-validator';
 import { Model, Types } from 'mongoose';
 import { config } from '../../common/config';
-import { presignS3Get } from '../../common/s3-presign';
+import { signedRecordingUrl } from '../../common/recording-url';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/auth/jwt-auth.guard';
 import { Public } from '../../common/auth/public.decorator';
@@ -202,20 +202,8 @@ export class CallsController {
       .exec();
     if (!call) throw new NotFoundException('Call not found');
     if (!call.recordingUri) throw new NotFoundException('No recording for this call');
-    const m = /^s3:\/\/([^/]+)\/(.+)$/.exec(call.recordingUri);
-    const { bucket, s3Region, s3AccessKey, s3Secret, s3Endpoint } = config.recording;
-    if (!m || !bucket || !s3AccessKey || !s3Secret) {
-      throw new NotFoundException('Recording is stored outside the configured bucket');
-    }
-    const url = presignS3Get({
-      bucket: m[1]!,
-      key: m[2]!,
-      region: s3Region ?? 'ap-southeast-2',
-      accessKey: s3AccessKey,
-      secret: s3Secret,
-      endpoint: s3Endpoint,
-      expiresSeconds: 15 * 60,
-    });
+    const url = signedRecordingUrl(call.recordingUri, 15 * 60);
+    if (!url) throw new NotFoundException('Recording is stored outside the configured bucket');
     return { url, expiresInSeconds: 15 * 60, contentType: 'audio/ogg', ready: Boolean(call.endedAt) };
   }
 

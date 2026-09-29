@@ -65,6 +65,17 @@ class TurnMetricsDto {
   @IsOptional() @IsString() @MaxLength(80) llmModel?: string;
   @IsOptional() @IsString() @MaxLength(40) ttsProvider?: string;
   @IsOptional() @IsString() @MaxLength(40) sttModel?: string;
+  /** Provider/model that actually produced this turn (differs from llmModel when a fallback served it). */
+  @IsOptional() @IsString() @MaxLength(80) llmServed?: string;
+  @IsOptional() @IsInt() @Min(0) promptTokens?: number;
+}
+
+export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback'] as const;
+
+class CallEventDto {
+  @IsIn(CALL_EVENT_KINDS) kind: (typeof CALL_EVENT_KINDS)[number];
+  @IsOptional() @IsInt() @Min(0) @Max(3_600_000) ms?: number;
+  @IsOptional() @IsString() @MaxLength(200) detail?: string;
 }
 
 class ComplianceEventDto {
@@ -242,7 +253,18 @@ export class EngineController {
           $push: {
             'timings.turnLatencies': dto.totalMs,
             'timings.turns': {
-              $each: [{ at: new Date(), eou: dto.eouDelayMs, stt: dto.transcriptionDelayMs, llm: dto.llmTtftMs, tts: dto.ttsTtfbMs, total: dto.totalMs }],
+              $each: [
+                {
+                  at: new Date(),
+                  eou: dto.eouDelayMs,
+                  stt: dto.transcriptionDelayMs,
+                  llm: dto.llmTtftMs,
+                  tts: dto.ttsTtfbMs,
+                  total: dto.totalMs,
+                  ...(dto.llmServed ? { llmServed: dto.llmServed } : {}),
+                  ...(dto.promptTokens !== undefined ? { promptTokens: dto.promptTokens } : {}),
+                },
+              ],
               $slice: -200,
             },
           },
@@ -261,6 +283,32 @@ export class EngineController {
       .exec();
     if (res.matchedCount === 0) throw new NotFoundException('Call not found');
     if (dto.totalMs > 1500) this.logger.warn(`slow AI turn on call ${id}: ${dto.totalMs} ms (eou ${dto.eouDelayMs}, llm ${dto.llmTtftMs}, tts ${dto.ttsTtfbMs})`);
+    return { ok: true };
+  }
+
+  /**
+   * Call timeline events from the worker (answered, greeting, stall guard,
+   * transfer). Shown with the per-turn timings in the ops console.
+   */
+  @Public()
+  @UseGuards(ServiceTokenGuard)
+  @Post('calls/:id/events')
+  async events(@Param('id') id: string, @Body() dto: CallEventDto) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
+    const res = await this.callModel
+      .updateOne(
+        { _id: new Types.ObjectId(id) },
+        {
+          $push: {
+            'timings.events': {
+              $each: [{ at: new Date(), kind: dto.kind, ...(dto.ms !== undefined ? { ms: dto.ms } : {}), ...(dto.detail ? { detail: dto.detail } : {}) }],
+              $slice: -100,
+            },
+          },
+        },
+      )
+      .exec();
+    if (res.matchedCount === 0) throw new NotFoundException('Call not found');
     return { ok: true };
   }
 

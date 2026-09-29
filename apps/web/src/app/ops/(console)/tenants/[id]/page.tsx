@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import TenantBillingAdmin from '@/components/billing/TenantBillingAdmin';
 import CallsTable from '@/components/ops/CallsTable';
+import TenantLatency from '@/components/ops/TenantLatency';
 import { fmtDate, fmtDateTime, LinkBox, Pill, tenantStatus } from '@/components/ops/ui';
 import { inr, num } from '@/lib/billing';
 import { opsApi, opsError } from '@/lib/ops-api';
@@ -34,6 +35,7 @@ interface Tenant {
 const TABS = [
   ['billing', 'Billing & invoices'],
   ['calls', 'Calls'],
+  ['latency', 'Latency'],
   ['users', 'Users'],
   ['campaigns', 'Campaigns'],
   ['settings', 'Settings'],
@@ -124,6 +126,7 @@ export default function OpsTenantPage() {
 
       {tab === 'billing' && <TenantBillingAdmin tenantId={id} onChanged={() => void load()} />}
       {tab === 'calls' && <CallsTable tenantId={id} showTenant={false} />}
+      {tab === 'latency' && <TenantLatency tenantId={id} />}
       {tab === 'users' && <UsersTab tenantId={id} />}
       {tab === 'campaigns' && <CampaignsTab tenantId={id} />}
       {tab === 'settings' && <SettingsTab tenant={tenant} save={patch} />}
