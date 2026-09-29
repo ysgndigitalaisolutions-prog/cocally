@@ -281,7 +281,13 @@ export class CallProgressService {
     // What answered matters more than how it ended: a voicemail the worker
     // hung up on is ANSWERED_VOICEMAIL (24 h retry), not a human contact that
     // would freeze the lead under the frequency cap for two weeks.
-    const byAmd = answered ? this.outcomeForAmd(snapshot.amdClass) : null;
+    // SILENCE is only ever a guess made early in the call ("nothing heard yet").
+    // If the customer's words are on the transcript, a person answered: 29 Sep
+    // a full conversation was finalised as NO_ANSWER because the first "Yeah"
+    // was missed and the guess was never revised.
+    const customerSpoke = (snapshot.transcript ?? []).some((t) => t.speaker === 'customer' && t.text?.trim());
+    const amdClass = snapshot.amdClass === 'SILENCE' && customerSpoke ? 'HUMAN' : snapshot.amdClass;
+    const byAmd = answered ? this.outcomeForAmd(amdClass) : null;
     const outcome: CallOutcome = answered && snapshot.outcome ? snapshot.outcome : (byAmd ?? derived);
     const state: CallState = outcome === 'FAILED' ? 'FAILED' : 'COMPLETED';
 

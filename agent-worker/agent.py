@@ -263,6 +263,7 @@ class Qualifier(Agent):
         # flowing — the zero point for AMD latency.
         self.audio_live_at: float | None = None
         self._amd_reported = False
+        self._amd_class: str | None = None
         # Decoded hold music, if `HOLD_MUSIC_URL` was fetchable. Prefetched at
         # startup so the transfer hand-off never pays for the download. Decoded
         # AT `output_sample_rate` — the two must stay in step or the music plays
@@ -479,11 +480,18 @@ class Qualifier(Agent):
     # ── AMD ────────────────────────────────────────────────────────────────
 
     def report_amd(self, text: str | None) -> None:
-        """Classify and report, exactly once per call, fire-and-forget."""
-        if self._amd_reported or not self._call_id:
+        """Classify and report, fire-and-forget. Once per call, except that a
+        SILENCE guess is revised the first time the customer is transcribed:
+        29 Sep 04:48 the first "Yeah" was never transcribed, SILENCE fired 6 s
+        after the greeting, and a full conversation was booked as NO_ANSWER."""
+        if not self._call_id:
             return
+        if self._amd_reported:
+            if not (self._amd_class == "SILENCE" and text):
+                return
         self._amd_reported = True
         amd_class = _classify_amd(text) if text else "SILENCE"
+        self._amd_class = amd_class
         started = self.audio_live_at
         latency_ms = int(max(0.0, (time.monotonic() - started)) * 1000) if started else None
         # The API caps latencyMs at 60s; a longer measurement means our zero
@@ -1349,6 +1357,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # never came). Worst case a stall now costs ~3 s, not a "Hello?".
     stall_task: asyncio.Task | None = None
     greeted = False
+    # True from the moment the customer stops speaking until the AI starts
+    # speaking again. The guard is keyed on this, not on one state change:
+    # 29 Sep 04:48 a short "Both." started a preemptive draft (agent ->
+    # thinking, which cancelled the guard), the draft was dropped because Flux
+    # never finalised the word, and nothing re-armed the guard: 15 s of silence.
+    awaiting_reply = False
+    last_interim = ""
 
     def _cancel_stall() -> None:
         nonlocal stall_task
@@ -1356,36 +1371,76 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             stall_task.cancel()
             stall_task = None
 
+    def _arm_stall() -> None:
+        nonlocal stall_task
+        _cancel_stall()
+        stall_task = asyncio.create_task(_stall_guard())
+
+    def _quiet() -> bool:
+        return session.user_state == "listening" and session.agent_state == "listening"
+
     async def _stall_guard() -> None:
         await asyncio.sleep(STALL_GUARD_S)
-        if qualifier._transfer_triggered or qualifier._closing:
+        if qualifier._transfer_triggered or qualifier._closing or not awaiting_reply or not _quiet():
             return
-        if session.user_state != "listening" or session.agent_state != "listening":
-            return
-        logger.warning("turn stall guard: no reply %.1fs after end of speech — committing user turn (call=%s)", STALL_GUARD_S, call_id)
-        qualifier.spawn(_post_event(call_id, "stall_guard", STALL_GUARD_S * 1000, "no final transcript; turn forced"))
+        logger.warning(
+            "turn stall guard: no reply %.1fs after end of speech — committing user turn (call=%s, interim=%r)",
+            STALL_GUARD_S, call_id, last_interim[:60],
+        )
+        qualifier.spawn(_post_event(call_id, "stall_guard", STALL_GUARD_S * 1000, f"turn forced; heard so far: {last_interim[:80] or 'nothing'}"))
         try:
             session.commit_user_turn(transcript_timeout=1.0, stt_flush_duration=1.0)
         except Exception as e:  # noqa: BLE001 — the guard must never take the call down
             logger.warning("stall guard commit failed: %s", e)
+        # Speech-to-text may have nothing at all for a one-word answer, and an
+        # empty commit produces no reply. Rather than leave the line silent,
+        # ask for a repeat with a fixed line (no LLM round trip).
+        await asyncio.sleep(2.0)
+        if qualifier._transfer_triggered or qualifier._closing or not awaiting_reply or not _quiet():
+            return
+        logger.warning("turn stall guard: still no reply — asking the customer to repeat (call=%s)", call_id)
+        qualifier.spawn(_post_event(call_id, "stall_guard", (STALL_GUARD_S + 2.0) * 1000, "nothing transcribed; asked to repeat"))
+        try:
+            session.say("Sorry, I didn't quite catch that. Could you say it again?")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("stall guard repeat line failed: %s", e)
+
+    @session.on("user_input_transcribed")
+    def _on_interim(event) -> None:  # noqa: ANN001 — livekit-agents event type
+        nonlocal last_interim
+        text = (getattr(event, "transcript", "") or "").strip()
+        if text:
+            last_interim = text
 
     @session.on("agent_state_changed")
     def _on_agent_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
-        nonlocal greeted
-        logger.info("agent %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
-        if not greeted and getattr(event, "new_state", "") == "speaking" and qualifier.audio_live_at is not None:
+        nonlocal greeted, awaiting_reply
+        old, new = getattr(event, "old_state", ""), getattr(event, "new_state", "")
+        logger.info("agent %s -> %s (call=%s)", old, new, call_id)
+        if not greeted and new == "speaking" and qualifier.audio_live_at is not None:
             greeted = True
             qualifier.spawn(_post_event(call_id, "greeting", (time.monotonic() - qualifier.audio_live_at) * 1000, "answer to first AI audio"))
-        if getattr(event, "new_state", "") in ("thinking", "speaking"):
+        if new == "speaking":
+            awaiting_reply = False
             _cancel_stall()
+        elif new == "thinking":
+            _cancel_stall()
+        elif new == "listening" and old == "thinking" and awaiting_reply and session.user_state == "listening":
+            # A draft was abandoned without speaking: the customer is still owed a reply.
+            _arm_stall()
 
     @session.on("user_state_changed")
     def _on_user_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
-        nonlocal stall_task
-        logger.info("user %s -> %s (call=%s)", getattr(event, "old_state", "?"), getattr(event, "new_state", "?"), call_id)
-        _cancel_stall()
-        if getattr(event, "old_state", "") == "speaking" and getattr(event, "new_state", "") == "listening":
-            stall_task = asyncio.create_task(_stall_guard())
+        nonlocal awaiting_reply, last_interim
+        old, new = getattr(event, "old_state", ""), getattr(event, "new_state", "")
+        logger.info("user %s -> %s (call=%s)", old, new, call_id)
+        if new == "speaking":
+            _cancel_stall()
+            if not awaiting_reply:
+                last_interim = ""
+        elif old == "speaking" and new == "listening":
+            awaiting_reply = True
+            _arm_stall()
 
     @session.on("metrics_collected")
     def _on_metrics(event) -> None:  # noqa: ANN001 — livekit-agents event type

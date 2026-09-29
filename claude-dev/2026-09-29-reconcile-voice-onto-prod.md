@@ -42,3 +42,16 @@ One test call; check `timings.turns` end-of-turn drops from ~0.5 s toward ~0.4 s
 
 **Recording playback**: ops and tenant recording links now sign Google Cloud Storage URLs (`common/gcs-sign.ts`, `common/recording-url.ts`), for all three stored URI shapes (s3://, https GCS, bare key). Signature verified against the bucket 29 Sep; it returns 403 until the recordings service account gets read access:
 `gcloud storage buckets add-iam-policy-binding gs://cocally-509318-recordings --member=serviceAccount:cocally-recordings@cocally-509318.iam.gserviceaccount.com --role=roles/storage.objectViewer`
+
+## Test call 29 Sep 04:48 UTC (6abb4308), on 183c109
+
+Recording vs. what the AI heard (recording t=0 is the greeting, 0.65 s after pickup):
+- Reply gaps 0.8–1.9 s, typical ~1.1 s (DB: eou 0.34–0.74, LLM 0.36–1.18, TTS 0.25–0.52). All turns served by Cerebras qwen-3.8-27b, prompt ~1.2–1.4k tokens.
+- "Yeah." 0.7 s after the greeting was never transcribed → 9 s of silence until "Go on." Six seconds after the greeting the silence watchdog reported SILENCE, and the call finalised as **NO_ANSWER** despite a full conversation.
+- "Both." 0.8 s after "price, service, or both?" was never transcribed → 15 s silence until "Hello?"; the customer hung up during the rephrase. The stall guard never fired.
+- TTS still says "Nithin" as "Ethan"; "Simply Energy" transcribed as "Simple Energy".
+
+Fixes (commit after 183c109):
+- Worker: a SILENCE guess is revised to the real class on the first transcript. API finaliser: SILENCE with customer lines on the transcript counts as HUMAN.
+- Worker stall guard keyed on "customer spoke, AI hasn't spoken since" instead of a single state change; re-armed when a preemptive draft is abandoned (agent thinking → listening). If the forced commit still yields nothing after 2 s, the AI says a fixed "Sorry, I didn't quite catch that. Could you say it again?". Events record what was heard so far.
+- Hypothesis to confirm from worker logs: short one-word answers produce a preemptive draft on Flux's eager end-of-turn, then no final transcript.
