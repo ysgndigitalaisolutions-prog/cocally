@@ -646,40 +646,53 @@ async def _post_event(
 #             jitter and packet loss on the customer's inbound audio.
 
 
-def _provider_hosts() -> list[tuple[str, str]]:
-    llm_host = {"cerebras": "api.cerebras.ai", "groq": "api.groq.com"}.get(LLM_PROVIDER, "api.cerebras.ai")
-    tts_host = {"elevenlabs": "api.elevenlabs.io", "cartesia": "api.cartesia.ai"}.get(TTS_PROVIDER, "api.deepgram.com")
-    return [("stt", "api.deepgram.com"), ("llm", llm_host), ("tts", tts_host)]
+def _provider_probes() -> list[tuple[str, str, str, dict[str, str]]]:
+    """(stage, host, url, headers) for a cheap authenticated GET on each provider."""
+    dg = os.environ.get("DEEPGRAM_API_KEY", "")
+    out = [("stt", "api.deepgram.com", "https://api.deepgram.com/v1/projects", {"Authorization": f"Token {dg}"})]
+    if LLM_PROVIDER == "groq":
+        out.append(("llm", "api.groq.com", "https://api.groq.com/openai/v1/models", {"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY', '')}"}))
+    else:
+        out.append(("llm", "api.cerebras.ai", "https://api.cerebras.ai/v1/models", {"Authorization": f"Bearer {os.environ.get('CEREBRAS_API_KEY', '')}"}))
+    if TTS_PROVIDER == "elevenlabs":
+        out.append(("tts", "api.elevenlabs.io", "https://api.elevenlabs.io/v1/models", {"xi-api-key": os.environ.get("ELEVENLABS_API_KEY", "")}))
+    elif TTS_PROVIDER == "cartesia":
+        out.append(("tts", "api.cartesia.ai", "https://api.cartesia.ai/voices?limit=1", {"X-API-Key": os.environ.get("CARTESIA_API_KEY", ""), "Cartesia-Version": "2025-04-16"}))
+    else:
+        out.append(("tts", "api.deepgram.com", "https://api.deepgram.com/v1/projects", {"Authorization": f"Token {dg}"}))
+    return out
 
 
-async def _tcp_rtt_ms(host: str, port: int = 443, tries: int = 3) -> float | None:
-    """Best of `tries` TCP handshakes, in ms (DNS resolved once, outside the timing)."""
-    try:
-        loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(host, port, type=0, proto=6)
-        addr = infos[0][4][0]
-    except Exception as e:  # noqa: BLE001
-        logger.debug("dns %s failed: %s", host, e)
-        return None
+async def _origin_rtt_ms(url: str, headers: dict[str, str], tries: int = 3) -> float | None:
+    """Round trip of a small request on an already-open connection, best of `tries`.
+
+    A TCP handshake only reaches the provider's nearest network edge (2 ms to
+    Cerebras from Sydney, 29 Sep) and hides the distance to where the service
+    actually runs. A real request goes all the way: 0.25 s to Cerebras and
+    0.36 s to ElevenLabs from India, against 0.03 s of model time. This is the
+    number that says how much of a stage is geography.
+    """
     best: float | None = None
-    for _ in range(tries):
-        t0 = time.perf_counter()
-        try:
-            _r, w = await asyncio.wait_for(asyncio.open_connection(addr, port), timeout=3.0)
-            dt = (time.perf_counter() - t0) * 1000
-            w.close()
-            best = dt if best is None else min(best, dt)
-        except Exception:  # noqa: BLE001
-            continue
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+            for i in range(tries + 1):
+                t0 = time.perf_counter()
+                async with s.get(url, headers=headers) as r:
+                    await r.read()
+                dt = (time.perf_counter() - t0) * 1000
+                if i > 0:  # the first request pays for DNS + TLS; skip it
+                    best = dt if best is None else min(best, dt)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("origin probe %s failed: %s", url, e)
     return best
 
 
 async def _probe_providers(call_id: str | None) -> None:
-    for stage, host in _provider_hosts():
-        rtt = await _tcp_rtt_ms(host)
-        logger.info("net provider %s %s rtt=%s ms (call=%s)", stage, host, f"{rtt:.0f}" if rtt is not None else "?", call_id)
+    for stage, host, url, headers in _provider_probes():
+        rtt = await _origin_rtt_ms(url, headers)
+        logger.info("net provider %s %s round trip=%s ms (call=%s)", stage, host, f"{rtt:.0f}" if rtt is not None else "?", call_id)
         if rtt is not None:
-            await _post_event(call_id, "net_provider", rtt, f"{stage} {host}", host=host, stage=stage)
+            await _post_event(call_id, "net_provider", rtt, f"{stage} {host} request round trip", host=host, stage=stage)
 
 
 def _media_sample(stats) -> dict | None:  # noqa: ANN001 — rtc.RtcStats

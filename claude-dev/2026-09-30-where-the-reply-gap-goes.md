@@ -35,3 +35,19 @@ Each is an env switch; the Latency tab compares stacks, so: switch one thing, ma
 ## Open
 - Scoring uses lead-wide facts: call 6abbed4e transferred after one reply on the previous call's score of 85. Reset the test lead before each call until scoring is per call.
 - `providersUsed` missing on 6abbed4e (short call closed by the no-agent path).
+
+## Correction, 30 Sep: the stages are mostly distance, not model time
+- Cerebras reports its own time per request (`time_info`): queue 3 ms + prompt 15 ms + completion 8 ms, about 0.03 s. First token still arrives after 0.38 s. A trivial `GET /v1/models` on a warm connection takes 0.25 s from India. The 2 ms measured from Sydney was a TCP handshake to Cloudflare's edge, not to the service.
+- ElevenLabs API answered from `us-central1` (0.31–0.36 s per small request from India). Deepgram 0.39 s.
+- Prompt size and the transfer tool barely matter on Cerebras (2,287 prompt tokens + tool: 0.38 s; 204 tokens, no tool: 0.31 s).
+- Cerebras key offers only `qwen-3.8-27b` and `gpt-oss-120b`; gpt-oss is slower to first token (0.46 s).
+- So "a faster model" does not exist in a useful sense: the model is 0.03 s. What is slow is that the worker (Sydney) is an ocean away from all three providers (US).
+- Worker probe changed from TCP handshake to a real request round trip on a warm connection (`_origin_rtt_ms`), so the next call records the true figure from the VM.
+
+## Options
+| Option | Expected typical reply | Cost / risk |
+|---|---|---|
+| A. Run the worker in a US region, next to Deepgram, Cerebras and ElevenLabs (API, web and DB stay where they are) | ~0.6 s (each stage loses its ocean crossing) | One small extra VM or a second compose host; India calls already have their media in the US via Twilio. Wrong region for AU calls later. |
+| B. Keep the worker in Sydney, move the LLM to Gemini Flash-Lite on Vertex `australia-southeast1` | ~1.0 s (LLM 0.39 → ~0.25 s) | Vertex AI API + role for the VM's service account; model behaviour to re-check on the script. |
+| C. Groq / Fireworks / SambaNova / Together | little or none | All US-hosted: same ocean crossing as Cerebras. |
+Benchmark scripts: `scratchpad/ttft.py`, `ttft2.py` (Cerebras, Gemini API, Anthropic, OpenAI; runs whichever keys are set).
