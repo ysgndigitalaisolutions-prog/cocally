@@ -91,3 +91,33 @@ Trivial request round trip from India: Sydney endpoint 0.40 s, global 0.15 s. Ne
 - Hand-off fix works: the specialist line followed the answer directly. Transfer returned NO_AGENT after 6.1 s (no agent Available); the customer hung up at the same moment.
 - One turn recorded `llm: 0` and no served model: the LLM metric arrived before the end-of-turn metric (a preemptive draft was used) and was cleared. Metric bug, not a call bug.
 - Speech-to-text heard "Simple Energy" as "simple and easy" and the spelled name as "Hey, sir. I am really simple".
+
+## Lost answers: worker log for call 6abbfc1f (17:57 UTC) and the fix
+
+Worker log, recording and a Flux replay of the recording, lined up:
+
+| Source | What it shows |
+|---|---|
+| Recording | AI's question ends 57.83 s, customer's "Around $400" starts 57.91 s (0.08 s later) and ends 59.11 s |
+| Worker log | AI `speaking -> listening` 17:59:02.15. Customer logged as speaking only 17:59:03.46-03.96, the last 0.5 s of a 1.2 s answer |
+| Worker log | Stall guard at 17:59:06.46 with `interim=''`: no transcript, not even a partial, reached the turn |
+| Flux replay | Same audio through Flux returns a transcript by 59.45 s, so Deepgram did hear it |
+
+Deepgram produced text and the worker never saw it. The answer started as the
+AI's last word ended, which is the window where adaptive interruption holds
+transcripts (`_should_hold_stt_event`) and then drops them at flush. The
+framework's trace lines are off at INFO level, so the exact drop line is not in
+the log; the three lost answers on 29 Sep ("Yeah", "Both", "Around $400") all
+began within about a second of the AI finishing.
+
+Change: `INTERRUPTION_MODE` (default `vad`, was hard-coded `adaptive`). In
+`vad` mode no transcript is held. Speech over 0.5 s stops the AI; a false stop
+resumes after 2 s of silence. Cost: a long "yeah, yeah" over the AI can now
+pause it. Set `INTERRUPTION_MODE=adaptive` to go back.
+
+Other findings in the same log:
+
+- Short answers are slow through Flux: "Yeah." took 1.05 s from end of speech to transcript, against about 0.5 s for full sentences.
+- Deepgram is the longest network leg from Sydney: 258, 310 and 422 ms on three calls. Cerebras 211-215 ms, ElevenLabs 183-226 ms.
+- Call 6abbfb4e (no answer) still reached "speaking anyway" after the 45 s wait, after the room had closed.
+- Gemini is not in the LLM chain in production: `cerebras:qwen-3.8-27b -> cerebras:gpt-oss-120b -> groq`.

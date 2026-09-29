@@ -108,6 +108,20 @@ STALL_GUARD_S = float(os.getenv("STALL_GUARD_S", "2.5"))
 ENDPOINT_MIN_DELAY = float(os.getenv("ENDPOINT_MIN_DELAY", "0.2"))
 # Silence the voice detector needs before it reports end of speech.
 VAD_MIN_SILENCE_S = 0.25
+# How the customer talking over the AI is handled. "adaptive" sends the overlap
+# to an ML detector and holds the transcript meanwhile, so "yeah"/"mm" does not
+# cut the AI off. On the 29 Sep test calls that holding lost real answers: the
+# customer answered as the AI's last word ended ("Around $400", "Both", "Yeah"),
+# no transcript ever reached the turn and only the stall guard recovered the
+# call ~5 s later. "vad" (default) never holds a transcript: speech longer than
+# min_duration stops the AI, and a false stop resumes after 2 s of silence.
+INTERRUPTION_MODE = (os.getenv("INTERRUPTION_MODE") or "vad").lower()  # vad | adaptive
+INTERRUPTION = {
+    "mode": INTERRUPTION_MODE if INTERRUPTION_MODE in ("vad", "adaptive") else "vad",
+    # 0.3 s with the ML detector filtering backchannels; without it 0.5 s (the
+    # framework default) keeps a cough or "mm" from stopping the AI.
+    "min_duration": 0.3 if INTERRUPTION_MODE == "adaptive" else 0.5,
+}
 # Approved line when a transfer finds nobody. Spoken by the worker, not the
 # model, so the model cannot carry on the script after a failed hand-off.
 NO_AGENT_LINE = (
@@ -1247,7 +1261,7 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
             turn_handling = {
                 "turn_detection": STT_TURN,
                 "endpointing": endpointing,
-                "interruption": {"mode": "adaptive", "min_duration": 0.3},
+                "interruption": INTERRUPTION,
                 "preemptive_generation": {"enabled": True, "preemptive_tts": True},
             }
             return stt_engine, turn_handling
@@ -1270,10 +1284,7 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
             "min_delay": 0.3,  # framework default 0.5s — snappier turn-taking
             "max_delay": 1.5,  # was 2.0: the wait when the model thinks they are mid-thought
         },
-        "interruption": {
-            "mode": "adaptive",  # ML backchannel detection ("yeah"/"hmm" won't cut the agent off)
-            "min_duration": 0.3,  # framework default 0.5s — stop audio faster on a real interruption
-        },
+        "interruption": INTERRUPTION,
         "preemptive_generation": {
             "enabled": True,  # start the LLM before the turn is even confirmed
             "preemptive_tts": True,  # also start speaking before confirmation — biggest first-audio win
@@ -1470,7 +1481,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if brief
         else "Greet the person, give the AI + recording disclosure in one sentence, and ask if now is a good moment."
     )
-    logger.info("starting agent (call=%s, brief=%s, stt=%s/%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, STT_TURN, LLM_PROVIDER, LLM_LABEL, TTS_PROVIDER)
+    logger.info("starting agent (call=%s, brief=%s, stt=%s/%s, interruption=%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, STT_TURN, INTERRUPTION["mode"], LLM_PROVIDER, LLM_LABEL, TTS_PROVIDER)
 
     tts_engine = _build_tts()
     disclosure = (brief or {}).get("disclosureLine")
