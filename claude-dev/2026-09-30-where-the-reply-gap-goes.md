@@ -121,3 +121,31 @@ Other findings in the same log:
 - Deepgram is the longest network leg from Sydney: 258, 310 and 422 ms on three calls. Cerebras 211-215 ms, ElevenLabs 183-226 ms.
 - Call 6abbfb4e (no answer) still reached "speaking anyway" after the 45 s wait, after the room had closed.
 - Gemini is not in the LLM chain in production: `cerebras:qwen-3.8-27b -> cerebras:gpt-oss-120b -> groq`.
+
+## Cartesia benchmark (30 Sep)
+
+Time from sending text to first audio, warm connection, six runs, median:
+
+| Voice model | From the Sydney VM | From India (laptop) |
+|---|---|---|
+| ElevenLabs Flash v2.5 | 275 ms (served from Singapore, `x-region: asia-southeast1`) | 198 ms |
+| Cartesia Sonic-3.6 | 78 ms | 119 ms |
+| Cartesia Sonic-2 | 232 ms (111-684) | 132 ms |
+| Cartesia Sonic Turbo | HTTP 503 from Sydney | 112 ms |
+
+Cartesia publishes one address and no region list; the numbers show Sonic-3.6
+is generated close to both Sydney and India. Worker's Cartesia option moved
+from `sonic-2` to `sonic-3.6`. Not yet tried on a live call.
+
+Speech-to-text, time from end of audio to final transcript, from India only
+(Sydney run pending), on clips cut from the mixed call recording:
+
+| Model | Long | Mid | Short |
+|---|---|---|---|
+| Deepgram nova-3 (finalize on request) | 240 ms | 263 ms | 262 ms |
+| Cartesia Ink-2 (finalize on request) | 133 ms | 92 ms | 99 ms |
+
+Flux is not in this table: it decides the end of turn itself, so its timing
+depends on the silence in the clip and is not comparable. Ink-2 and Flux both
+heard "electric table" for "electricity bill"; nova-3 got it right. One clip,
+mixed audio, so accuracy is not settled. Scripts: `~/tts_bench.py`, `~/stt_bench.py`.

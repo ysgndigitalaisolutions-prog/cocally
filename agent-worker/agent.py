@@ -1188,7 +1188,7 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
     how "instant" the agent feels, so the fastest streaming voices are first-class:
       deepgram   aura-2  (~200 ms TTFB, default; same vendor as STT)
       elevenlabs eleven_flash_v2_5 (~75 ms TTFB)
-      cartesia   sonic-2 (~90 ms TTFB)
+      cartesia   sonic-3.6 (first audio 78 ms from the Sydney VM, 30 Sep; ElevenLabs 275 ms)
     A missing plugin/key falls back to Deepgram with a log line, never a crash."""
     if TTS_PROVIDER == "elevenlabs" and os.environ.get("ELEVENLABS_API_KEY"):
         try:
@@ -1207,7 +1207,7 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
         try:
             from livekit.plugins import cartesia
 
-            return cartesia.TTS(model="sonic-2", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
+            return cartesia.TTS(model="sonic-3.6", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
         except Exception as e:  # noqa: BLE001
             logger.warning("cartesia TTS unavailable (%s) — using Deepgram", e)
     # Aura-1 (asteria) was tuned for lowest-latency demo speed and reads as
