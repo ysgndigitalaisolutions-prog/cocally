@@ -669,7 +669,11 @@ def _provider_probes() -> list[tuple[str, str, str, dict[str, str]]]:
     # /v1/projects only exists on the US host (404 elsewhere); the round trip is what is timed.
     dg_probe = ("https://" + DEEPGRAM_HOST + "/v1/projects", {"Authorization": f"Token {dg}"})
     out = [("stt", DEEPGRAM_HOST, *dg_probe)]
-    if LLM_PROVIDER == "vertex":
+    if IS_BEDROCK:
+        host = f"bedrock-runtime.{BEDROCK_REGION}.amazonaws.com"
+        # Unauthenticated: the 403 still makes the full round trip to the region.
+        out.append(("llm", host, f"https://{host}/", {}))
+    elif LLM_PROVIDER == "vertex":
         host = f"{VERTEX_LOCATION}-aiplatform.googleapis.com"
         out.append(("llm", host, f"https://{host}/v1/publishers/google/models", {}))
     elif LLM_PROVIDER == "gemini":
@@ -1331,8 +1335,16 @@ LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or ("cerebras" if os.getenv("CEREBRAS_
 GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 VERTEX_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION") or "australia-southeast1"
 IS_GEMINI = LLM_PROVIDER in ("vertex", "gemini")
+#   LLM_PROVIDER=bedrock Amazon Bedrock in AWS_REGION (Sydney: ap-southeast-2).
+#                        Auth is a Bedrock API key in AWS_BEARER_TOKEN_BEDROCK,
+#                        or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY.
+#                        amazon.nova-micro-v1:0 is served on demand in Sydney;
+#                        an "apac." profile id may route to another APAC region.
+BEDROCK_MODEL = os.getenv("BEDROCK_MODEL") or "amazon.nova-micro-v1:0"
+BEDROCK_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-southeast-2"
+IS_BEDROCK = LLM_PROVIDER == "bedrock"
 # What the call record shows as the configured LLM.
-LLM_LABEL = GEMINI_MODEL if IS_GEMINI else LLM_MODEL
+LLM_LABEL = GEMINI_MODEL if IS_GEMINI else BEDROCK_MODEL if IS_BEDROCK else LLM_MODEL
 
 
 def _gemini_thinking() -> dict | None:
@@ -1362,6 +1374,12 @@ def _gemini_llm():
     else:
         kw["api_key"] = os.environ["GOOGLE_API_KEY"]
     return google.LLM(**kw)
+
+
+def _bedrock_llm():
+    from livekit.plugins import aws
+
+    return aws.LLM(model=BEDROCK_MODEL, region=BEDROCK_REGION, max_output_tokens=LLM_MAX_TOKENS)
 
 
 def _family(model: str) -> str:
@@ -1410,8 +1428,14 @@ def _make_llm():
             names.append(f"{LLM_PROVIDER}:{GEMINI_MODEL}" + (f"@{VERTEX_LOCATION}" if LLM_PROVIDER == "vertex" else ""))
         except Exception as e:  # noqa: BLE001 — a missing plugin/key must not take the floor down
             logger.error("Gemini LLM unavailable (%s) — using the %s chain", e, "Cerebras/Groq")
+    if IS_BEDROCK:
+        try:
+            instances.append(_bedrock_llm())
+            names.append(f"bedrock:{BEDROCK_MODEL}@{BEDROCK_REGION}")
+        except Exception as e:  # noqa: BLE001 — a missing plugin/key must not take the floor down
+            logger.error("Bedrock LLM unavailable (%s) — using the %s chain", e, "Cerebras/Groq")
     if not chain and not instances:
-        raise RuntimeError("no LLM provider available (CEREBRAS_API_KEY, GROQ_API_KEY, or LLM_PROVIDER=vertex)")
+        raise RuntimeError("no LLM provider available (CEREBRAS_API_KEY, GROQ_API_KEY, or LLM_PROVIDER=vertex|bedrock)")
     names += [f"{p}:{_PROVIDERS[p]['models'][f]}" for p, f in chain]
     logger.info("LLM chain: %s", " -> ".join(names))
     instances += [_openai_compat_llm(p, f) for p, f in chain]

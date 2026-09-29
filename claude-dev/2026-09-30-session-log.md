@@ -65,3 +65,10 @@ qwen-3.8-27b 0.44 s from the same machine.
 - Test call over Telvoq to an Australian number before go-live.
 - Key rotations still owed: ElevenLabs, Cerebras, Atlas `cocally_vm` password, the Google API key shown in a screenshot.
 - Tools kept outside the repo: `~/llm_bench.py`, `~/stt_bench.py`, `~/tts_bench.py`; voice samples in `~/cocally-tts-samples/`.
+
+## Amazon Bedrock (added later on 30 Sep)
+
+- Nova models listed for the account in Sydney (`ap-southeast-2`): `amazon.nova-micro-v1:0`, `amazon.nova-lite-v1:0`, `amazon.nova-pro-v1:0` on demand in the region; `amazon.nova-2-lite-v1:0` only through the `global.` profile. `apac.` profiles can route to Tokyo, Seoul, Osaka, Mumbai or Singapore.
+- Worker: `LLM_PROVIDER=bedrock`, `BEDROCK_MODEL` (default `amazon.nova-micro-v1:0`), `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK`. Bedrock goes first in the chain, Cerebras and Groq stay behind it as fallback. New dependency `livekit-plugins-aws==1.6.6`.
+- Not yet callable: AWS answers "Your account is currently being verified" (HTTP 403) on `converse` and "Operation not allowed" (HTTP 400) on `converse-stream`. No Nova timing exists yet.
+- `~/llm_bench.py` now times Bedrock models next to Cerebras.

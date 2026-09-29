@@ -6,6 +6,7 @@ livekit-plugins-elevenlabs==1.6.6
 livekit-plugins-cartesia==1.6.6
 # Gemini on Vertex AI / Gemini API (LLM_PROVIDER=vertex|gemini): an LLM in the worker's own region.
 livekit-plugins-google==1.6.6
+livekit-plugins-aws==1.6.6  # LLM_PROVIDER=bedrock (Amazon Nova in ap-southeast-2)
 # Optional LiveKit Cloud noise cancellation tuned for PSTN audio (NOISE_CANCELLATION=1):
 livekit-plugins-noise-cancellation~=0.2
 python-dotenv~=1.0
