@@ -101,3 +101,31 @@ Text models the account lists as on demand with streaming in Sydney
 `google.gemma-3-27b-it`, `mistral.ministral-3-8b-instruct`. All return
 `Operation not allowed` until the account block clears. `~/llm_bench.py` times
 them in one run. Whether each supports tool calling is unverified.
+
+## Bedrock resolved: OpenAI-compatible endpoint (30 Sep, later)
+
+The Bedrock API key belongs to the newer `bedrock-mantle` endpoint,
+`https://bedrock-mantle.ap-southeast-2.api.aws/v1` (OpenAI chat-completions
+format). It lists 38 open models and no Amazon Nova. The older
+`bedrock-runtime` Converse API keeps refusing the key. The worker's
+`LLM_PROVIDER=bedrock` now uses this endpoint through the OpenAI plugin;
+`livekit-plugins-aws` was removed again.
+
+Time to first token, real call prompt with the transfer tool, from India
+(laptop), warm, median of six:
+
+| Model | Median | Range |
+|---|---|---|
+| Cerebras qwen-3.8-27b (current) | 392 ms | 373-1082 |
+| Cerebras gpt-oss-120b | 424 ms | 378-535 |
+| Bedrock mistral.ministral-3-8b-instruct | 557 ms | 523-1192 |
+| Bedrock mistral.ministral-3-14b-instruct | 597 ms | 559-1159 |
+| Bedrock zai.glm-4.7-flash | 598 ms | 490-1273 |
+| Bedrock nvidia.nemotron-nano-3-30b | 604 ms | 448-1241 |
+| Bedrock openai.gpt-oss-20b | 687 ms | 594-813 |
+| Bedrock qwen.qwen3-32b | 881 ms | 581-1192 |
+| Bedrock openai.gpt-oss-120b | 999 ms | 835-2495 |
+| Bedrock google.gemma-3 (4b, 12b, 27b) | no tokens with the tool attached | |
+
+India is about 285 ms round trip further from Sydney than the VM is, so the
+Bedrock rows should drop by roughly that much from Sydney. Sydney run pending.

@@ -670,9 +670,8 @@ def _provider_probes() -> list[tuple[str, str, str, dict[str, str]]]:
     dg_probe = ("https://" + DEEPGRAM_HOST + "/v1/projects", {"Authorization": f"Token {dg}"})
     out = [("stt", DEEPGRAM_HOST, *dg_probe)]
     if IS_BEDROCK:
-        host = f"bedrock-runtime.{BEDROCK_REGION}.amazonaws.com"
-        # Unauthenticated: the 403 still makes the full round trip to the region.
-        out.append(("llm", host, f"https://{host}/", {}))
+        host = f"bedrock-mantle.{BEDROCK_REGION}.api.aws"
+        out.append(("llm", host, f"{BEDROCK_BASE_URL}/models", {"Authorization": f"Bearer {os.environ.get('AWS_BEARER_TOKEN_BEDROCK', '')}"}))
     elif LLM_PROVIDER == "vertex":
         host = f"{VERTEX_LOCATION}-aiplatform.googleapis.com"
         out.append(("llm", host, f"https://{host}/v1/publishers/google/models", {}))
@@ -1335,13 +1334,16 @@ LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or ("cerebras" if os.getenv("CEREBRAS_
 GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 VERTEX_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION") or "australia-southeast1"
 IS_GEMINI = LLM_PROVIDER in ("vertex", "gemini")
-#   LLM_PROVIDER=bedrock Amazon Bedrock in AWS_REGION (Sydney: ap-southeast-2).
-#                        Auth is a Bedrock API key in AWS_BEARER_TOKEN_BEDROCK,
-#                        or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY.
-#                        amazon.nova-micro-v1:0 is served on demand in Sydney;
-#                        an "apac." profile id may route to another APAC region.
-BEDROCK_MODEL = os.getenv("BEDROCK_MODEL") or "amazon.nova-micro-v1:0"
+#   LLM_PROVIDER=bedrock Amazon Bedrock's OpenAI-compatible endpoint
+#                        (bedrock-mantle) in AWS_REGION (Sydney:
+#                        ap-southeast-2), with a Bedrock API key in
+#                        AWS_BEARER_TOKEN_BEDROCK. Serves open models
+#                        (GPT OSS, Qwen3, Mistral, ...), not Amazon Nova. The
+#                        key is refused by the bedrock-runtime Converse API
+#                        ("Operation not allowed", 30 Sep), so that is not used.
+BEDROCK_MODEL = os.getenv("BEDROCK_MODEL") or "openai.gpt-oss-20b"
 BEDROCK_REGION = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-southeast-2"
+BEDROCK_BASE_URL = f"https://bedrock-mantle.{BEDROCK_REGION}.api.aws/v1"
 IS_BEDROCK = LLM_PROVIDER == "bedrock"
 # What the call record shows as the configured LLM.
 LLM_LABEL = GEMINI_MODEL if IS_GEMINI else BEDROCK_MODEL if IS_BEDROCK else LLM_MODEL
@@ -1377,9 +1379,14 @@ def _gemini_llm():
 
 
 def _bedrock_llm():
-    from livekit.plugins import aws
-
-    return aws.LLM(model=BEDROCK_MODEL, region=BEDROCK_REGION, max_output_tokens=LLM_MAX_TOKENS)
+    return openai.LLM(
+        model=BEDROCK_MODEL,
+        base_url=BEDROCK_BASE_URL,
+        api_key=os.environ["AWS_BEARER_TOKEN_BEDROCK"],
+        max_completion_tokens=LLM_MAX_TOKENS,
+        **({"reasoning_effort": _reasoning_effort(BEDROCK_MODEL)} if _reasoning_effort(BEDROCK_MODEL) else {}),
+        timeout=20.0,
+    )
 
 
 def _family(model: str) -> str:
