@@ -43,3 +43,22 @@ served there (404); speech endpoints are. Worker setting: `DEEPGRAM_HOST`
 (default `api.deepgram.com`). From India the AU host is slower than the US one
 (nova-3 finalize 315 ms against 250 ms), as expected for a tester in India;
 the Sydney measurement is pending.
+
+## Speech-to-text from the Sydney VM (30 Sep)
+
+Time from end of audio to final transcript, median of four runs:
+
+| Model | Long | Mid | Short |
+|---|---|---|---|
+| Deepgram nova-3, US host | 260 ms | 207 ms | 285 ms |
+| Deepgram nova-3, Australian host | 30 ms | 31 ms | 27 ms |
+| Deepgram Flux, US host | 492 ms | 65 ms | 0 |
+| Deepgram Flux, Australian host | 335 ms | 0 | 0 |
+| Cartesia Ink-2 | 102-233 ms | 67-196 ms | 196-323 ms |
+
+nova-3 is the clean comparison (transcript on request): the Australian host
+removes about 230 ms. Flux decides the end of turn itself, so its figures
+include its own decision time and 0 means it had decided before the clip
+ended; the long clip shows about 160 ms saved. Ink-2 is uneven from Sydney
+(62-364 ms across runs). Decision: keep Deepgram Flux, set
+`DEEPGRAM_HOST=api.au.deepgram.com`.
