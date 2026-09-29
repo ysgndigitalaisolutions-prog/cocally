@@ -56,6 +56,8 @@ type Turn = {
   llmServed?: string;
   ttsServed?: string;
   promptTokens?: number;
+  /** Measured gap (ms): customer stops → AI's first audio. Present on calls after 30 Sep. */
+  heard?: number;
 };
 type TimelineEvent = { at: Date; kind: string; ms?: number; detail?: string; host?: string; stage?: string; jitterMs?: number; lossPct?: number };
 
@@ -74,6 +76,7 @@ function turnStats(turns: Turn[]) {
     total: dist(timed.map((t) => t.total)),
     eou: dist(timed.map((t) => t.eou)),
     stt: dist(timed.map((t) => t.stt)),
+    heard: dist(turns.flatMap((t) => (t.heard != null ? [t.heard] : []))),
     llm: dist(turns.map((t) => t.llm)),
     tts: dist(turns.map((t) => t.tts)),
     slow: timed.filter((t) => t.total > LATENCY_TARGETS.slowMs && t.total <= LATENCY_TARGETS.stallMs).length,

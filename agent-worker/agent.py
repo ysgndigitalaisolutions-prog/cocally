@@ -106,6 +106,8 @@ STALL_GUARD_S = float(os.getenv("STALL_GUARD_S", "2.5"))
 # 0.48-0.66 s (VAD min silence 0.25 + this). 0.2 trims ~100 ms; raise it again
 # if test calls show the AI cutting in on mid-sentence pauses.
 ENDPOINT_MIN_DELAY = float(os.getenv("ENDPOINT_MIN_DELAY", "0.2"))
+# Silence the voice detector needs before it reports end of speech.
+VAD_MIN_SILENCE_S = 0.25
 # Approved line when a transfer finds nobody. Spoken by the worker, not the
 # model, so the model cannot carry on the script after a failed hand-off.
 NO_AGENT_LINE = (
@@ -332,6 +334,15 @@ class Qualifier(Agent):
         if self._transfer_triggered or self._closing:
             return
         logger.info("auto-transfer triggered (call=%s): %s", self._call_id, reason)
+        # The score arrives while the model is already answering the same turn.
+        # Without this the customer hears one more question and then, with no
+        # chance to answer it, the hand-off line (29 Sep 16:51: "who's your
+        # internet provider?" followed by "let me get a specialist").
+        if self.session_ref is not None:
+            try:
+                await asyncio.wait_for(self.session_ref.interrupt(), timeout=1.0)
+            except Exception as e:  # noqa: BLE001 — never block the hand-off on this
+                logger.debug("interrupt before auto-transfer failed: %s", e)
         text = await self._do_transfer(reason)
         if text and self.session_ref is not None:
             await self.session_ref.say(text)
@@ -1337,7 +1348,7 @@ def prewarm(proc: agents.JobProcess) -> None:
         # delay is measured from, and it also gates barge-in. Flux/the EOU
         # model decide whether the person is actually done, so this only needs
         # to bridge the gap between two words, not two sentences.
-        min_silence_duration=0.25,
+        min_silence_duration=VAD_MIN_SILENCE_S,
     )
     # NOTE: the turn-detector model is NOT built here. In livekit-agents 1.6 its
     # constructor needs the job's inference executor (get_job_context()), so
@@ -1434,6 +1445,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             "sttModel": STT_MODEL,
             **({"llmServed": str(turn["llm_served"])[:80]} if turn.get("llm_served") else {}),
             **({"ttsServed": str(turn["tts_served"])[:80]} if turn.get("tts_served") else {}),
+            **({"heardMs": round(float(turn["heard"]) * 1000)} if turn.get("heard") else {}),
             **({"promptTokens": int(turn["prompt_tokens"])} if turn.get("prompt_tokens") else {}),
         }
         turn.clear()
@@ -1459,6 +1471,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # never finalised the word, and nothing re-armed the guard: 15 s of silence.
     awaiting_reply = False
     last_interim = ""
+    # When the voice detector reported end of speech (monotonic). The detector
+    # reports after VAD_MIN_SILENCE_S of silence, so the customer actually
+    # stopped that much earlier. Used for the heard gap: customer stops ->
+    # AI's first audio, measured directly instead of summing the stages.
+    speech_ended_at: float | None = None
 
     def _cancel_stall() -> None:
         nonlocal stall_task
@@ -1516,6 +1533,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             greeted = True
             qualifier.spawn(_post_event(call_id, "greeting", (time.monotonic() - qualifier.audio_live_at) * 1000, "answer to first AI audio"))
         if new == "speaking":
+            if awaiting_reply and speech_ended_at is not None:
+                turn["heard"] = time.monotonic() - speech_ended_at + VAD_MIN_SILENCE_S
             awaiting_reply = False
             _cancel_stall()
         elif new == "thinking":
@@ -1526,7 +1545,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     @session.on("user_state_changed")
     def _on_user_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
-        nonlocal awaiting_reply, last_interim
+        nonlocal awaiting_reply, last_interim, speech_ended_at
         old, new = getattr(event, "old_state", ""), getattr(event, "new_state", "")
         logger.info("user %s -> %s (call=%s)", old, new, call_id)
         if new == "speaking":
@@ -1534,6 +1553,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             if not awaiting_reply:
                 last_interim = ""
         elif old == "speaking" and new == "listening":
+            speech_ended_at = time.monotonic()
             awaiting_reply = True
             _arm_stall()
 
@@ -1547,7 +1567,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 "eou_delay=%.2fs transcription_delay=%.2fs (call=%s)",
                 m.end_of_utterance_delay, m.transcription_delay, call_id,
             )
+            heard = turn.get("heard")
             turn.clear()
+            if heard is not None:
+                turn["heard"] = heard
             turn["eou"] = m.end_of_utterance_delay
             turn["transcription"] = m.transcription_delay
         elif kind == "llm_metrics":

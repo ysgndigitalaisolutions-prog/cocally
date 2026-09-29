@@ -70,6 +70,8 @@ class TurnMetricsDto {
   @IsOptional() @IsInt() @Min(0) promptTokens?: number;
   /** Provider/model that produced the voice for this turn. */
   @IsOptional() @IsString() @MaxLength(80) ttsServed?: string;
+  /** Customer stops speaking → AI's first audio, measured directly (stages overlap, so this is less than their sum). */
+  @IsOptional() @IsInt() @Min(0) heardMs?: number;
 }
 
 export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback', 'net_provider', 'net_media'] as const;
@@ -271,6 +273,7 @@ export class EngineController {
                   ...(dto.llmServed ? { llmServed: dto.llmServed } : {}),
                   ...(dto.promptTokens !== undefined ? { promptTokens: dto.promptTokens } : {}),
                   ...(dto.ttsServed ? { ttsServed: dto.ttsServed } : {}),
+                  ...(dto.heardMs !== undefined ? { heard: dto.heardMs } : {}),
                 },
               ],
               $slice: -200,

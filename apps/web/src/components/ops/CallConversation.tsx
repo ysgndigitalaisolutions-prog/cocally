@@ -13,6 +13,8 @@ export interface TurnMetric {
   total: number;
   llmServed?: string;
   ttsServed?: string;
+  /** Measured: customer stops → AI's first audio. */
+  heard?: number;
   promptTokens?: number;
   reply: boolean;
 }
@@ -210,6 +212,7 @@ function ReplyGap({ turn: x, t, pu }: { turn: TurnMetric; t: Targets; pu: Record
       <span className="w-40 shrink-0"><StageBar eou={x.eou} llm={x.llm} tts={x.tts} /></span>
       <span className="tabular-nums text-dim">
         {x.reply ? `end of turn ${ms(x.eou)}` : 'end of turn not timed'} · LLM {ms(x.llm)} · voice {ms(x.tts)}
+        {x.heard != null && <span className="font-semibold text-text"> · heard {ms(x.heard)}</span>}
       </span>
       {tone === 'stall' && <span className="font-semibold">Stall</span>}
       {x.llmServed && pu.llm && x.llmServed !== pu.llm && <span className="font-mono text-dim">answered by {x.llmServed}</span>}
