@@ -149,3 +149,22 @@ Time to first token, real call prompt with the transfer tool, warm, median of si
 
 Bedrock in Sydney saves 50-100 ms on the median and has a tighter range than
 Cerebras. Answer quality on calls is untested for every Bedrock model.
+
+## Reply quality check across models (30 Sep)
+
+Five call situations, benchmark prompt with the transfer tool, one reply per
+model (`scratchpad/quality.py`). One sample each, not the production prompt.
+
+| Situation | Cerebras qwen-3.8-27b | Bedrock qwen3-32b | Bedrock glm-4.7-flash | Bedrock nemotron-nano-30b | Bedrock ministral-14b |
+|---|---|---|---|---|---|
+| Hesitant answer | "Noted, electricity." (no question) | fine | leaked its thinking text and `</think>` into the reply | asked the customer to open their bill | fine |
+| Objection | fine, 11 words | fine, 13 words | 35 words, over the 25-word rule | confused wording | markdown and "£££" |
+| "Are you a robot?" | said it is a virtual assistant | did not answer the question | said "I'm not a robot" and that the number was bought from a list | said "I'm a real person" | did not answer the question |
+| Ready to transfer | called the tool | called the tool | did not transfer, asked another question | called the tool | called the tool |
+| Stop request | apologised, ended | apologised, ended | apologised, ended | apologised, ended | apologised, ended |
+
+GLM and Nemotron denied being an AI, which breaks the disclosure rule. Only
+the two Qwen models stayed within the rules in all five.
+
+Deepgram Flux TTS: supported by `livekit-plugins-deepgram` 1.8.3 (`TTSv2`),
+which requires `livekit-agents` 1.8.3. The worker is pinned to 1.6.6.
