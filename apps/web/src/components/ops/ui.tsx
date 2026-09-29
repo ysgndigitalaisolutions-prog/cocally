@@ -22,6 +22,25 @@ export function Pill({ text, tone }: { text: string; tone: 'good' | 'bad' | 'war
   );
 }
 
+/** A row of mutually exclusive choices: ranges, views, filters. */
+export function Segmented<T extends string | number>({ value, options, onChange, label }: { value: T; options: Array<[T, string]>; onChange: (v: T) => void; label: string }) {
+  return (
+    <div role="group" aria-label={label} className="inline-flex rounded-lg border border-border bg-surface-2 p-0.5">
+      {options.map(([v, text]) => (
+        <button
+          key={String(v)}
+          type="button"
+          aria-pressed={value === v}
+          className={`cursor-pointer whitespace-nowrap rounded-md px-3 py-1 text-xs font-semibold transition-colors ${value === v ? 'bg-surface text-text shadow-sm' : 'text-dim hover:text-text'}`}
+          onClick={() => onChange(v)}
+        >
+          {text}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function tenantStatus(t: { active: boolean; paused: boolean }) {
   if (!t.active) return <Pill text="Deactivated" tone="bad" />;
   if (t.paused) return <Pill text="Paused" tone="warn" />;
