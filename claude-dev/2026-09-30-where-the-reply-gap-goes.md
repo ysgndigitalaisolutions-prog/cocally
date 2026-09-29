@@ -82,3 +82,12 @@ Round trip to the Gemini API for a trivial request: 0.22 s, so about 0.8 s of Fl
 | global | gemini-3.5-flash | 0.84 s |
 Trivial request round trip from India: Sydney endpoint 0.40 s, global 0.15 s. Net of network, Flash-Lite needs 0.5–0.65 s to its first token; Cerebras needs 0.45 s including its 0.25 s of network.
 **Final: Gemini is not faster, and the fast Gemini models are not offered in Sydney. LLM stays on Cerebras.** Vertex AI API and `roles/aiplatform.user` are enabled on the project (harmless; leave or remove).
+
+## Test call 29 Sep 17:57 UTC (6abbfc1f), build 5e11972
+- Replies (recording): 0.8–2.0 s, typical ~1.1 s. Worker `heard`: 1.16–1.96 s, typical 1.36 s (reads ~0.3 s high against nova word timings on some turns). End of turn was slower than the previous call (0.43–1.05 s).
+- Real request round trips from the Sydney VM: Deepgram 422 ms (258 ms on the 17:54 call), Cerebras 211 ms, ElevenLabs 183 ms; LiveKit media 3 ms, jitter 1 ms, no loss. Distance confirmed as the main cost of every stage.
+- Missed answer: "Around $400" started 0.08 s after the AI's question ended and was never transcribed. Stall guard fired at 2.5 s (nothing heard), asked to repeat at 4.5 s; the AI's "Sorry, I didn't quite catch that" started 4.9 s after the customer finished. Was 15–17 s before the guard.
+- Pattern across calls: every lost answer ("Yeah", "Both", "Around $400") began within ~1 s of the AI finishing. Framework (`audio_recognition.py`): with adaptive interruption, STT events are held while the agent speaks and, when its speech ends, dropped if they fall inside the ignore window; `_flush_held_transcripts` drops the whole buffer when an event has no timestamps. Suspected cause; needs the worker log (state changes, "flushing held transcripts") to confirm before changing `interruption.mode` / `backchannel_boundary`.
+- Hand-off fix works: the specialist line followed the answer directly. Transfer returned NO_AGENT after 6.1 s (no agent Available); the customer hung up at the same moment.
+- One turn recorded `llm: 0` and no served model: the LLM metric arrived before the end-of-turn metric (a preemptive draft was used) and was cleared. Metric bug, not a call bug.
+- Speech-to-text heard "Simple Energy" as "simple and easy" and the spelled name as "Hey, sir. I am really simple".
