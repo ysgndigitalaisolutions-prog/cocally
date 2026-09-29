@@ -55,9 +55,9 @@ export interface CallTimings {
   ttsFirstByte?: number;
   turnLatencies: number[];
   /** Per-turn breakdown (ms) from the voice worker, last 200 turns. */
-  turns?: Array<{ at: Date; eou: number; stt: number; llm: number; tts: number; total: number; llmServed?: string; promptTokens?: number }>;
+  turns?: Array<{ at: Date; eou: number; stt: number; llm: number; tts: number; total: number; llmServed?: string; ttsServed?: string; promptTokens?: number }>;
   /** Worker timeline events (answered, greeting, stall_guard, transfer), last 100. */
-  events?: Array<{ at: Date; kind: string; ms?: number; detail?: string }>;
+  events?: Array<{ at: Date; kind: string; ms?: number; detail?: string; host?: string; stage?: string; jitterMs?: number; lossPct?: number }>;
   transferDeadAirMs?: number;
 }
 

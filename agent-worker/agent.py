@@ -600,7 +600,9 @@ async def _post_metrics(call_id: str, payload: dict) -> None:
         logger.debug("metrics post failed: %s", e)
 
 
-async def _post_event(call_id: str | None, kind: str, ms: float | None = None, detail: str | None = None) -> None:
+async def _post_event(
+    call_id: str | None, kind: str, ms: float | None = None, detail: str | None = None, **extra: float | str | None
+) -> None:
     """Call timeline event for the ops console latency view (answered, greeting,
     stall_guard, transfer). Telemetry only: failures are logged and dropped."""
     if not (call_id and ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
@@ -612,12 +614,104 @@ async def _post_event(call_id: str | None, kind: str, ms: float | None = None, d
         payload["ms"] = max(0, round(ms))
     if detail:
         payload["detail"] = detail[:200]
+    for k, v in extra.items():
+        if v is not None:
+            payload[k] = round(v, 2) if isinstance(v, float) else v
     try:
         async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json=payload, timeout=10) as r:
             if not r.ok:
                 logger.debug("event post %s -> HTTP %s", call_id, r.status)
     except Exception as e:  # noqa: BLE001
         logger.debug("event post failed: %s", e)
+
+
+# ── Network probes ─────────────────────────────────────────────────────────
+#
+# Two legs we can see from the worker. (The phone ↔ carrier ↔ LiveKit SIP leg
+# is not visible here; that needs the carrier's own call-quality data.)
+#   provider  worker → STT / LLM / TTS host: TCP connect time ≈ one network
+#             round trip. Tells how much of each stage's latency is distance.
+#   media     worker ↔ LiveKit media server: WebRTC round-trip time, plus
+#             jitter and packet loss on the customer's inbound audio.
+
+
+def _provider_hosts() -> list[tuple[str, str]]:
+    llm_host = {"cerebras": "api.cerebras.ai", "groq": "api.groq.com"}.get(LLM_PROVIDER, "api.cerebras.ai")
+    tts_host = {"elevenlabs": "api.elevenlabs.io", "cartesia": "api.cartesia.ai"}.get(TTS_PROVIDER, "api.deepgram.com")
+    return [("stt", "api.deepgram.com"), ("llm", llm_host), ("tts", tts_host)]
+
+
+async def _tcp_rtt_ms(host: str, port: int = 443, tries: int = 3) -> float | None:
+    """Best of `tries` TCP handshakes, in ms (DNS resolved once, outside the timing)."""
+    try:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, port, type=0, proto=6)
+        addr = infos[0][4][0]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("dns %s failed: %s", host, e)
+        return None
+    best: float | None = None
+    for _ in range(tries):
+        t0 = time.perf_counter()
+        try:
+            _r, w = await asyncio.wait_for(asyncio.open_connection(addr, port), timeout=3.0)
+            dt = (time.perf_counter() - t0) * 1000
+            w.close()
+            best = dt if best is None else min(best, dt)
+        except Exception:  # noqa: BLE001
+            continue
+    return best
+
+
+async def _probe_providers(call_id: str | None) -> None:
+    for stage, host in _provider_hosts():
+        rtt = await _tcp_rtt_ms(host)
+        logger.info("net provider %s %s rtt=%s ms (call=%s)", stage, host, f"{rtt:.0f}" if rtt is not None else "?", call_id)
+        if rtt is not None:
+            await _post_event(call_id, "net_provider", rtt, f"{stage} {host}", host=host, stage=stage)
+
+
+def _media_sample(stats) -> dict | None:  # noqa: ANN001 — rtc.RtcStats
+    """Round trip to the media server and inbound audio jitter/loss from WebRTC stats."""
+    rtt = None
+    jitter = None
+    lost = received = 0
+    for group in (stats.subscriber_stats, stats.publisher_stats):
+        for st in group:
+            which = st.WhichOneof("stats")
+            if which == "candidate_pair":
+                cp = st.candidate_pair.candidate_pair
+                if cp.current_round_trip_time > 0:
+                    v = cp.current_round_trip_time * 1000
+                    # Prefer the nominated (in-use) pair; otherwise the best one seen.
+                    if cp.nominated or rtt is None:
+                        rtt = v if (cp.nominated or rtt is None) else min(rtt, v)
+            elif which == "inbound_rtp":
+                rec = st.inbound_rtp.received
+                received += rec.packets_received
+                lost += max(0, rec.packets_lost)
+                if rec.jitter > 0:
+                    jitter = max(jitter or 0.0, rec.jitter * 1000)
+    if rtt is None and jitter is None:
+        return None
+    loss = (lost / (lost + received) * 100) if (lost + received) else None
+    return {"rtt": rtt, "jitter": jitter, "loss": loss}
+
+
+async def _media_monitor(ctx: agents.JobContext, call_id: str | None, every_s: float = 20.0) -> None:
+    await asyncio.sleep(5.0)
+    while ctx.room.isconnected():
+        try:
+            sample = _media_sample(await ctx.room.get_rtc_stats())
+            if sample:
+                logger.info("net media rtt=%s jitter=%s loss=%s (call=%s)", sample["rtt"], sample["jitter"], sample["loss"], call_id)
+                await _post_event(
+                    call_id, "net_media", sample["rtt"], "worker ↔ LiveKit media",
+                    jitterMs=sample["jitter"], lossPct=sample["loss"],
+                )
+        except Exception as e:  # noqa: BLE001 — monitoring must never affect the call
+            logger.debug("media stats failed: %s", e)
+        await asyncio.sleep(every_s)
 
 
 async def _post_compliance(call_id: str, kind: str, detail: str) -> None:
@@ -1339,6 +1433,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             "ttsProvider": TTS_PROVIDER,
             "sttModel": STT_MODEL,
             **({"llmServed": str(turn["llm_served"])[:80]} if turn.get("llm_served") else {}),
+            **({"ttsServed": str(turn["tts_served"])[:80]} if turn.get("tts_served") else {}),
             **({"promptTokens": int(turn["prompt_tokens"])} if turn.get("prompt_tokens") else {}),
         }
         turn.clear()
@@ -1470,6 +1565,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             (logger.warning if over else logger.debug)("tts_ttfb=%.2fs cancelled=%s (call=%s)", m.ttfb, m.cancelled, call_id)
             if not m.cancelled:
                 turn["tts"] = m.ttfb
+                md = getattr(m, "metadata", None)
+                served = "/".join(x for x in (getattr(md, "model_provider", None), getattr(md, "model_name", None)) if x)
+                if served:
+                    turn["tts_served"] = served
                 qualifier.spawn(_flush_turn())
         elif kind == "interruption_metrics":
             over = m.detection_delay > LATENCY_BUDGET_S["interruption_detect"]
@@ -1582,6 +1681,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # AMD's zero point: the instant the customer's audio is actually flowing.
     qualifier.audio_live_at = time.monotonic()
     qualifier.spawn(_post_event(call_id, "answered", (qualifier.audio_live_at - job_t0) * 1000, "worker joined to SIP answer"))
+    if call_id:
+        qualifier.spawn(_probe_providers(call_id))
+        qualifier.spawn(_media_monitor(ctx, call_id))
 
     # The disclosure is law, not style: speak it verbatim, uninterruptible,
     # and record a compliance event — instead of trusting the LLM's first turn.

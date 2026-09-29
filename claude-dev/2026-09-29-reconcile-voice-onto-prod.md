@@ -55,3 +55,9 @@ Fixes (commit after 183c109):
 - Worker: a SILENCE guess is revised to the real class on the first transcript. API finaliser: SILENCE with customer lines on the transcript counts as HUMAN.
 - Worker stall guard keyed on "customer spoke, AI hasn't spoken since" instead of a single state change; re-armed when a preemptive draft is abandoned (agent thinking → listening). If the forced commit still yields nothing after 2 s, the AI says a fixed "Sorry, I didn't quite catch that. Could you say it again?". Events record what was heard so far.
 - Hypothesis to confirm from worker logs: short one-word answers produce a preemptive draft on Flux's eager end-of-turn, then no final transcript.
+
+## Latency view: every stage's model, network legs (29 Sep)
+- Turns with eou = 0 were labelled "AI-initiated"; they are replies committed from the transcript (end of speech not timed by the voice detector). Now "not timed": LLM and voice times count, the gap figures use timed turns only. `secs()` no longer shows 0:60.
+- Per turn: end of turn and its speech-to-text part, LLM, voice, plus the model for each stage (STT from the call, `llmServed`, new `ttsServed`).
+- Network, measured by the worker on every call: TCP round trip to the STT, LLM and TTS hosts once at answer (`net_provider`), and worker ↔ LiveKit media round trip, customer audio jitter and packet loss every 20 s (`net_media`, from `room.get_rtc_stats()`). Shown in the tenant Latency tab (Network table, per-call column) and on the call page.
+- Not measurable from the worker: phone ↔ carrier ↔ LiveKit SIP. Options: Twilio Voice Insights per call (jitter, loss, round trip at the Twilio edge) for India; ask Telvoq for the equivalent. Local check from India 29 Sep: api.deepgram.com ~285 ms, api.cerebras.ai ~21 ms TCP round trip (the VM in Sydney will differ).

@@ -46,20 +46,39 @@ function dist(values: number[]): Dist {
   return { n: v.length, p50: q(0.5), p90: q(0.9), p95: q(0.95), max: v[v.length - 1]!, avg: Math.round(v.reduce((a, b) => a + b, 0) / v.length) };
 }
 
-type Turn = { at: Date; eou: number; stt: number; llm: number; tts: number; total: number; llmServed?: string; promptTokens?: number };
-type TimelineEvent = { at: Date; kind: string; ms?: number; detail?: string };
+type Turn = {
+  at: Date;
+  eou: number;
+  stt: number;
+  llm: number;
+  tts: number;
+  total: number;
+  llmServed?: string;
+  ttsServed?: string;
+  promptTokens?: number;
+};
+type TimelineEvent = { at: Date; kind: string; ms?: number; detail?: string; host?: string; stage?: string; jitterMs?: number; lossPct?: number };
 
-/** Stage distributions over a set of turns. Stalls are kept out of the stage p50s' way by reporting them separately too. */
+/**
+ * Stage distributions over a set of turns. A turn with eou = 0 is a reply
+ * whose end of speech the framework did not time (the turn was committed from
+ * the transcript, not the voice detector): its LLM and voice times are real,
+ * but its total leaves out the wait, so it is kept out of the gap figures.
+ */
 function turnStats(turns: Turn[]) {
+  const timed = turns.filter((t) => t.eou > 0);
   return {
     turns: turns.length,
-    total: dist(turns.map((t) => t.total)),
-    eou: dist(turns.map((t) => t.eou)),
+    timedTurns: timed.length,
+    untimedTurns: turns.length - timed.length,
+    total: dist(timed.map((t) => t.total)),
+    eou: dist(timed.map((t) => t.eou)),
+    stt: dist(timed.map((t) => t.stt)),
     llm: dist(turns.map((t) => t.llm)),
     tts: dist(turns.map((t) => t.tts)),
-    slow: turns.filter((t) => t.total > LATENCY_TARGETS.slowMs && t.total <= LATENCY_TARGETS.stallMs).length,
-    stalls: turns.filter((t) => t.total > LATENCY_TARGETS.stallMs).length,
-    underTarget: turns.filter((t) => t.total <= LATENCY_TARGETS.goodMs).length,
+    slow: timed.filter((t) => t.total > LATENCY_TARGETS.slowMs && t.total <= LATENCY_TARGETS.stallMs).length,
+    stalls: timed.filter((t) => t.total > LATENCY_TARGETS.stallMs).length,
+    underTarget: timed.filter((t) => t.total <= LATENCY_TARGETS.goodMs).length,
   };
 }
 
@@ -212,39 +231,43 @@ export class OpsCallsService {
       [],
     );
 
-    const allReply: Turn[] = [];
-    let aiInitiated = 0;
+    const allTurns: Turn[] = [];
     const byStack = new Map<string, { stack: { stt: string; llm: string; tts: string }; calls: number; turns: Turn[] }>();
     const byModel = new Map<string, Turn[]>();
+    const byVoice = new Map<string, Turn[]>();
     const byDay = new Map<string, { calls: number; turns: Turn[] }>();
     const greeting: number[] = [];
     const answered: number[] = [];
     const amd: number[] = [];
     let stallGuardFires = 0;
     const transfers: Array<{ result: string; ms: number | null }> = [];
+    const providerRtt = new Map<string, { stage: string; ms: number[] }>();
+    const mediaRtt: number[] = [];
+    const mediaJitter: number[] = [];
+    const mediaLoss: number[] = [];
 
     const rows = calls.map((c) => {
       const t = (c.timings ?? {}) as { turns?: Turn[]; events?: TimelineEvent[] };
       const turns = t.turns ?? [];
       const events = t.events ?? [];
-      const reply = turns.filter((x) => x.eou > 0);
-      aiInitiated += turns.length - reply.length;
-      allReply.push(...reply);
+      allTurns.push(...turns);
       const pu = (c.providersUsed ?? {}) as Record<string, string>;
       const stack = { stt: pu.stt ?? 'nova', llm: pu.llm ?? '—', tts: pu.tts ?? '—' };
       const key = `${stack.stt}|${stack.llm}|${stack.tts}`;
       const st = byStack.get(key) ?? { stack, calls: 0, turns: [] };
       st.calls += 1;
-      st.turns.push(...reply);
+      st.turns.push(...turns);
       byStack.set(key, st);
-      for (const x of reply) {
+      for (const x of turns) {
         const m = x.llmServed ?? `${pu.llm ?? 'unknown'} (configured)`;
         byModel.set(m, [...(byModel.get(m) ?? []), x]);
+        const v = x.ttsServed ?? `${pu.tts ?? 'unknown'} (configured)`;
+        byVoice.set(v, [...(byVoice.get(v) ?? []), x]);
       }
       const day = istDay(new Date(c.startedAt));
       const d = byDay.get(day) ?? { calls: 0, turns: [] };
       d.calls += 1;
-      d.turns.push(...reply);
+      d.turns.push(...turns);
       byDay.set(day, d);
       const ev = (k: string) => events.filter((e) => e.kind === k);
       const g = ev('greeting')[0]?.ms;
@@ -255,7 +278,22 @@ export class OpsCallsService {
       const guards = ev('stall_guard').length;
       stallGuardFires += guards;
       for (const tr of ev('transfer')) transfers.push({ result: tr.detail ?? '?', ms: tr.ms ?? null });
-      const s = turnStats(reply);
+      const callProviders: Record<string, number> = {};
+      for (const e of ev('net_provider')) {
+        if (e.ms == null || !e.host) continue;
+        const p = providerRtt.get(e.host) ?? { stage: e.stage ?? '', ms: [] };
+        p.ms.push(e.ms);
+        providerRtt.set(e.host, p);
+        if (e.stage) callProviders[e.stage] = e.ms;
+      }
+      const media = ev('net_media');
+      for (const e of media) {
+        if (e.ms != null) mediaRtt.push(e.ms);
+        if (e.jitterMs != null) mediaJitter.push(e.jitterMs);
+      }
+      const lastLoss = [...media].reverse().find((e) => e.lossPct != null)?.lossPct;
+      if (lastLoss != null) mediaLoss.push(lastLoss);
+      const s = turnStats(turns);
       const lead = c.leadId ? n.lead.get(c.leadId.toString()) : undefined;
       return {
         id: c._id.toString(),
@@ -265,7 +303,7 @@ export class OpsCallsService {
         outcome: c.outcome ?? null,
         stack,
         turns: s.turns,
-        aiInitiatedTurns: turns.length - reply.length,
+        untimedTurns: s.untimedTurns,
         p50: s.total.p50,
         p95: s.total.p95,
         max: s.total.max,
@@ -277,11 +315,17 @@ export class OpsCallsService {
         stallGuardFires: guards,
         greetingMs: g ?? null,
         amdLatencyMs: c.amdLatencyMs ?? null,
-        llmServed: [...new Set(reply.map((x) => x.llmServed).filter(Boolean))],
+        llmServed: [...new Set(turns.map((x) => x.llmServed).filter(Boolean))],
+        net: {
+          providers: callProviders,
+          mediaRttMs: dist(media.map((e) => e.ms ?? NaN)).p50,
+          jitterMaxMs: dist(media.map((e) => e.jitterMs ?? NaN)).max,
+          lossPct: lastLoss ?? null,
+        },
       };
     });
 
-    const summary = turnStats(allReply);
+    const summary = turnStats(allTurns);
     return {
       range: { from, to },
       targets: LATENCY_TARGETS,
@@ -289,7 +333,6 @@ export class OpsCallsService {
       summary: {
         ...summary,
         calls: calls.length,
-        aiInitiatedTurns: aiInitiated,
         stallGuardFires,
         greeting: dist(greeting),
         answerDetect: dist(answered),
@@ -300,11 +343,20 @@ export class OpsCallsService {
           wait: dist(transfers.map((x) => x.ms ?? NaN)),
         },
       },
+      network: {
+        providers: [...providerRtt.entries()]
+          .map(([host, p]) => ({ host, stage: p.stage, rtt: dist(p.ms) }))
+          .sort((a, b) => a.stage.localeCompare(b.stage)),
+        media: { rtt: dist(mediaRtt), jitter: dist(mediaJitter), lossPct: dist(mediaLoss) },
+      },
       byStack: [...byStack.values()]
         .map((x) => ({ stack: x.stack, calls: x.calls, ...turnStats(x.turns) }))
         .sort((a, b) => b.turns - a.turns),
       byModel: [...byModel.entries()]
-        .map(([model, ts]) => ({ model, turns: ts.length, llm: dist(ts.map((x) => x.llm)), total: dist(ts.map((x) => x.total)) }))
+        .map(([model, ts]) => ({ model, turns: ts.length, llm: dist(ts.map((x) => x.llm)), total: turnStats(ts).total }))
+        .sort((a, b) => b.turns - a.turns),
+      byVoice: [...byVoice.entries()]
+        .map(([model, ts]) => ({ model, turns: ts.length, tts: dist(ts.map((x) => x.tts)) }))
         .sort((a, b) => b.turns - a.turns),
       byDay: [...byDay.entries()]
         .map(([day, x]) => ({ day, calls: x.calls, ...turnStats(x.turns) }))

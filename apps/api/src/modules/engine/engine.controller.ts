@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Logger, NotFoundException, Param, Post, UseGuards } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { AMD_CLASSES, computeScore, redactPii, scoreAction, type AmdClass } from '@cocally/shared';
-import { IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
+import { IsIn, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { Model, Types } from 'mongoose';
 import { Public } from '../../common/auth/public.decorator';
 import { ServiceTokenGuard } from '../../common/auth/service-token.guard';
@@ -68,14 +68,21 @@ class TurnMetricsDto {
   /** Provider/model that actually produced this turn (differs from llmModel when a fallback served it). */
   @IsOptional() @IsString() @MaxLength(80) llmServed?: string;
   @IsOptional() @IsInt() @Min(0) promptTokens?: number;
+  /** Provider/model that produced the voice for this turn. */
+  @IsOptional() @IsString() @MaxLength(80) ttsServed?: string;
 }
 
-export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback'] as const;
+export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback', 'net_provider', 'net_media'] as const;
 
 class CallEventDto {
   @IsIn(CALL_EVENT_KINDS) kind: (typeof CALL_EVENT_KINDS)[number];
   @IsOptional() @IsInt() @Min(0) @Max(3_600_000) ms?: number;
   @IsOptional() @IsString() @MaxLength(200) detail?: string;
+  /** Network samples: provider host / pipeline stage, media jitter and inbound packet loss. */
+  @IsOptional() @IsString() @MaxLength(80) host?: string;
+  @IsOptional() @IsIn(['stt', 'llm', 'tts']) stage?: 'stt' | 'llm' | 'tts';
+  @IsOptional() @IsNumber() @Min(0) @Max(60_000) jitterMs?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(100) lossPct?: number;
 }
 
 class ComplianceEventDto {
@@ -263,6 +270,7 @@ export class EngineController {
                   total: dto.totalMs,
                   ...(dto.llmServed ? { llmServed: dto.llmServed } : {}),
                   ...(dto.promptTokens !== undefined ? { promptTokens: dto.promptTokens } : {}),
+                  ...(dto.ttsServed ? { ttsServed: dto.ttsServed } : {}),
                 },
               ],
               $slice: -200,
@@ -301,7 +309,18 @@ export class EngineController {
         {
           $push: {
             'timings.events': {
-              $each: [{ at: new Date(), kind: dto.kind, ...(dto.ms !== undefined ? { ms: dto.ms } : {}), ...(dto.detail ? { detail: dto.detail } : {}) }],
+              $each: [
+                {
+                  at: new Date(),
+                  kind: dto.kind,
+                  ...(dto.ms !== undefined ? { ms: dto.ms } : {}),
+                  ...(dto.detail ? { detail: dto.detail } : {}),
+                  ...(dto.host ? { host: dto.host } : {}),
+                  ...(dto.stage ? { stage: dto.stage } : {}),
+                  ...(dto.jitterMs !== undefined ? { jitterMs: dto.jitterMs } : {}),
+                  ...(dto.lossPct !== undefined ? { lossPct: dto.lossPct } : {}),
+                },
+              ],
               $slice: -100,
             },
           },

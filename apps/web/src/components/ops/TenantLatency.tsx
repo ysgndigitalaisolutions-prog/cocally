@@ -8,8 +8,11 @@ import { opsApi, opsError } from '@/lib/ops-api';
 
 interface Stats {
   turns: number;
+  timedTurns: number;
+  untimedTurns: number;
   total: Dist;
   eou: Dist;
+  stt: Dist;
   llm: Dist;
   tts: Dist;
   slow: number;
@@ -29,7 +32,6 @@ interface Latency {
   truncated: boolean;
   summary: Stats & {
     calls: number;
-    aiInitiatedTurns: number;
     stallGuardFires: number;
     greeting: Dist;
     answerDetect: Dist;
@@ -38,6 +40,11 @@ interface Latency {
   };
   byStack: Array<Stats & { stack: Stack; calls: number }>;
   byModel: Array<{ model: string; turns: number; llm: Dist; total: Dist }>;
+  byVoice: Array<{ model: string; turns: number; tts: Dist }>;
+  network: {
+    providers: Array<{ host: string; stage: string; rtt: Dist }>;
+    media: { rtt: Dist; jitter: Dist; lossPct: Dist };
+  };
   byDay: Array<Stats & { day: string; calls: number }>;
   calls: Array<{
     id: string;
@@ -47,7 +54,7 @@ interface Latency {
     outcome: string | null;
     stack: Stack;
     turns: number;
-    aiInitiatedTurns: number;
+    untimedTurns: number;
     p50: number | null;
     p95: number | null;
     max: number | null;
@@ -60,6 +67,7 @@ interface Latency {
     greetingMs: number | null;
     amdLatencyMs: number | null;
     llmServed: string[];
+    net: { providers: Record<string, number>; mediaRttMs: number | null; jitterMaxMs: number | null; lossPct: number | null };
   }>;
 }
 
@@ -137,9 +145,9 @@ export default function TenantLatency({ tenantId }: { tenantId: string }) {
       ) : (
         <>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat label="Typical turn gap (p50)" value={ms(s.total.p50)} hint={`${s.turns} replies over ${s.calls} calls`} tone={s.total.p50 != null && s.total.p50 <= t.goodMs ? 'good' : s.total.p50 != null && s.total.p50 > t.slowMs ? 'bad' : undefined} />
+            <Stat label="Typical turn gap (p50)" value={ms(s.total.p50)} hint={`${s.timedTurns} timed replies over ${s.calls} calls`} tone={s.total.p50 != null && s.total.p50 <= t.goodMs ? 'good' : s.total.p50 != null && s.total.p50 > t.slowMs ? 'bad' : undefined} />
             <Stat label="Worst 5% (p95)" value={ms(s.total.p95)} hint={`max ${ms(s.total.max)}`} tone={s.total.p95 != null && s.total.p95 > t.stallMs ? 'bad' : s.total.p95 != null && s.total.p95 > t.slowMs ? 'warn' : undefined} />
-            <Stat label="Replies under target" value={pct(s.underTarget, s.turns)} hint={`${s.slow} slow · ${s.stalls} stalls`} tone={s.stalls ? 'bad' : undefined} />
+            <Stat label="Replies under target" value={pct(s.underTarget, s.timedTurns)} hint={`${s.slow} slow · ${s.stalls} stalls`} tone={s.stalls ? 'bad' : undefined} />
             <Stat label="Pickup → first AI word" value={ms(s.greeting.p50)} hint={s.greeting.n ? `p95 ${ms(s.greeting.p95)} · ${s.greeting.n} calls` : 'no data yet'} />
           </div>
 
@@ -160,7 +168,8 @@ export default function TenantLatency({ tenantId }: { tenantId: string }) {
                 </tr>
               </thead>
               <tbody>
-                <DistRow label="End of turn (speech-to-text)" d={s.eou} t={t} stage />
+                <DistRow label="End of turn (customer stops → turn decided)" d={s.eou} t={t} stage />
+                <DistRow label="  of which speech-to-text final transcript" d={s.stt} t={t} stage />
                 <DistRow label="LLM first token" d={s.llm} t={t} stage />
                 <DistRow label="Voice first audio" d={s.tts} t={t} stage />
                 <DistRow label="Total turn gap" d={s.total} t={t} />
@@ -170,7 +179,7 @@ export default function TenantLatency({ tenantId }: { tenantId: string }) {
             </table>
             <p className="px-4 py-3 text-xs" style={{ color: 'var(--text-dim)' }}>
               Stall guard fired {s.stallGuardFires}× (speech-to-text never finalised; turn forced after the guard delay).
-              {' '}{s.aiInitiatedTurns} AI-initiated turns (after a tool call) are excluded from the gap figures.
+              {' '}{s.untimedTurns} replies had no measured end of turn (committed from the transcript); their LLM and voice times are included, but not their gap.
               {s.transfers.n ? ` Transfers: ${s.transfers.bridged}/${s.transfers.n} bridged, typical wait ${ms(s.transfers.wait.p50)}.` : ''}
             </p>
           </section>
@@ -237,6 +246,87 @@ export default function TenantLatency({ tenantId }: { tenantId: string }) {
             </section>
           </div>
 
+          <div className="grid gap-4 lg:grid-cols-2">
+            <section className="card overflow-x-auto p-0">
+              <h3 className="px-4 pt-4 font-semibold">Network</h3>
+              <p className="px-4 text-xs" style={{ color: 'var(--text-dim)' }}>
+                Measured from the AI worker on each call. Provider = one round trip to that host; it is part of every stage&apos;s time above.
+                The phone ↔ carrier leg is not visible from here.
+              </p>
+              <table className="mt-2 w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+                    <th className="px-4 py-2">Leg</th>
+                    <th className="px-3 py-2 text-right">p50</th>
+                    <th className="px-3 py-2 text-right">p95</th>
+                    <th className="px-3 py-2 text-right">Max</th>
+                    <th className="px-4 py-2 text-right">n</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.network.providers.map((p) => (
+                    <tr key={p.host} className="border-t" style={{ borderColor: 'var(--border)' }}>
+                      <td className="px-4 py-2">
+                        {p.stage.toUpperCase()} <span className="font-mono text-xs" style={{ color: 'var(--text-dim)' }}>{p.host}</span>
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ms(p.rtt.p50)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ms(p.rtt.p95)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ms(p.rtt.max)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums" style={{ color: 'var(--text-dim)' }}>{p.rtt.n}</td>
+                    </tr>
+                  ))}
+                  <tr className="border-t" style={{ borderColor: 'var(--border)' }}>
+                    <td className="px-4 py-2">Worker ↔ LiveKit media, round trip</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{ms(data.network.media.rtt.p50)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{ms(data.network.media.rtt.p95)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{ms(data.network.media.rtt.max)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums" style={{ color: 'var(--text-dim)' }}>{data.network.media.rtt.n}</td>
+                  </tr>
+                  <tr className="border-t" style={{ borderColor: 'var(--border)' }}>
+                    <td className="px-4 py-2">Customer audio jitter</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{ms(data.network.media.jitter.p50)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{ms(data.network.media.jitter.p95)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{ms(data.network.media.jitter.max)}</td>
+                    <td className="px-4 py-2 text-right tabular-nums" style={{ color: 'var(--text-dim)' }}>{data.network.media.jitter.n}</td>
+                  </tr>
+                  <tr className="border-t" style={{ borderColor: 'var(--border)' }}>
+                    <td className="px-4 py-2">Customer audio packet loss</td>
+                    {(['p50', 'p95', 'max'] as const).map((k) => (
+                      <td key={k} className="px-3 py-2 text-right tabular-nums">
+                        {data.network.media.lossPct[k] == null ? '—' : `${data.network.media.lossPct[k]!.toFixed(1)}%`}
+                      </td>
+                    ))}
+                    <td className="px-4 py-2 text-right tabular-nums" style={{ color: 'var(--text-dim)' }}>{data.network.media.lossPct.n}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </section>
+
+            <section className="card overflow-x-auto p-0">
+              <h3 className="px-4 pt-4 font-semibold">By voice that actually spoke</h3>
+              <table className="mt-2 w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
+                    <th className="px-4 py-2">Voice model</th>
+                    <th className="px-3 py-2 text-right">Turns</th>
+                    <th className="px-3 py-2 text-right">First audio p50</th>
+                    <th className="px-4 py-2 text-right">p95</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.byVoice.map((r) => (
+                    <tr key={r.model} className="border-t" style={{ borderColor: 'var(--border)' }}>
+                      <td className="px-4 py-2 font-mono text-xs">{r.model}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.turns}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{ms(r.tts.p50)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums">{ms(r.tts.p95)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </div>
+
           <section className="card overflow-x-auto p-0">
             <h3 className="px-4 pt-4 font-semibold">By day</h3>
             <table className="mt-2 w-full text-sm">
@@ -259,7 +349,7 @@ export default function TenantLatency({ tenantId }: { tenantId: string }) {
                     <td className="px-3 py-2 text-right tabular-nums">{r.turns}</td>
                     <td className="px-3 py-2 text-right"><Gap v={r.total.p50} t={t} /></td>
                     <td className="px-3 py-2 text-right"><Gap v={r.total.p95} t={t} /></td>
-                    <td className="px-3 py-2 text-right tabular-nums">{pct(r.underTarget, r.turns)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{pct(r.underTarget, r.timedTurns)}</td>
                     <td className="px-4 py-2 text-right tabular-nums" style={r.stalls ? { color: 'var(--bad)' } : undefined}>{r.stalls}</td>
                   </tr>
                 ))}
@@ -283,6 +373,7 @@ export default function TenantLatency({ tenantId }: { tenantId: string }) {
                   <th className="px-3 py-2 text-right">p50</th>
                   <th className="px-3 py-2 text-right">Max</th>
                   <th className="px-3 py-2 text-right">Pickup→word</th>
+                  <th className="px-3 py-2 text-right">Network</th>
                   <th className="px-4 py-2 text-right">Stalls</th>
                 </tr>
               </thead>
@@ -307,6 +398,14 @@ export default function TenantLatency({ tenantId }: { tenantId: string }) {
                     <td className="px-3 py-2 text-right"><Gap v={c.p50} t={t} /></td>
                     <td className="px-3 py-2 text-right"><Gap v={c.max} t={t} /></td>
                     <td className="px-3 py-2 text-right tabular-nums">{ms(c.greetingMs)}</td>
+                    <td className="px-3 py-2 text-right text-xs tabular-nums" style={{ color: 'var(--text-dim)' }}>
+                      {c.net.mediaRttMs != null || Object.keys(c.net.providers).length ? (
+                        <>
+                          {['stt', 'llm', 'tts'].filter((k) => c.net.providers[k] != null).map((k) => `${k} ${ms(c.net.providers[k])}`).join(' · ')}
+                          {c.net.mediaRttMs != null && <span className="block">media {ms(c.net.mediaRttMs)}{c.net.lossPct != null ? ` · loss ${c.net.lossPct.toFixed(1)}%` : ''}</span>}
+                        </>
+                      ) : '—'}
+                    </td>
                     <td className="px-4 py-2 text-right tabular-nums" style={c.stalls ? { color: 'var(--bad)' } : undefined}>
                       {c.stalls}
                       {c.stallGuardFires ? <span className="block text-xs" style={{ color: 'var(--text-dim)' }}>guard {c.stallGuardFires}×</span> : null}

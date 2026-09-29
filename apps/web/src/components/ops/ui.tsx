@@ -40,8 +40,9 @@ export function fmtDate(iso: string | null | undefined): string {
 
 export function secs(s: number): string {
   if (!s) return '0:00';
-  const m = Math.floor(s / 60);
-  return `${m}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+  const whole = Math.round(s);
+  const m = Math.floor(whole / 60);
+  return `${m}:${String(whole % 60).padStart(2, '0')}`;
 }
 
 /** Shows a one-time link with a copy button — used for invites and resets. */
