@@ -86,6 +86,9 @@ TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | eleve
 # (nova-2-phonecall + the local end-of-turn model): measured on 28 Sep it spent
 # ~450 ms per turn just waiting for the final transcript. Kept as a fallback.
 STT_MODEL = (os.getenv("STT_MODEL") or "flux").lower()  # flux | nova
+# Deepgram serves the same models from regional hosts: api.deepgram.com (US),
+# api.au.deepgram.com (Sydney), api.eu.deepgram.com. The same key works on all.
+DEEPGRAM_HOST = (os.getenv("DEEPGRAM_HOST") or "api.deepgram.com").strip()
 # Who decides that the customer has *started* and *stopped* speaking when STT
 # is Flux. "stt": Flux's own StartOfTurn/EndOfTurn drive the framework. On the
 # 28 Sep test call Flux raised StartOfTurn on line echo/noise with no EndOfTurn
@@ -663,7 +666,9 @@ async def _post_event(
 def _provider_probes() -> list[tuple[str, str, str, dict[str, str]]]:
     """(stage, host, url, headers) for a cheap authenticated GET on each provider."""
     dg = os.environ.get("DEEPGRAM_API_KEY", "")
-    out = [("stt", "api.deepgram.com", "https://api.deepgram.com/v1/projects", {"Authorization": f"Token {dg}"})]
+    # /v1/projects only exists on the US host (404 elsewhere); the round trip is what is timed.
+    dg_probe = ("https://" + DEEPGRAM_HOST + "/v1/projects", {"Authorization": f"Token {dg}"})
+    out = [("stt", DEEPGRAM_HOST, *dg_probe)]
     if LLM_PROVIDER == "vertex":
         host = f"{VERTEX_LOCATION}-aiplatform.googleapis.com"
         out.append(("llm", host, f"https://{host}/v1/publishers/google/models", {}))
@@ -678,7 +683,7 @@ def _provider_probes() -> list[tuple[str, str, str, dict[str, str]]]:
     elif TTS_PROVIDER == "cartesia":
         out.append(("tts", "api.cartesia.ai", "https://api.cartesia.ai/voices?limit=1", {"X-API-Key": os.environ.get("CARTESIA_API_KEY", ""), "Cartesia-Version": "2025-04-16"}))
     else:
-        out.append(("tts", "api.deepgram.com", "https://api.deepgram.com/v1/projects", {"Authorization": f"Token {dg}"}))
+        out.append(("tts", DEEPGRAM_HOST, *dg_probe))
     return out
 
 
@@ -1213,7 +1218,7 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
     # Aura-1 (asteria) was tuned for lowest-latency demo speed and reads as
     # fast/clipped on a real call. Aura-2 luna is calmer; hera/orpheus are
     # alternatives. Deepgram has no speech-rate knob — pick the voice instead.
-    return deepgram.TTS(model=TTS_VOICE or "aura-2-luna-en")
+    return deepgram.TTS(model=TTS_VOICE or "aura-2-luna-en", base_url=f"https://{DEEPGRAM_HOST}/v1/speak")
 
 
 def _build_stt():  # noqa: ANN202 — plugin STT types differ
@@ -1233,6 +1238,7 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
     if STT_MODEL == "flux":
         try:
             stt_engine = deepgram.STTv2(
+                base_url=f"wss://{DEEPGRAM_HOST}/v2/listen",
                 model="flux-general-en",
                 eager_eot_threshold=0.5,
                 eot_threshold=0.7,
@@ -1273,6 +1279,7 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
     # noise never gave it. utterance_end_ms turns on Deepgram's word-timing-based
     # UtteranceEnd signal as a second, noise-robust path to finalize a turn.
     stt_engine = deepgram.STT(
+        base_url=f"https://{DEEPGRAM_HOST}/v1/listen",
         model="nova-2-phonecall", utterance_end_ms=1000, endpointing_ms=25, **keyterm_kw
     )
     turn_handling = {

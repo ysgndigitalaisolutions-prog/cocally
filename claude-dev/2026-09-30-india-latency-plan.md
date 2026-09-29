@@ -34,3 +34,12 @@ needs a fast language model served near Sydney.
 3. Run `~/stt_bench.py` from the Sydney VM. If Ink-2 is fast there, add it as a speech-to-text option and compare accuracy with Flux on live calls.
 4. Look for a fast language model served near Sydney.
 5. Before go-live: test call over Telvoq to an Australian number.
+
+## Deepgram Australian endpoint (added 30 Sep)
+
+`api.au.deepgram.com` resolves to AWS Sydney (ap-southeast-2) and accepts our
+existing key for Flux and nova-3. The management API (`/v1/projects`) is not
+served there (404); speech endpoints are. Worker setting: `DEEPGRAM_HOST`
+(default `api.deepgram.com`). From India the AU host is slower than the US one
+(nova-3 finalize 315 ms against 250 ms), as expected for a tester in India;
+the Sydney measurement is pending.
