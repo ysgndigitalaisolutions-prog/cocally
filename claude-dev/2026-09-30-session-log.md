@@ -93,3 +93,11 @@ for a tiny reply). Every other call, including the same one repeated and all
 calls in `ap-southeast-2`, returns HTTP 400 `ValidationException: Operation not
 allowed`. The request format is therefore valid; the refusal is on the account.
 No Nova timing from Sydney yet. Benchmark script: `~/fluxtts_bench.py`.
+
+Text models the account lists as on demand with streaming in Sydney
+(`ap-southeast-2`), relevant to calls: `amazon.nova-micro-v1:0`,
+`amazon.nova-lite-v1:0`, `openai.gpt-oss-20b-1:0`, `openai.gpt-oss-120b-1:0`,
+`qwen.qwen3-32b-v1:0`, `google.gemma-3-4b-it`, `google.gemma-3-12b-it`,
+`google.gemma-3-27b-it`, `mistral.ministral-3-8b-instruct`. All return
+`Operation not allowed` until the account block clears. `~/llm_bench.py` times
+them in one run. Whether each supports tool calling is unverified.
