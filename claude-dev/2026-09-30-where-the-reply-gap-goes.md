@@ -70,3 +70,15 @@ Not verified: that the chosen model id is served in `australia-southeast1`, its 
 | gemini-3.8-flash | rejects thinking level "minimal" |
 Round trip to the Gemini API for a trivial request: 0.22 s, so about 0.8 s of Flash-Lite's first token is the service itself. A Sydney endpoint can remove at most the 0.2 s: Gemini would still be slower than Cerebras with its ocean crossing. The key may be on a low tier (the 3.5-flash numbers say so), so Vertex on a paid project could differ, but nothing here suggests it beats 0.4 s.
 **Conclusion: stay on Cerebras. Do not switch to Gemini for speed.** Worker default `GEMINI_MODEL` changed to `gemini-3.5-flash-lite` (2.5 is retired); the provider stays available behind `LLM_PROVIDER`.
+
+## Vertex AI benchmark, 30 Sep (paid project cocally-509318, from India, same prompt + tool)
+| Endpoint | Model | First token, warm median |
+|---|---|---|
+| australia-southeast1 | gemini-3.5-flash-lite | not served in this region (404) |
+| australia-southeast1 | gemini-2.5-flash-lite | not served in this region (404) |
+| australia-southeast1 | gemini-3.5-flash | 5.8 s (1.8–20 s) |
+| global | gemini-2.5-flash-lite | 0.65 s |
+| global | gemini-3.5-flash-lite | 0.79 s |
+| global | gemini-3.5-flash | 0.84 s |
+Trivial request round trip from India: Sydney endpoint 0.40 s, global 0.15 s. Net of network, Flash-Lite needs 0.5–0.65 s to its first token; Cerebras needs 0.45 s including its 0.25 s of network.
+**Final: Gemini is not faster, and the fast Gemini models are not offered in Sydney. LLM stays on Cerebras.** Vertex AI API and `roles/aiplatform.user` are enabled on the project (harmless; leave or remove).
