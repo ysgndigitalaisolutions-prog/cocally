@@ -72,3 +72,24 @@ qwen-3.8-27b 0.44 s from the same machine.
 - Worker: `LLM_PROVIDER=bedrock`, `BEDROCK_MODEL` (default `amazon.nova-micro-v1:0`), `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK`. Bedrock goes first in the chain, Cerebras and Groq stay behind it as fallback. New dependency `livekit-plugins-aws==1.6.6`.
 - Not yet callable: AWS answers "Your account is currently being verified" (HTTP 403) on `converse` and "Operation not allowed" (HTTP 400) on `converse-stream`. No Nova timing exists yet.
 - `~/llm_bench.py` now times Bedrock models next to Cerebras.
+
+## Deepgram Flux TTS and Bedrock status (30 Sep, later)
+
+Deepgram Flux TTS (`wss://<host>/v2/speak`, model `flux-haley-en`, released
+12 Aug 2026), time from sending text to first audio frame, warm socket:
+
+| Host | From the Sydney VM | From India |
+|---|---|---|
+| `api.au.deepgram.com` | 96 ms | 378 ms |
+| `api.deepgram.com` | 299 ms | 303 ms |
+
+Against Cartesia Sonic-3.6 at 78 ms from Sydney. The installed LiveKit Deepgram
+plugin (1.6.6) has no Flux TTS support, and Deepgram's launch notice limits
+AU to 5 concurrent connections. Cartesia stays the voice candidate.
+
+Bedrock after account verification: one `converse` call to
+`amazon.nova-micro-v1:0` in `us-east-1` succeeded (server-side latency 573 ms
+for a tiny reply). Every other call, including the same one repeated and all
+calls in `ap-southeast-2`, returns HTTP 400 `ValidationException: Operation not
+allowed`. The request format is therefore valid; the refusal is on the account.
+No Nova timing from Sydney yet. Benchmark script: `~/fluxtts_bench.py`.
