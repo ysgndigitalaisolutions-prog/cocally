@@ -650,7 +650,12 @@ def _provider_probes() -> list[tuple[str, str, str, dict[str, str]]]:
     """(stage, host, url, headers) for a cheap authenticated GET on each provider."""
     dg = os.environ.get("DEEPGRAM_API_KEY", "")
     out = [("stt", "api.deepgram.com", "https://api.deepgram.com/v1/projects", {"Authorization": f"Token {dg}"})]
-    if LLM_PROVIDER == "groq":
+    if LLM_PROVIDER == "vertex":
+        host = f"{VERTEX_LOCATION}-aiplatform.googleapis.com"
+        out.append(("llm", host, f"https://{host}/v1/publishers/google/models", {}))
+    elif LLM_PROVIDER == "gemini":
+        out.append(("llm", "generativelanguage.googleapis.com", "https://generativelanguage.googleapis.com/v1beta/models", {"x-goog-api-key": os.environ.get("GOOGLE_API_KEY", "")}))
+    elif LLM_PROVIDER == "groq":
         out.append(("llm", "api.groq.com", "https://api.groq.com/openai/v1/models", {"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY', '')}"}))
     else:
         out.append(("llm", "api.cerebras.ai", "https://api.cerebras.ai/v1/models", {"Authorization": f"Bearer {os.environ.get('CEREBRAS_API_KEY', '')}"}))
@@ -1298,6 +1303,49 @@ _PROVIDERS = {
 LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or ("cerebras" if os.getenv("CEREBRAS_API_KEY") else "groq")).lower()
 
 
+# Google Gemini, for an LLM in the same region as the worker. Cerebras and Groq
+# answer in ~0.03 s but sit in the US: from Sydney every request pays an ocean
+# crossing (30 Sep: 0.25 s round trip for a trivial request).
+#   LLM_PROVIDER=vertex  Vertex AI regional endpoint; auth is the VM's service
+#                        account (no key). Needs the Vertex AI API enabled and
+#                        roles/aiplatform.user on that account.
+#   LLM_PROVIDER=gemini  Gemini API with GOOGLE_API_KEY (no region choice).
+GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite"
+VERTEX_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION") or "australia-southeast1"
+IS_GEMINI = LLM_PROVIDER in ("vertex", "gemini")
+# What the call record shows as the configured LLM.
+LLM_LABEL = GEMINI_MODEL if IS_GEMINI else LLM_MODEL
+
+
+def _gemini_thinking() -> dict | None:
+    """Thinking off (or as low as the model allows): it only adds first-token time."""
+    mode = (os.getenv("GEMINI_THINKING") or "auto").lower()
+    if mode == "default":
+        return None
+    if "2.5" in GEMINI_MODEL:
+        return {"thinking_budget": 0}
+    if GEMINI_MODEL.startswith("gemini-3"):
+        return {"thinking_level": "minimal"}
+    return None
+
+
+def _gemini_llm():
+    from livekit.plugins import google
+
+    kw: dict = {"model": GEMINI_MODEL, "max_output_tokens": LLM_MAX_TOKENS}
+    thinking = _gemini_thinking()
+    if thinking:
+        kw["thinking_config"] = thinking
+    if LLM_PROVIDER == "vertex":
+        kw.update(vertexai=True, location=VERTEX_LOCATION)
+        project = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT_ID")
+        if project:
+            kw["project"] = project
+    else:
+        kw["api_key"] = os.environ["GOOGLE_API_KEY"]
+    return google.LLM(**kw)
+
+
 def _family(model: str) -> str:
     return "gpt-oss" if "gpt-oss" in model.lower() else "qwen"
 
@@ -1321,7 +1369,8 @@ def _llm_chain() -> list[tuple[str, str]]:
     providers with a key)."""
     primary = _family(LLM_MODEL)
     other = "gpt-oss" if primary == "qwen" else "qwen"
-    order = [LLM_PROVIDER] + [p for p in _PROVIDERS if p != LLM_PROVIDER]
+    first = LLM_PROVIDER if LLM_PROVIDER in _PROVIDERS else ("cerebras" if os.environ.get("CEREBRAS_API_KEY") else "groq")
+    order = [first] + [p for p in _PROVIDERS if p != first]
     return [(p, f) for p in order if os.environ.get(_PROVIDERS[p]["key_env"]) for f in (primary, other)]
 
 
@@ -1335,10 +1384,19 @@ def _make_llm():
     from livekit.agents import llm as _llm
 
     chain = _llm_chain()
-    if not chain:
-        raise RuntimeError("no LLM provider key set (CEREBRAS_API_KEY or GROQ_API_KEY)")
-    logger.info("LLM chain: %s", " -> ".join(f"{p}:{_PROVIDERS[p]['models'][f]}" for p, f in chain))
-    instances = [_openai_compat_llm(p, f) for p, f in chain]
+    instances = []
+    names = []
+    if IS_GEMINI:
+        try:
+            instances.append(_gemini_llm())
+            names.append(f"{LLM_PROVIDER}:{GEMINI_MODEL}" + (f"@{VERTEX_LOCATION}" if LLM_PROVIDER == "vertex" else ""))
+        except Exception as e:  # noqa: BLE001 — a missing plugin/key must not take the floor down
+            logger.error("Gemini LLM unavailable (%s) — using the %s chain", e, "Cerebras/Groq")
+    if not chain and not instances:
+        raise RuntimeError("no LLM provider available (CEREBRAS_API_KEY, GROQ_API_KEY, or LLM_PROVIDER=vertex)")
+    names += [f"{p}:{_PROVIDERS[p]['models'][f]}" for p, f in chain]
+    logger.info("LLM chain: %s", " -> ".join(names))
+    instances += [_openai_compat_llm(p, f) for p, f in chain]
     if len(instances) == 1:
         return instances[0]
     # attempt_timeout bounds the wait for the FIRST token from one provider
@@ -1412,7 +1470,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if brief
         else "Greet the person, give the AI + recording disclosure in one sentence, and ask if now is a good moment."
     )
-    logger.info("starting agent (call=%s, brief=%s, stt=%s/%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, STT_TURN, LLM_PROVIDER, LLM_MODEL, TTS_PROVIDER)
+    logger.info("starting agent (call=%s, brief=%s, stt=%s/%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, STT_TURN, LLM_PROVIDER, LLM_LABEL, TTS_PROVIDER)
 
     tts_engine = _build_tts()
     disclosure = (brief or {}).get("disclosureLine")
@@ -1453,7 +1511,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             "llmTtftMs": round(turn.get("llm", 0) * 1000),
             "ttsTtfbMs": round(turn.get("tts", 0) * 1000),
             "totalMs": round((turn.get("eou", 0) + turn.get("llm", 0) + turn.get("tts", 0)) * 1000),
-            "llmModel": LLM_MODEL,
+            "llmModel": LLM_LABEL,
             "ttsProvider": TTS_PROVIDER,
             "sttModel": STT_MODEL,
             **({"llmServed": str(turn["llm_served"])[:80]} if turn.get("llm_served") else {}),

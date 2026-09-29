@@ -51,3 +51,9 @@ Each is an env switch; the Latency tab compares stacks, so: switch one thing, ma
 | B. Keep the worker in Sydney, move the LLM to Gemini Flash-Lite on Vertex `australia-southeast1` | ~1.0 s (LLM 0.39 → ~0.25 s) | Vertex AI API + role for the VM's service account; model behaviour to re-check on the script. |
 | C. Groq / Fireworks / SambaNova / Together | little or none | All US-hosted: same ocean crossing as Cerebras. |
 Benchmark scripts: `scratchpad/ttft.py`, `ttft2.py` (Cerebras, Gemini API, Anthropic, OpenAI; runs whichever keys are set).
+
+## Decision 30 Sep: keep the worker in Sydney, bring the LLM to it (option B)
+Worker now supports `LLM_PROVIDER=vertex` (Gemini on Vertex AI, regional endpoint, VM service account, no key) and `LLM_PROVIDER=gemini` (Gemini API with `GOOGLE_API_KEY`). `GEMINI_MODEL` defaults to `gemini-2.5-flash-lite`; thinking is switched off / minimal. Cerebras and Groq stay in the chain as fallbacks (2.5 s first-token timeout). `livekit-plugins-google==1.6.6` added. `setup.sh` writes `GEMINI_MODEL`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`.
+
+To switch on: enable `aiplatform.googleapis.com`, grant `roles/aiplatform.user` to the runtime service account, set `LLM_PROVIDER=vertex` in `deploy/gcp/.env`, run `setup.sh`, push to `prod`.
+Not verified: that the chosen model id is served in `australia-southeast1`, its first-token time there, and that it follows the script and calls the transfer tool as reliably as Qwen. First test calls decide.

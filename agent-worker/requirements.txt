@@ -4,6 +4,8 @@ livekit-agents[deepgram,openai,silero,turn-detector]==1.6.6
 # Optional lower-TTFB voices (selected with TTS_PROVIDER=elevenlabs|cartesia):
 livekit-plugins-elevenlabs==1.6.6
 livekit-plugins-cartesia==1.6.6
+# Gemini on Vertex AI / Gemini API (LLM_PROVIDER=vertex|gemini): an LLM in the worker's own region.
+livekit-plugins-google==1.6.6
 # Optional LiveKit Cloud noise cancellation tuned for PSTN audio (NOISE_CANCELLATION=1):
 livekit-plugins-noise-cancellation~=0.2
 python-dotenv~=1.0
