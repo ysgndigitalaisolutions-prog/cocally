@@ -129,3 +129,23 @@ Time to first token, real call prompt with the transfer tool, from India
 
 India is about 285 ms round trip further from Sydney than the VM is, so the
 Bedrock rows should drop by roughly that much from Sydney. Sydney run pending.
+
+## Language model from the Sydney VM (30 Sep)
+
+Time to first token, real call prompt with the transfer tool, warm, median of six:
+
+| Model | Median | Range |
+|---|---|---|
+| Cerebras qwen-3.8-27b (current) | 349 ms | 330-753 |
+| Cerebras gpt-oss-120b | 393 ms | 358-1790 |
+| Bedrock nvidia.nemotron-nano-3-30b | 249 ms | 165-321 |
+| Bedrock zai.glm-4.7-flash | 279 ms | 154-336 |
+| Bedrock mistral.ministral-3-14b-instruct | 296 ms | 175-344 |
+| Bedrock qwen.qwen3-32b | 300 ms | 271-334 |
+| Bedrock mistral.ministral-3-8b-instruct | 302 ms | 167-359 |
+| Bedrock openai.gpt-oss-20b | 390 ms | 300-431 |
+| Bedrock openai.gpt-oss-120b | 713 ms | 498-1027 |
+| Bedrock google.gemma-3 (all sizes) | no tokens with the tool attached | |
+
+Bedrock in Sydney saves 50-100 ms on the median and has a tighter range than
+Cerebras. Answer quality on calls is untested for every Bedrock model.
