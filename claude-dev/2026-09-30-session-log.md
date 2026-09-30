@@ -168,3 +168,50 @@ the two Qwen models stayed within the rules in all five.
 
 Deepgram Flux TTS: supported by `livekit-plugins-deepgram` 1.8.3 (`TTSv2`),
 which requires `livekit-agents` 1.8.3. The worker is pinned to 1.6.6.
+
+## Test calls on the Cartesia + Deepgram AU stack (30 Sep, afternoon)
+
+Three calls to an Indian number over Twilio. 04:40 and 05:01 UTC: the AI's
+first exchange worked, then the customer's audio arrived garbled at LiveKit
+(−26 to −31 dB, unintelligible in the recording; zero `user listening ->
+speaking` lines in the worker log). Degraded before the worker, not a provider.
+
+05:26 UTC (`6abc9d84`): six clean turns, full script. Gap the customer would
+hear, measured on the LiveKit recording with nova-3 word timings (customer's
+last word ends -> AI's first word starts):
+
+| Customer's last words | Gap | Worker stages (eou + llm + tts) |
+|---|---|---|
+| "Yes. Go on." | 2.46 s | 630 + 381 + 334 = 1345 (first turn; ~1.1 s unexplained) |
+| "Yes. I do." | 0.96 s | 433 + 363 + 319 = 1115 |
+| "...gas bill reviewed." | 0.96 s | 606 + 0 + 327 (llm:0 metric bug) |
+| "...Simply Energy." | 1.16 s | 260 + 351 + 322 = 933 |
+| "...by email only." | 0.96 s | 410 + 354 + 359 = 1123 |
+| "...say, $500." | 1.52 s | 0 + 367 + 314 (eou:0 metric bug) |
+
+Median 1.0 s at the recording. The 0.44 s on the 05:01 call was a single
+lucky turn; this is the real figure and it agrees with the worker's own sums.
+The three stages per turn: end of turn 0.26-0.63 s (VAD silence 0.25 + fixed
+0.2 + Flux final), LLM 0.35-0.38 s (Cerebras, steady), TTS 0.31-0.36 s.
+
+The TTS stage is the surprise. Cartesia's websocket path, benchmarked with the
+plugin's exact packet (one sentence, `continue: true`,
+`max_buffer_delay_ms: 0`, `add_timestamps`) on a reused connection, gives
+first audio in 79-96 ms even from India (`scratchpad/ttsws_bench2.py`), and
+the HTTP path 78 ms from Sydney earlier today. The worker reports 314-359 ms,
+so about 230 ms per turn is inside the worker/plugin, not at Cartesia. The
+framework's TTS metric starts when the first sentence is sent and ends at the
+first audio frame; the metric also carries `connection_reused` and
+`acquire_time`, which the worker now logs at INFO per turn
+(`tts_ttfb=… acquire=… reused=…`). Next call's log tells whether the pooled
+websocket is being reopened each turn.
+
+Where the remaining time can come from, in order of certainty:
+1. TTS stage 320 -> ~100 ms if the ~230 ms is connection setup or a plugin
+   wait (pending the log line above). Saves ~0.2 s.
+2. End of turn: `ENDPOINT_MIN_DELAY` 0.2 -> 0.05 and VAD min silence 0.25 ->
+   0.2 saves up to 0.2 s, at the cost of cutting in on mid-sentence pauses.
+3. LLM: Cerebras 350 ms is 215 ms of distance to the US plus generation;
+   Bedrock Sydney qwen3-32b measured 300 ms, not enough to justify the switch.
+
+With 1 and 2 the recording gap lands around 0.6-0.7 s, inside the target.

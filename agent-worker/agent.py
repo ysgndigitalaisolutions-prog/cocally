@@ -1705,7 +1705,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 turn["prompt_tokens"] = m.prompt_tokens
         elif kind == "tts_metrics":
             over = m.ttfb > LATENCY_BUDGET_S["tts_ttfb"]
-            (logger.warning if over else logger.debug)("tts_ttfb=%.2fs cancelled=%s (call=%s)", m.ttfb, m.cancelled, call_id)
+            # Always at INFO: the 30 Sep 05:26 call showed tts_ttfb 314-359 ms
+            # while Cartesia answers a sentence over a warm websocket in ~87 ms,
+            # so whether the plugin's pooled connection is reused matters.
+            (logger.warning if over else logger.info)(
+                "tts_ttfb=%.2fs acquire=%.3fs reused=%s cancelled=%s (call=%s)",
+                m.ttfb, getattr(m, "acquire_time", 0.0) or 0.0, getattr(m, "connection_reused", None), m.cancelled, call_id,
+            )
             if not m.cancelled:
                 turn["tts"] = m.ttfb
                 md = getattr(m, "metadata", None)
