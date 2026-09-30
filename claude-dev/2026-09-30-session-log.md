@@ -233,3 +233,14 @@ each one's first-audio and edge headers; from India (HYD57 edge) all six were
 81-99 ms. Sydney run pending. If Sydney shows a slow/fast split, the fix is
 to probe the socket after opening and reopen when slow (or open per turn: the
 33 ms open overlaps the LLM wait and never sits on the critical path).
+
+Sydney run of `ttsconn_bench.py` (06:07 UTC, all via edge SYD62): connections
+0, 2, 4, 5, 7 opened in 18-60 ms and gave first audio in 66-95 ms; connections
+1, 3, 6 opened in 770-1014 ms and gave 312-335 ms on every sentence. Fix in
+the worker: `_CartesiaTTS` overrides the plugin's `_connect_ws` and reopens a
+socket that took more than `CARTESIA_SLOW_CONNECT_MS` (300) to open, up to
+`CARTESIA_CONNECT_TRIES` (4). Logs `cartesia websocket open N ms` per open.
+
+06:06 call (`6abca6ce`): three turns, recording gaps 1.10 / 1.03 / 0.40 s;
+the third reply ("Thanks. Got it, electricity it is.") stopped there and the
+line was silent ~8 s until the customer hung up. Worker log for it pending.

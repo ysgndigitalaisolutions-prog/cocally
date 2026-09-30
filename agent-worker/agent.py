@@ -79,6 +79,11 @@ ENGINE_SERVICE_TOKEN = os.getenv("ENGINE_SERVICE_TOKEN")
 LLM_MODEL = os.getenv("LLM_MODEL") or "qwen/qwen3.8-27b"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "160"))  # short spoken turns → TTS starts sooner
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | elevenlabs | cartesia
+# Cartesia websocket that took longer than this to open is on a far back-end
+# (~320 ms per sentence instead of ~70); reopen it, up to this many tries.
+# See _CartesiaTTS in _build_tts.
+CARTESIA_SLOW_CONNECT_MS = float(os.getenv("CARTESIA_SLOW_CONNECT_MS", "300"))
+CARTESIA_CONNECT_TRIES = int(os.getenv("CARTESIA_CONNECT_TRIES", "4"))
 # STT + turn-taking. "flux" (default) is Deepgram's conversational model: it
 # decides end-of-turn itself from the audio and words (~260 ms after the person
 # stops) and emits an *eager* end-of-turn earlier still, which the framework
@@ -1215,7 +1220,28 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
         try:
             from livekit.plugins import cartesia
 
-            return cartesia.TTS(model="sonic-3.6", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
+            class _CartesiaTTS(cartesia.TTS):
+                """api.cartesia.ai is a CloudFront distribution and some websockets
+                get proxied to a far back-end: measured from the Sydney VM on 30 Sep,
+                3 of 8 fresh connections took 770-1014 ms to open and then answered
+                every sentence in ~320 ms; the rest opened in 18-60 ms and answered
+                in ~70 ms. The plugin keeps one socket for the whole call, so a slow
+                one costs ~0.25 s on every turn. The open time tells them apart, so
+                reopen when it is slow."""
+
+                async def _connect_ws(self, timeout: float):  # noqa: ANN202
+                    for attempt in range(CARTESIA_CONNECT_TRIES):
+                        t0 = time.perf_counter()
+                        ws = await super()._connect_ws(timeout)
+                        took_ms = (time.perf_counter() - t0) * 1000
+                        if took_ms <= CARTESIA_SLOW_CONNECT_MS or attempt == CARTESIA_CONNECT_TRIES - 1:
+                            logger.info("cartesia websocket open %.0f ms (attempt %d)", took_ms, attempt + 1)
+                            return ws
+                        logger.info("cartesia websocket open %.0f ms: far back-end, reopening", took_ms)
+                        await ws.close()
+                    raise AssertionError("unreachable")
+
+            return _CartesiaTTS(model="sonic-3.6", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
         except Exception as e:  # noqa: BLE001
             logger.warning("cartesia TTS unavailable (%s) — using Deepgram", e)
     # Aura-1 (asteria) was tuned for lowest-latency demo speed and reads as
