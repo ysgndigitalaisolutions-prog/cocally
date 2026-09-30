@@ -215,3 +215,21 @@ Where the remaining time can come from, in order of certainty:
    Bedrock Sydney qwen3-32b measured 300 ms, not enough to justify the switch.
 
 With 1 and 2 the recording gap lands around 0.6-0.7 s, inside the target.
+
+### 05:44 call: the TTS stage is per-connection
+
+Call `6abca1a5` (customer audio garbled again: "Pressure is gone" for "Yes, go
+on", confidence 0.8; "Hello?" at 0.97). The new log line showed two regimes on
+one call: greeting and turn 1 on the prewarmed websocket, `tts_ttfb=0.33s
+reused=True`; an interruption cancelled a synthesis, the pool dropped that
+socket, and the replacement (33 ms to open) gave `tts_ttfb=0.08s` on every
+later turn, reused or not. So Cartesia itself is ~80 ms from Sydney; some
+websocket connections are ~320 ms on every request, and the 05:26 call spent
+all six turns on one such connection. Idle time between uses is not the cause
+(`ttsidle_bench.py`: 81-105 ms after 0-12 s idle). `api.cartesia.ai` is a
+CloudFront distribution, so the likely split is which origin the edge proxies
+a given websocket to. `ttsconn_bench.py` opens N fresh connections and prints
+each one's first-audio and edge headers; from India (HYD57 edge) all six were
+81-99 ms. Sydney run pending. If Sydney shows a slow/fast split, the fix is
+to probe the socket after opening and reopen when slow (or open per turn: the
+33 ms open overlaps the LLM wait and never sits on the critical path).
