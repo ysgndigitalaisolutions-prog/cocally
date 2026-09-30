@@ -33,6 +33,7 @@ import math
 import os
 import re
 import time
+from collections import deque
 from typing import AsyncIterator
 
 import aiohttp
@@ -631,6 +632,62 @@ async def _post_metrics(call_id: str, payload: dict) -> None:
                 logger.debug("metrics post %s -> HTTP %s", call_id, r.status)
     except Exception as e:  # noqa: BLE001
         logger.debug("metrics post failed: %s", e)
+
+
+def _ship_call_log(ctx: agents.JobContext, call_id: str | None) -> None:
+    """Copy this process's INFO+ log lines (ours and the framework's) onto the
+    call record as `timings.workerLog`, so a failed test call can be read from
+    the ops data without ssh to the VM. One job per process, so every record
+    is this call's. Posted in the background, a line at a time, flushed on
+    shutdown; failures are dropped, the console log stays the source of truth."""
+    if not (call_id and ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
+        return
+    pending: deque[str] = deque(maxlen=1000)
+
+    class _Shipper(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            # Only our lines and the framework's: anything an HTTP library logs
+            # about the posts themselves would otherwise feed back in.
+            if not (record.name == "cocally-agent" or record.name.startswith("livekit")):
+                return
+            try:
+                pending.append(f"{record.levelname[0]} {record.name.removeprefix('livekit.')}: {record.getMessage()}"[:200])
+            except Exception:  # noqa: BLE001 — a log handler must never raise
+                pass
+
+    handler = _Shipper(level=logging.INFO)
+    logging.getLogger().addHandler(handler)
+    url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/events"
+    headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
+
+    async def _flush() -> None:
+        if not pending:
+            return
+        try:
+            async with aiohttp.ClientSession() as s:
+                while pending:
+                    line = pending.popleft()
+                    async with s.post(url, headers=headers, json={"kind": "worker_log", "detail": line}, timeout=10):
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _pump() -> None:
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                await _flush()
+        except asyncio.CancelledError:
+            pass
+
+    task = asyncio.create_task(_pump())
+
+    async def _stop() -> None:
+        logging.getLogger().removeHandler(handler)
+        task.cancel()
+        await _flush()
+
+    ctx.add_shutdown_callback(_stop)
 
 
 async def _post_event(
@@ -1546,6 +1603,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         else "Greet the person, give the AI + recording disclosure in one sentence, and ask if now is a good moment."
     )
     logger.info("starting agent (call=%s, brief=%s, stt=%s/%s, interruption=%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, STT_TURN, INTERRUPTION["mode"], LLM_PROVIDER, LLM_LABEL, TTS_PROVIDER)
+    _ship_call_log(ctx, call_id)
 
     tts_engine = _build_tts()
     disclosure = (brief or {}).get("disclosureLine")
@@ -1669,6 +1727,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         text = (getattr(event, "transcript", "") or "").strip()
         if text:
             last_interim = text
+        if text and getattr(event, "is_final", False):
+            logger.info("final transcript %r (call=%s)", text[:120], call_id)
 
     @session.on("agent_state_changed")
     def _on_agent_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
@@ -1709,7 +1769,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         kind = getattr(m, "type", "")
         if kind == "eou_metrics":
             over = m.end_of_utterance_delay > LATENCY_BUDGET_S["eou"]
-            (logger.warning if over else logger.debug)(
+            (logger.warning if over else logger.info)(
                 "eou_delay=%.2fs transcription_delay=%.2fs (call=%s)",
                 m.end_of_utterance_delay, m.transcription_delay, call_id,
             )
@@ -1721,7 +1781,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             turn["transcription"] = m.transcription_delay
         elif kind == "llm_metrics":
             over = m.ttft > LATENCY_BUDGET_S["llm_ttft"]
-            (logger.warning if over else logger.debug)("llm_ttft=%.2fs cancelled=%s (call=%s)", m.ttft, m.cancelled, call_id)
+            (logger.warning if over else logger.info)("llm_ttft=%.2fs cancelled=%s (call=%s)", m.ttft, m.cancelled, call_id)
             if not m.cancelled:
                 turn["llm"] = m.ttft
                 md = getattr(m, "metadata", None)
@@ -1747,7 +1807,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 qualifier.spawn(_flush_turn())
         elif kind == "interruption_metrics":
             over = m.detection_delay > LATENCY_BUDGET_S["interruption_detect"]
-            (logger.warning if over else logger.debug)(
+            (logger.warning if over else logger.info)(
                 "interruption_detect=%.2fs backchannels=%d interruptions=%d (call=%s)",
                 m.detection_delay, m.num_backchannels, m.num_interruptions, call_id,
             )

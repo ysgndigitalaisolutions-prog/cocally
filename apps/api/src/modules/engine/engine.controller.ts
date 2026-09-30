@@ -74,7 +74,7 @@ class TurnMetricsDto {
   @IsOptional() @IsInt() @Min(0) heardMs?: number;
 }
 
-export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback', 'net_provider', 'net_media'] as const;
+export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback', 'net_provider', 'net_media', 'worker_log'] as const;
 
 class CallEventDto {
   @IsIn(CALL_EVENT_KINDS) kind: (typeof CALL_EVENT_KINDS)[number];
@@ -306,6 +306,19 @@ export class EngineController {
   @Post('calls/:id/events')
   async events(@Param('id') id: string, @Body() dto: CallEventDto) {
     if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
+    if (dto.kind === 'worker_log') {
+      // The worker's own INFO+ log lines for this call, so a failed test call
+      // can be read from the call record without ssh to the VM. Own array,
+      // last 500 lines: it must not crowd the 100-event timeline.
+      const res = await this.callModel
+        .updateOne(
+          { _id: new Types.ObjectId(id) },
+          { $push: { 'timings.workerLog': { $each: [{ at: new Date(), detail: dto.detail ?? '' }], $slice: -500 } } },
+        )
+        .exec();
+      if (res.matchedCount === 0) throw new NotFoundException('Call not found');
+      return { ok: true };
+    }
     const res = await this.callModel
       .updateOne(
         { _id: new Types.ObjectId(id) },

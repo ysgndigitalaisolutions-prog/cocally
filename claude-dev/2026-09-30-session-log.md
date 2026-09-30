@@ -244,3 +244,15 @@ socket that took more than `CARTESIA_SLOW_CONNECT_MS` (300) to open, up to
 06:06 call (`6abca6ce`): three turns, recording gaps 1.10 / 1.03 / 0.40 s;
 the third reply ("Thanks. Got it, electricity it is.") stopped there and the
 line was silent ~8 s until the customer hung up. Worker log for it pending.
+
+### Worker log on the call record (30 Sep, afternoon)
+
+Every test call needed a `gcloud compute ssh … logs` round trip before it could
+be analysed. Now the worker copies its INFO+ log lines (its own and the
+framework's warnings) onto the call as `timings.workerLog` (events endpoint,
+kind `worker_log`; own array, last 500 lines), so Claude reads them from Atlas
+with the turns, events, transcript and recording. Per-turn `eou_delay`,
+`llm_ttft`, `tts_ttfb` (with websocket reuse), interruption metrics, final
+transcripts, state transitions, Cartesia socket opens and stall guards are all
+at INFO. Read with the usual mongoose one-liner:
+`d.timings.workerLog.map(l => l.at.toISOString().slice(11,23)+" "+l.detail)`.

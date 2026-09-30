@@ -58,6 +58,8 @@ export interface CallTimings {
   turns?: Array<{ at: Date; eou: number; stt: number; llm: number; tts: number; total: number; llmServed?: string; ttsServed?: string; promptTokens?: number; heard?: number }>;
   /** Worker timeline events (answered, greeting, stall_guard, transfer), last 100. */
   events?: Array<{ at: Date; kind: string; ms?: number; detail?: string; host?: string; stage?: string; jitterMs?: number; lossPct?: number }>;
+  /** The worker's INFO+ log lines for this call (kind worker_log on the events endpoint), last 500. */
+  workerLog?: Array<{ at: Date; detail: string }>;
   transferDeadAirMs?: number;
 }
 
