@@ -97,15 +97,16 @@ STT_MODEL = (os.getenv("STT_MODEL") or "flux").lower()  # flux | nova
 # api.au.deepgram.com (Sydney), api.eu.deepgram.com. The same key works on all.
 DEEPGRAM_HOST = (os.getenv("DEEPGRAM_HOST") or "api.deepgram.com").strip()
 # Who decides that the customer has *started* and *stopped* speaking when STT
-# is Flux. "stt": Flux's own StartOfTurn/EndOfTurn drive the framework. On the
-# 28 Sep test call Flux raised StartOfTurn on line echo/noise with no EndOfTurn
-# after it; the framework pauses the agent's audio on start-of-speech and only
-# resumes on end-of-speech, so replies stopped mid-word ("is that Al—") and
-# stayed silent until the customer said "Hello?". "vad" (default): the local
-# VAD drives start/end of speech and interruptions, exactly as on the nova
-# stack, while Flux still delivers the fast transcript. Flux's eager end-of-turn
-# is not used in this mode.
-STT_TURN = (os.getenv("STT_TURN") or "vad").lower()  # vad | stt
+# is Flux. "stt" (default, the documented Flux setup): Flux's own
+# StartOfTurn/EndOfTurn drive the turn, its EagerEndOfTurn starts the draft
+# reply (preemptive generation), and the local VAD handles interruptions
+# only. "vad": the local VAD drives the turn and Flux only transcribes; the
+# eager end-of-turn is wasted because the turn cannot commit before Flux's
+# final anyway (measured 30 Sep: the gap equalled the plain sum of the stages).
+# The 28 Sep failure in stt mode (replies paused mid-word after Flux raised a
+# StartOfTurn on line noise) is the framework's false-interruption pause,
+# which is switched off below (`resume_false_interruption: False`).
+STT_TURN = (os.getenv("STT_TURN") or "stt").lower()  # stt | vad
 # Seconds after the customer stops speaking before the worker forces the turn
 # if no reply has started (see the stall guard in entrypoint). Normal turns
 # start a reply within ~1 s, so 2.5 s only ever fires on an STT stall.
@@ -138,6 +139,11 @@ INTERRUPTION = {
     # heard the customer three times and Flux never got a word, the signature
     # of that substitution staying on; the STT must always hear the caller.
     "discard_audio_if_uninterruptible": False,
+    # Never pause a reply on a start-of-speech and wait for a transcript to
+    # decide: on a phone line Flux/VAD raise starts on noise and echo, and a
+    # paused reply with no resume is what the 28 Sep call sounded like. A real
+    # interruption still stops the reply through the VAD (min_duration above).
+    "resume_false_interruption": False,
 }
 # Approved line when a transfer finds nobody. Spoken by the worker, not the
 # model, so the model cannot carry on the script after a failed hand-off.
@@ -1487,19 +1493,21 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
             stt_engine = _FluxSTT(
                 base_url=f"wss://{DEEPGRAM_HOST}/v2/listen",
                 model="flux-general-en",
-                eager_eot_threshold=0.5,
+                # Deepgram's low-latency profile is eager 0.4 / eot 0.7 (eot_timeout
+                # 6 s there; 2 s here caps a mid-sentence pause on a scripted call).
+                eager_eot_threshold=0.4,
                 eot_threshold=0.7,
-                eot_timeout_ms=1500,
+                eot_timeout_ms=2000,
                 **keyterm_kw,
             )
             if STT_TURN == "stt":
                 endpointing = {
-                    # Flux has already decided the turn is over when END_OF_SPEECH
-                    # arrives; the framework still sleeps `min_delay` measured from
-                    # the VAD's end-of-speech anchor. 0.1 s keeps a hair of margin
-                    # for the last STT packet without adding a visible pause.
+                    # Flux has already decided the turn is over when its EndOfTurn
+                    # arrives; the framework's min_delay is applied *after* that
+                    # ("in addition to the STT provider's endpointing delay", LiveKit
+                    # turn-handling reference), so anything above zero is pure wait.
                     "mode": "fixed",
-                    "min_delay": 0.1,
+                    "min_delay": 0.0,
                     "max_delay": 1.5,
                 }
             else:
