@@ -279,3 +279,18 @@ Expected gap after this: ~0.3 + (LLM remaining after the draft started) +
 LLM first token under ~0.3 s; the next call's log shows which of the two we
 are missing. A separate research pass on current speech-to-speech models,
 STT/LLM/TTS near Sydney and turn-taking techniques is running.
+
+### livekit-agents 1.6.6 -> 1.8.5 (6 Oct)
+
+Pins moved to 1.8.5 for all plugins. Changes needed in the worker:
+`RoomInputOptions` -> `RoomOptions(audio_input=AudioInputOptions(...),
+audio_output=AudioOutputOptions(...))`; Opus DTX disabled on the agent's
+published track (community measurement: the receive jitter buffer never
+converges across the AI's silences with DTX on). New `TTS_PROVIDER=
+deepgram-flux` option (`deepgram.TTSv2`, Sydney host). Verified: import,
+`download-files`, AgentSession construction with our turn_handling (resolves
+to preemptive enabled + preemptive_tts, fixed endpointing 0.05/1.5, vad
+interruption), and live synth/chat/stream through Cartesia, Flux TTS,
+ElevenLabs, Cerebras and Flux STT. 1.6.6 also resolved our preemptive dict
+correctly, so the 1.8.3 fix was not our problem; the per-turn log will show
+what is. Docker build left to CI (no daemon on the laptop).

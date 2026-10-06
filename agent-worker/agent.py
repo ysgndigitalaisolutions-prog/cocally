@@ -39,7 +39,8 @@ from typing import AsyncIterator
 import aiohttp
 from dotenv import load_dotenv
 from livekit import agents, rtc
-from livekit.agents import Agent, AgentSession, RoomInputOptions, function_tool
+from livekit.agents import Agent, AgentSession, function_tool
+from livekit.agents.voice.room_io import AudioInputOptions, AudioOutputOptions, RoomOptions
 from livekit.agents.llm import StopResponse
 from livekit.plugins import deepgram, openai, silero
 
@@ -79,7 +80,7 @@ ENGINE_SERVICE_TOKEN = os.getenv("ENGINE_SERVICE_TOKEN")
 # openai/gpt-oss-120b is the higher-quality, slower (~400-650 ms) option.
 LLM_MODEL = os.getenv("LLM_MODEL") or "qwen/qwen3.8-27b"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "160"))  # short spoken turns → TTS starts sooner
-TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | elevenlabs | cartesia
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | deepgram-flux | elevenlabs | cartesia
 # Cartesia websocket that took longer than this to open is on a far back-end
 # (~320 ms per sentence instead of ~70); reopen it, up to this many tries.
 # See _CartesiaTTS in _build_tts.
@@ -1320,6 +1321,11 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
             return _CartesiaTTS(model="sonic-3.6", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
         except Exception as e:  # noqa: BLE001
             logger.warning("cartesia TTS unavailable (%s) — using Deepgram", e)
+    if TTS_PROVIDER == "deepgram-flux":
+        # Flux TTS (Aug 2026): streaming, 96 ms first audio on the Sydney host
+        # measured 30 Sep (US host 299). Voices flux-alexis-en, flux-haley-en.
+        # Needs livekit-plugins-deepgram >= 1.8.3.
+        return deepgram.TTSv2(model=TTS_VOICE or "flux-haley-en", base_url=f"https://{DEEPGRAM_HOST}/v2/speak")
     # Aura-1 (asteria) was tuned for lowest-latency demo speed and reads as
     # fast/clipped on a real call. Aura-2 luna is calmer; hera/orpheus are
     # alternatives. Deepgram has no speech-rate knob — pick the voice instead.
@@ -1906,19 +1912,26 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             logger.info("DTMF %r (call=%s)", digit, call_id)
             qualifier.spawn(_forward_dtmf(digit))
 
-    room_input = RoomInputOptions()
+    audio_input = AudioInputOptions()
     if NOISE_CANCELLATION and _nc is not None:
         try:
             # BVCTelephony is tuned for narrowband PSTN audio: cleaner STT input
             # means fewer mis-hears and fewer "sorry, could you repeat that" turns.
-            room_input = RoomInputOptions(noise_cancellation=_nc.BVCTelephony())
+            audio_input = AudioInputOptions(noise_cancellation=_nc.BVCTelephony())
         except Exception as e:  # noqa: BLE001
             logger.warning("noise cancellation unavailable (%s)", e)
+    # DTX off on the agent's track: with DTX the receiver's jitter buffer never
+    # converges across the AI's silences (a LiveKit community measurement in
+    # Feb 2026 saw 435 -> 245 ms cross-region once it was disabled). The cost
+    # is a trickle of comfort-noise packets while the AI listens.
+    audio_output = AudioOutputOptions(
+        track_publish_options=rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE, dtx=False),
+    )
 
     await session.start(
         agent=qualifier,
         room=ctx.room,
-        room_input_options=room_input,
+        room_options=RoomOptions(audio_input=audio_input, audio_output=audio_output),
     )
 
     # Don't speak until someone can actually hear it — see
