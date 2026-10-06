@@ -150,6 +150,9 @@ NO_AGENT_LINE = (
 STT_KEYTERMS = [k.strip() for k in (os.getenv("STT_KEYTERMS") or "").split(",") if k.strip()]
 TTS_VOICE = os.getenv("TTS_VOICE")  # provider-specific voice/model id; sensible default per provider
 NOISE_CANCELLATION = os.getenv("NOISE_CANCELLATION", "1") not in ("0", "false", "no")
+# livekit-agents 1.8 runs an automatic gain control stage on the room audio
+# before the VAD and STT see it. Switchable without a code change for A/B.
+AUTO_GAIN_CONTROL = os.getenv("AUTO_GAIN_CONTROL", "1") not in ("0", "false", "no")
 WORKER_IDLE_PROCESSES = int(os.getenv("WORKER_IDLE_PROCESSES", "2"))
 
 # Same variable the API reads (`config.floor.holdMusicUrl`). Set it in BOTH
@@ -1337,6 +1340,75 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
     return deepgram.TTS(model=TTS_VOICE or "aura-2-luna-en", base_url=f"https://{DEEPGRAM_HOST}/v1/speak")
 
 
+def _log_pipeline_setup(session: AgentSession, audio_input: AudioInputOptions, call_id: str | None) -> None:
+    """One line with everything that shapes the audio path, so a bad call can
+    be read without guessing what the worker was configured with."""
+    try:
+        import importlib.metadata as md
+
+        vers = {p: md.version(p) for p in ("livekit-agents", "livekit", "livekit-plugins-deepgram", "livekit-plugins-cartesia", "livekit-plugins-noise-cancellation") if _dist_ok(md, p)}
+        o = session.options
+        logger.info(
+            "pipeline: versions=%s nc=%s agc=%s input_sr=%s frame_ms=%s vad(min_silence=%.2f) turn=%s endpointing=%s interruption=%s preemptive=%s aec_warmup=%s (call=%s)",
+            vers, bool(audio_input.noise_cancellation), audio_input.auto_gain_control, audio_input.sample_rate, audio_input.frame_size_ms,
+            VAD_MIN_SILENCE_S, o.turn_handling.get("turn_detection"), o.turn_handling.get("endpointing"), o.turn_handling.get("interruption"),
+            o.preemptive_generation, getattr(o, "aec_warmup_duration", None), call_id,
+        )
+    except Exception as e:  # noqa: BLE001 — diagnostics only
+        logger.debug("pipeline setup log failed: %s", e)
+
+
+def _dist_ok(md, name: str) -> bool:  # noqa: ANN001
+    try:
+        md.version(name)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _tap_room_audio(session: AgentSession, call_id: str | None) -> None:
+    """Count what the room delivers to the session (before VAD/STT): frames,
+    seconds, sample rate, peak level. Logged every 3 s while it changes. With
+    the Flux tally this brackets the whole input path: room -> session -> STT."""
+    from livekit.agents.voice import io as voice_io
+
+    src = session.input.audio
+    if src is None:
+        logger.warning("room audio tap: no audio input on the session (call=%s)", call_id)
+        return
+    tally = {"frames": 0, "audio_s": 0.0, "peak": 0, "sr": None, "ch": None}
+
+    class _Tap(voice_io.AudioInput):
+        async def __anext__(self) -> rtc.AudioFrame:
+            frame = await super().__anext__()
+            tally["frames"] += 1
+            tally["audio_s"] += frame.duration
+            tally["sr"], tally["ch"] = frame.sample_rate, frame.num_channels
+            if tally["frames"] % 10 == 0:
+                try:
+                    tally["peak"] = max(tally["peak"], max(abs(v) for v in array.array("h", bytes(frame.data))[:480]))
+                except Exception:  # noqa: BLE001
+                    pass
+            return frame
+
+    session.input.audio = _Tap(label="tap", source=src)
+
+    async def _report() -> None:
+        last = None
+        try:
+            while True:
+                await asyncio.sleep(3.0)
+                snap = (tally["frames"], tally["peak"])
+                if snap != last:
+                    logger.info("room audio: frames=%d audio=%.1fs sr=%s ch=%s peak=%d (call=%s)", tally["frames"], tally["audio_s"], tally["sr"], tally["ch"], tally["peak"], call_id)
+                    tally["peak"] = 0
+                    last = snap
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.get_running_loop().create_task(_report())
+
+
 class _FluxSTT(deepgram.STTv2):
     """Flux with a running tally of what the stream is fed and what it returns,
     logged every few seconds: on the first two 1.8.5 calls (6 Oct) the VAD
@@ -1974,12 +2046,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             logger.info("DTMF %r (call=%s)", digit, call_id)
             qualifier.spawn(_forward_dtmf(digit))
 
-    audio_input = AudioInputOptions()
+    audio_input = AudioInputOptions(auto_gain_control=AUTO_GAIN_CONTROL)
     if NOISE_CANCELLATION and _nc is not None:
         try:
             # BVCTelephony is tuned for narrowband PSTN audio: cleaner STT input
             # means fewer mis-hears and fewer "sorry, could you repeat that" turns.
-            audio_input = AudioInputOptions(noise_cancellation=_nc.BVCTelephony())
+            audio_input = AudioInputOptions(noise_cancellation=_nc.BVCTelephony(), auto_gain_control=AUTO_GAIN_CONTROL)
         except Exception as e:  # noqa: BLE001
             logger.warning("noise cancellation unavailable (%s)", e)
     # DTX off on the agent's track: with DTX the receiver's jitter buffer never
@@ -1995,6 +2067,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         room=ctx.room,
         room_options=RoomOptions(audio_input=audio_input, audio_output=audio_output),
     )
+    _log_pipeline_setup(session, audio_input, call_id)
+    _tap_room_audio(session, call_id)
 
     # Don't speak until someone can actually hear it — see
     # _wait_for_live_audio's docstring for why this matters most for a real
