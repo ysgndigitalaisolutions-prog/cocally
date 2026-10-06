@@ -1337,6 +1337,49 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
     return deepgram.TTS(model=TTS_VOICE or "aura-2-luna-en", base_url=f"https://{DEEPGRAM_HOST}/v1/speak")
 
 
+class _FluxSTT(deepgram.STTv2):
+    """Flux with a running tally of what the stream is fed and what it returns,
+    logged every few seconds: on the first two 1.8.5 calls (6 Oct) the VAD
+    heard the customer and Flux returned nothing, with no error anywhere. The
+    tally shows whether audio reaches the plugin (frames, seconds, loudness)
+    and whether Flux answers (events by type)."""
+
+    def stream(self, **kwargs):  # noqa: ANN003, ANN201 — plugin signature
+        st = super().stream(**kwargs)
+        tally = {"frames": 0, "audio_s": 0.0, "peak": 0, "events": {}}
+        orig_push, orig_send = st.push_frame, st._event_ch.send_nowait
+
+        def push_frame(frame: rtc.AudioFrame) -> None:
+            tally["frames"] += 1
+            tally["audio_s"] += frame.duration
+            if tally["frames"] % 10 == 0:  # every ~0.5 s: cheap peak sample
+                try:
+                    tally["peak"] = max(tally["peak"], max(abs(v) for v in array.array("h", bytes(frame.data))[:480]))
+                except Exception:  # noqa: BLE001
+                    pass
+            orig_push(frame)
+
+        def send_nowait(ev) -> None:  # noqa: ANN001
+            k = getattr(getattr(ev, "type", None), "value", "?")
+            tally["events"][k] = tally["events"].get(k, 0) + 1
+            orig_send(ev)
+
+        st.push_frame, st._event_ch.send_nowait = push_frame, send_nowait
+
+        async def _report() -> None:
+            last = None
+            while not st._event_ch.closed:
+                await asyncio.sleep(3.0)
+                snap = (tally["frames"], tally["peak"], tuple(sorted(tally["events"].items())))
+                if snap != last:
+                    logger.info("flux stream: frames=%d audio=%.1fs peak=%d events=%s", tally["frames"], tally["audio_s"], tally["peak"], tally["events"])
+                    tally["peak"] = 0
+                    last = snap
+
+        asyncio.get_running_loop().create_task(_report())
+        return st
+
+
 def _build_stt():  # noqa: ANN202 — plugin STT types differ
     """STT by env. Returns (stt, turn_handling) because the two are one decision:
 
@@ -1353,7 +1396,7 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
     keyterm_kw = {"keyterm": STT_KEYTERMS} if STT_KEYTERMS else {}
     if STT_MODEL == "flux":
         try:
-            stt_engine = deepgram.STTv2(
+            stt_engine = _FluxSTT(
                 base_url=f"wss://{DEEPGRAM_HOST}/v2/listen",
                 model="flux-general-en",
                 eager_eot_threshold=0.5,

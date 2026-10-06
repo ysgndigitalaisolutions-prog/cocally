@@ -314,3 +314,11 @@ caller), the Deepgram plugin's DEBUG lines shipped with the call log, and an
 "stt gate" probe logged whenever the caller stops speaking (current speech,
 done, interruptible, AEC state). Cartesia: all four socket opens were slow on
 that call (781-1220 ms); tries raised to 6.
+
+Second 1.8.5 call (15:27 UTC, `6ac51361`), with the substitution off: same.
+The "stt gate" probe showed no current speech and no AEC timer, so that
+path is cleared. The Deepgram socket opened once at session start, 10 s
+before the call was answered, and was never reopened; Flux idle for 12 s
+with or without silence frames still transcribes fine locally. Next: the
+worker now tallies what the Flux stream is fed (frames, seconds, peak
+level) and what it emits (events by type), logged every 3 s (`_FluxSTT`).
