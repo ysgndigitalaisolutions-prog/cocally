@@ -85,7 +85,7 @@ TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | deepg
 # (~320 ms per sentence instead of ~70); reopen it, up to this many tries.
 # See _CartesiaTTS in _build_tts.
 CARTESIA_SLOW_CONNECT_MS = float(os.getenv("CARTESIA_SLOW_CONNECT_MS", "300"))
-CARTESIA_CONNECT_TRIES = int(os.getenv("CARTESIA_CONNECT_TRIES", "4"))
+CARTESIA_CONNECT_TRIES = int(os.getenv("CARTESIA_CONNECT_TRIES", "6"))
 # STT + turn-taking. "flux" (default) is Deepgram's conversational model: it
 # decides end-of-turn itself from the audio and words (~260 ms after the person
 # stops) and emits an *eager* end-of-turn earlier still, which the framework
@@ -133,6 +133,11 @@ INTERRUPTION = {
     # 0.3 s with the ML detector filtering backchannels; without it 0.5 s (the
     # framework default) keeps a cough or "mm" from stopping the AI.
     "min_duration": 0.3 if INTERRUPTION_MODE == "adaptive" else 0.5,
+    # The framework feeds the STT silence instead of the caller's audio while
+    # an uninterruptible line plays. On the first 1.8.5 call (6 Oct) the VAD
+    # heard the customer three times and Flux never got a word, the signature
+    # of that substitution staying on; the STT must always hear the caller.
+    "discard_audio_if_uninterruptible": False,
 }
 # Approved line when a transfer finds nobody. Spoken by the worker, not the
 # model, so the model cannot carry on the script after a failed hand-off.
@@ -637,7 +642,7 @@ async def _post_metrics(call_id: str, payload: dict) -> None:
         logger.debug("metrics post failed: %s", e)
 
 
-_SHIP_DEBUG_KEYS = ("preemptive", "user turn committed", "received user transcript", "received user preflight transcript")
+_SHIP_DEBUG_KEYS = ("preemptive", "user turn committed", "received user transcript", "received user preflight transcript", "Deepgram", "deepgram")
 _SHIP_EXTRA_KEYS = ("preemptive_lead_time", "transcript_delay", "user_transcript", "delay_completed", "source", "last_speaking_time", "last_final_transcript_time")
 
 
@@ -675,7 +680,7 @@ def _ship_call_log(ctx: agents.JobContext, call_id: str | None) -> None:
     handler = _Shipper(level=logging.DEBUG)
     logging.getLogger().addHandler(handler)
     # These loggers are at INFO by default; the shipper filters their DEBUG to the keys above.
-    for name in ("livekit.agents.voice", "livekit.agents"):
+    for name in ("livekit.agents.voice", "livekit.agents", "livekit.plugins.deepgram"):
         logging.getLogger(name).setLevel(logging.DEBUG)
     url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/events"
     headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
@@ -1779,6 +1784,20 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         nonlocal awaiting_reply, last_interim, speech_ended_at
         old, new = getattr(event, "old_state", ""), getattr(event, "new_state", "")
         logger.info("user %s -> %s (call=%s)", old, new, call_id)
+        if new == "listening":
+            # Why the STT might be getting silence instead of the caller: the
+            # framework substitutes it while an uninterruptible speech is
+            # current, or during AEC warm-up. Private fields, diagnostics only.
+            try:
+                act = getattr(session, "_activity", None)
+                sp = getattr(act, "_current_speech", None) if act else None
+                logger.info(
+                    "stt gate: speech=%s done=%s interruptible=%s aec_remaining=%.1f aec_timer=%s (call=%s)",
+                    sp.id[:8] if sp else None, sp.done() if sp else None, sp.allow_interruptions if sp else None,
+                    getattr(session, "_aec_warmup_remaining", 0.0) or 0.0, getattr(session, "_aec_warmup_timer", None) is not None, call_id,
+                )
+            except Exception as e:  # noqa: BLE001 — never let diagnostics break a call
+                logger.debug("stt gate probe failed: %s", e)
         if new == "speaking":
             _cancel_stall()
             if not awaiting_reply:

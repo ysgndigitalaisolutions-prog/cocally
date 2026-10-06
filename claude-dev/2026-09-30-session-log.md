@@ -294,3 +294,23 @@ interruption), and live synth/chat/stream through Cartesia, Flux TTS,
 ElevenLabs, Cerebras and Flux STT. 1.6.6 also resolved our preemptive dict
 correctly, so the 1.8.3 fix was not our problem; the per-turn log will show
 what is. Docker build left to CI (no daemon on the laptop).
+
+### First 1.8.5 call (6 Oct 05:23 UTC, `6ac485bc`): STT heard nothing
+
+The VAD saw the customer speak three times ("Yeah, go on" / "Yes, go
+ahead" are on the recording, low confidence but there); Flux returned no
+transcript at all, not even a partial, so the stall guard fired twice and the
+AI asked to repeat. No STT error or retry was logged. Reproduced the whole
+pipeline locally under 1.8.5 (`scratchpad/session185_test.py`: real
+AgentSession, our STT/LLM/TTS/turn handling, wav as the caller, including the
+uninterruptible disclosure + generate_reply opening): transcripts, turn
+commit and "using preemptive generation" all work. Flux plugin also fine
+standalone with the AU host, keyterms, 8/16/24/48 kHz input. So the fault is
+in the real room path. The only code that can feed the STT silence while
+the VAD still hears the caller is the framework's substitution during an
+uninterruptible speech or AEC warm-up (`agent_activity.push_audio`). Fix in
+this commit: `discard_audio_if_uninterruptible: False` (STT always gets the
+caller), the Deepgram plugin's DEBUG lines shipped with the call log, and an
+"stt gate" probe logged whenever the caller stops speaking (current speech,
+done, interruptible, AEC state). Cartesia: all four socket opens were slow on
+that call (781-1220 ms); tries raised to 6.
