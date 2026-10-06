@@ -256,3 +256,26 @@ with the turns, events, transcript and recording. Per-turn `eou_delay`,
 transcripts, state transitions, Cartesia socket opens and stall guards are all
 at INFO. Read with the usual mongoose one-liner:
 `d.timings.workerLog.map(l => l.at.toISOString().slice(11,23)+" "+l.detail)`.
+
+## 6 Oct: target moved to under 500 ms
+
+New target from Nithin: customer's last word to AI's first audio under 0.5 s.
+Budget on prod today (Sydney, after the Cartesia fix): end of turn 0.26-0.65
+(median 0.43: VAD silence 0.25 + fixed 0.2 + Flux final), LLM first token
+0.35-0.57 (Cerebras, US), TTS 0.07. Preemptive generation is on (Flux eager
+end-of-turn -> PREFLIGHT_TRANSCRIPT -> draft reply), but the recording gaps
+equal the plain sum of the stages, so the draft is either starting late or
+being discarded. Changes in this commit:
+- Shipped log lines carry the worker's own ms timestamp (server receipt time
+  was useless: lines post one by one) and include the framework's DEBUG
+  turn-timing lines ("using preemptive generation" with preemptive_lead_time,
+  "received user transcript" with transcript_delay, "user turn committed").
+- `VAD_MIN_SILENCE_S` 0.25 -> 0.15, `ENDPOINT_MIN_DELAY` 0.2 -> 0.05 (both
+  env-overridable). Flux's final transcript (~0.3 s after the last word) is
+  the gate the framework waits for anyway, so the waits above it were pure
+  delay. Expected end of turn ~0.3 s. Watch for cutting in on pauses.
+Expected gap after this: ~0.3 + (LLM remaining after the draft started) +
+0.07. Under 0.5 s needs the draft to start at Flux's eager end-of-turn and an
+LLM first token under ~0.3 s; the next call's log shows which of the two we
+are missing. A separate research pass on current speech-to-speech models,
+STT/LLM/TTS near Sydney and turn-taking techniques is running.

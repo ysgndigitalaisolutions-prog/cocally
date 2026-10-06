@@ -112,11 +112,13 @@ STALL_GUARD_S = float(os.getenv("STALL_GUARD_S", "2.5"))
 # Fixed wait after the VAD's end-of-speech before the turn is committed, in
 # STT_TURN=vad mode. The framework also waits for Flux's final transcript, so
 # this is a floor, not the whole gap. Measured 28 Sep with 0.3: end of turn
-# 0.48-0.66 s (VAD min silence 0.25 + this). 0.2 trims ~100 ms; raise it again
-# if test calls show the AI cutting in on mid-sentence pauses.
-ENDPOINT_MIN_DELAY = float(os.getenv("ENDPOINT_MIN_DELAY", "0.2"))
+# 0.48-0.66 s (VAD min silence 0.25 + this); 30 Sep with 0.2 and 0.25:
+# 0.26-0.65 s, median 0.43. Flux's own end-of-turn lands ~0.3 s after the last
+# word, so anything above that is pure waiting: 0.05 + 0.15 lets Flux be the
+# gate. Raise them again if test calls show the AI cutting in on pauses.
+ENDPOINT_MIN_DELAY = float(os.getenv("ENDPOINT_MIN_DELAY", "0.05"))
 # Silence the voice detector needs before it reports end of speech.
-VAD_MIN_SILENCE_S = 0.25
+VAD_MIN_SILENCE_S = float(os.getenv("VAD_MIN_SILENCE_S", "0.15"))
 # How the customer talking over the AI is handled. "adaptive" sends the overlap
 # to an ML detector and holds the transcript meanwhile, so "yeah"/"mm" does not
 # cut the AI off. On the 29 Sep test calls that holding lost real answers: the
@@ -634,6 +636,10 @@ async def _post_metrics(call_id: str, payload: dict) -> None:
         logger.debug("metrics post failed: %s", e)
 
 
+_SHIP_DEBUG_KEYS = ("preemptive", "user turn committed", "received user transcript", "received user preflight transcript")
+_SHIP_EXTRA_KEYS = ("preemptive_lead_time", "transcript_delay", "user_transcript", "delay_completed", "source", "last_speaking_time", "last_final_transcript_time")
+
+
 def _ship_call_log(ctx: agents.JobContext, call_id: str | None) -> None:
     """Copy this process's INFO+ log lines (ours and the framework's) onto the
     call record as `timings.workerLog`, so a failed test call can be read from
@@ -647,16 +653,29 @@ def _ship_call_log(ctx: agents.JobContext, call_id: str | None) -> None:
     class _Shipper(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             # Only our lines and the framework's: anything an HTTP library logs
-            # about the posts themselves would otherwise feed back in.
+            # about the posts themselves would otherwise feed back in. The
+            # framework's turn-timing lines are DEBUG; those few are kept so a
+            # call shows when the draft reply started relative to the turn end.
             if not (record.name == "cocally-agent" or record.name.startswith("livekit")):
                 return
+            if record.levelno < logging.INFO and not any(k in record.msg for k in _SHIP_DEBUG_KEYS):
+                return
             try:
-                pending.append(f"{record.levelname[0]} {record.name.removeprefix('livekit.')}: {record.getMessage()}"[:200])
+                # The worker's own clock, to the millisecond: the lines are
+                # posted one by one, so the server's receipt time is useless
+                # for timing. Framework lines carry their numbers in `extra`.
+                extra = {k: v for k, v in record.__dict__.items() if k in _SHIP_EXTRA_KEYS}
+                msg = record.getMessage() + (f" {json.dumps(extra, default=str)}" if extra else "")
+                stamp = time.strftime("%H:%M:%S", time.gmtime(record.created)) + f".{int(record.msecs):03d}"
+                pending.append(f"{stamp} {record.levelname[0]} {record.name.removeprefix('livekit.')}: {msg}"[:200])
             except Exception:  # noqa: BLE001 — a log handler must never raise
                 pass
 
-    handler = _Shipper(level=logging.INFO)
+    handler = _Shipper(level=logging.DEBUG)
     logging.getLogger().addHandler(handler)
+    # These loggers are at INFO by default; the shipper filters their DEBUG to the keys above.
+    for name in ("livekit.agents.voice", "livekit.agents"):
+        logging.getLogger(name).setLevel(logging.DEBUG)
     url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/events"
     headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
 
