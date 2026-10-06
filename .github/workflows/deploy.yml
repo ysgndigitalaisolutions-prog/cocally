@@ -109,6 +109,13 @@ jobs:
             cd /opt/cocally
             echo '$GHCR_TOKEN' | sudo docker login ghcr.io -u '$GHCR_USER' --password-stdin >/dev/null
             export IMAGE_TAG='$IMAGE_TAG'
+            # Free the previous builds' images before pulling: four deploys in a day
+            # filled the 50 GB disk (6 Oct, 'no space left on device' mid-pull). Images
+            # used by running containers are kept, so a failed pull still leaves the
+            # old stack intact.
+            sudo docker image prune -af >/dev/null || true
+            sudo docker builder prune -af >/dev/null 2>&1 || true
+            df -h / | tail -1
             sudo -E docker compose --env-file .env.prod -f docker-compose.prod.yml pull --quiet
             sudo -E docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --remove-orphans
             sudo docker logout ghcr.io >/dev/null
