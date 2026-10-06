@@ -81,11 +81,11 @@ ENGINE_SERVICE_TOKEN = os.getenv("ENGINE_SERVICE_TOKEN")
 LLM_MODEL = os.getenv("LLM_MODEL") or "qwen/qwen3.8-27b"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "160"))  # short spoken turns → TTS starts sooner
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | deepgram-flux | elevenlabs | cartesia
-# Cartesia websocket that took longer than this to open is on a far back-end
-# (~320 ms per sentence instead of ~70); reopen it, up to this many tries.
-# See _CartesiaTTS in _build_tts.
+# A Cartesia websocket that takes longer than this to open is on a far
+# back-end (~320 ms per sentence instead of ~70). The worker opens this many
+# at once and keeps the fastest. See _CartesiaTTS in _build_tts.
 CARTESIA_SLOW_CONNECT_MS = float(os.getenv("CARTESIA_SLOW_CONNECT_MS", "300"))
-CARTESIA_CONNECT_TRIES = int(os.getenv("CARTESIA_CONNECT_TRIES", "6"))
+CARTESIA_CONNECT_TRIES = int(os.getenv("CARTESIA_CONNECT_TRIES", "4"))
 # STT + turn-taking. "flux" (default) is Deepgram's conversational model: it
 # decides end-of-turn itself from the audio and words (~260 ms after the person
 # stops) and emits an *eager* end-of-turn earlier still, which the framework
@@ -1315,16 +1315,32 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
                 reopen when it is slow."""
 
                 async def _connect_ws(self, timeout: float):  # noqa: ANN202
-                    for attempt in range(CARTESIA_CONNECT_TRIES):
-                        t0 = time.perf_counter()
-                        ws = await super()._connect_ws(timeout)
-                        took_ms = (time.perf_counter() - t0) * 1000
-                        if took_ms <= CARTESIA_SLOW_CONNECT_MS or attempt == CARTESIA_CONNECT_TRIES - 1:
-                            logger.info("cartesia websocket open %.0f ms (attempt %d)", took_ms, attempt + 1)
-                            return ws
-                        logger.info("cartesia websocket open %.0f ms: far back-end, reopening", took_ms)
-                        await ws.close()
-                    raise AssertionError("unreachable")
+                    # Open several at once and keep the first to complete: a
+                    # near back-end answers in ~30 ms, a far one in ~800, so the
+                    # winner is a fast socket whenever one exists, and the wait
+                    # is never longer than a single slow open. Opening them one
+                    # after another cost 3.2 s on a quickly answered call (6 Oct
+                    # 17:09: three far sockets in a row, greeting late, caller
+                    # said "Hello?" and hung up).
+                    t0 = time.perf_counter()
+                    parent = super()._connect_ws
+                    tasks = [asyncio.create_task(parent(timeout)) for _ in range(CARTESIA_CONNECT_TRIES)]
+                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    winner = next(iter(done))
+                    took_ms = (time.perf_counter() - t0) * 1000
+
+                    async def _discard() -> None:
+                        for t in pending:
+                            try:
+                                ws = await t
+                                await ws.close()
+                            except Exception:  # noqa: BLE001 — losers are best-effort
+                                pass
+
+                    asyncio.create_task(_discard())
+                    ws = winner.result()
+                    logger.info("cartesia websocket open %.0f ms (fastest of %d)%s", took_ms, len(tasks), "" if took_ms <= CARTESIA_SLOW_CONNECT_MS else ": all far back-end")
+                    return ws
 
             return _CartesiaTTS(model="sonic-3.6", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
         except Exception as e:  # noqa: BLE001

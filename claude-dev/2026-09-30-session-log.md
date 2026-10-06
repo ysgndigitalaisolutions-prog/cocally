@@ -322,3 +322,15 @@ before the call was answered, and was never reopened; Flux idle for 12 s
 with or without silence frames still transcribes fine locally. Next: the
 worker now tallies what the Flux stream is fed (frames, seconds, peak
 level) and what it emits (events by type), logged every 3 s (`_FluxSTT`).
+
+Third 1.8.5 call (17:09 UTC, `6ac52b2e`), full instrumentation: the input
+path was alive end to end (room audio 24 kHz peak 4105 -> Flux fed -> "Hello?"
+final in 0.1 s), so the STT deafness is not constant. The call failed
+differently: answered in 1.7 s, Cartesia handed out three far sockets in a
+row and the sequential reopen loop delayed the greeting by 3.2 s; the
+customer said "Hello?" into silence (dropped: the disclosure is
+uninterruptible) and hung up at 4.7 s. Fix: the sockets are now opened in
+parallel and the first to complete is kept (`fastest of N`), so the wait is
+never longer than one open. Still open: why Flux returned nothing on the
+05:23 and 15:27 calls, where the customer spoke after a 10 s greeting; the
+tally lines will show it on the next full call.
