@@ -85,7 +85,7 @@ lands ~0.3 s after the last word (0.72 s recording gap minus 0.43 s).
 ## Known-good tag, lead reset, first-token deadline (7 Oct)
 
 - Tag `known-good-2026-10-07` on `f7e406f` (pushed): the tested stt-mode
-  build. To fall back: `git push -f origin known-good-2026-10-07:prod`, and
+  build. To fall back: `git push -f origin 'known-good-2026-10-07^{commit}':prod` (the `^{commit}` is required: the tag is annotated, and GitHub rejects a tag object on a branch), and
   keep `STT_TURN=stt` in `/opt/cocally/.env.prod`.
 - Nithin lead `6ab5781e8d2c7cdf546e6524` reset: `state_` FRESH, attempts 0,
   score 0, `facts` {} (the brief spreads `lead.facts` into the call, so stale
