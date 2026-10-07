@@ -100,3 +100,47 @@ lands ~0.3 s after the last word (0.72 s recording gap minus 0.43 s).
   token at 1.38 s; primary at 0.8 s -> kept (0.81 s). A timed-out entry is
   marked unavailable until a background retry succeeds; meanwhile turns go
   to the next entry (Cerebras gpt-oss-120b, ~390 ms).
+
+## Noisy-environment calls, 7 Oct 04:30-04:37 UTC (prod `4eea1f1`)
+
+Nova-3 on the recordings vs what the worker got:
+
+| Call | On the recording | Worker |
+|---|---|---|
+| `6ac5cadc` | "Yes, ma'am." after the 2nd question, then "Hello?" twice | none of the three: no VAD start, no Flux event; caller hung up |
+| `6ac5cb1a` | "Yes." right after the greeting | missed (AMD SILENCE at 16 s); 22 s later "No." was heard |
+| `6ac5cb1c` | no answer | |
+| `6ac5cc0c` | full call in noise | "It's AGL." -> "Italian."; two AI replies cut short: "Thanks." and "One more - do" |
+
+1. **Caller speech lost before VAD/STT.** The recording (egress, raw track)
+   has the words; VAD and Flux, which both sit after the room input's
+   BVCTelephony noise cancellation and AGC, saw nothing. Suspect: BVC
+   (background *voice* cancellation) classifying the caller as background
+   in a noisy room. Unconfirmed; the room-audio tally samples 1 frame in 10,
+   so its peak=0 is not proof. Test: `NOISE_CANCELLATION=0` (env only), then
+   `AUTO_GAIN_CONTROL=0`, same place, one at a time. If BVC is the cause,
+   plain `noise_cancellation.NC()` (removes noise, keeps voices) is the fix.
+2. **Two replies truncated** with nobody talking over them. Both were the
+   only turns served by a Cartesia socket where all four parallel opens were
+   far ("778 ms (fastest of 4): all far back-end", ttfb 0.32-0.33 s vs 0.07);
+   every turn on a near socket finished. Correlation, not proof: the log does
+   not show the LLM's full text or why the TTS stream ended.
+3. Barge-in works in stt mode: "Nothing yet." over the retailer list stopped
+   the AI within 0.45 s.
+4. No LLM fallback fired; first tokens 0.34-0.36 s except 0.64, 0.71, 1.06 s.
+
+## Surya call 04:40 UTC, and the 1.0 s timeout regression
+
+Call `6ac5cd58` to Surya: first reply cut to "Thanks!" on a *near* Cartesia
+socket (ttfb 0.10 s), so the far-socket theory above does not hold. Also
+"Sorry. Not getting." heard as "Start an architect." (the AI answered with a
+wrong-number line), and a short "No." missed by Flux (VAD fired; stall guard
+asked to repeat).
+
+Three truncations today, none in yesterday's 11 turns; the only change was
+the LLM attempt timeout 2.5 -> 1.0 s. Local test (`scratchpad/midstream_test.py`):
+a stream that sends "Thanks!", pauses 1.5 s, then the rest is cut to
+"Thanks!" at 1.0 s and complete at 2.5 s. It logs "failed after sending
+chunk, skip retrying" locally; no such line reached the call logs, so prod
+is not proven. Default reverted to 2.5 s in code; on the VM set
+`LLM_FIRST_TOKEN_TIMEOUT_S=2.5` in `.env.prod` (worker reads it via env_file).

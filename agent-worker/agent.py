@@ -1573,9 +1573,12 @@ _PROVIDERS = {
 # Primary provider; the other becomes the fallback. LLM_MODEL picks the family
 # ("qwen" = fastest first token, "gpt-oss" = higher quality); full provider
 # model ids are accepted too and mapped by family.
-# Seconds to wait for a provider's first token before the next entry in the
-# LLM chain is tried (see _make_llm).
-LLM_FIRST_TOKEN_TIMEOUT_S = float(os.getenv("LLM_FIRST_TOKEN_TIMEOUT_S", "1.0"))
+# Seconds the LLM chain waits on one provider before trying the next (see
+# _make_llm). Back to 2.5 s: in 1.8.5 this is the attempt's HTTP *read*
+# timeout, so it also cuts a reply that pauses mid-stream. At 1.0 s on 7 Oct
+# three replies stopped after their first words ("Thanks!", "One more - do");
+# reproduced locally. A first-token-only deadline needs its own wrapper.
+LLM_FIRST_TOKEN_TIMEOUT_S = float(os.getenv("LLM_FIRST_TOKEN_TIMEOUT_S", "2.5"))
 LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or ("cerebras" if os.getenv("CEREBRAS_API_KEY") else "groq")).lower()
 
 
@@ -1703,12 +1706,11 @@ def _make_llm():
     instances += [_openai_compat_llm(p, f) for p, f in chain]
     if len(instances) == 1:
         return instances[0]
-    # attempt_timeout bounds the wait for the FIRST token from one provider
-    # before the next one is tried (framework default 5 s). In 1.8.5 it is the
-    # HTTP read timeout of the attempt, so it also caps any gap between chunks.
-    # Cerebras' first token on the 6 Oct call: 0.35-0.48 s on 9 of 11 turns,
-    # 0.81 s once, 2.17 s once (no error, so 2.5 s never fired). 1.0 s keeps
-    # the 0.81 s turn and cuts the 2.17 s one to ~1.4 s (1.0 + the next entry).
+    # attempt_timeout is the attempt's HTTP read timeout in 1.8.5: it bounds
+    # the wait for the first token AND every gap between chunks after it, and
+    # a reply that already spoke is not retried (retry_on_chunk_sent=False),
+    # so a value below the provider's longest mid-reply pause truncates
+    # replies. See LLM_FIRST_TOKEN_TIMEOUT_S.
     return _llm.FallbackAdapter(instances, attempt_timeout=LLM_FIRST_TOKEN_TIMEOUT_S, retry_interval=0.2)
 
 
