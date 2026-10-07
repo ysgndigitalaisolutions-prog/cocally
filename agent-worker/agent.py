@@ -1573,6 +1573,9 @@ _PROVIDERS = {
 # Primary provider; the other becomes the fallback. LLM_MODEL picks the family
 # ("qwen" = fastest first token, "gpt-oss" = higher quality); full provider
 # model ids are accepted too and mapped by family.
+# Seconds to wait for a provider's first token before the next entry in the
+# LLM chain is tried (see _make_llm).
+LLM_FIRST_TOKEN_TIMEOUT_S = float(os.getenv("LLM_FIRST_TOKEN_TIMEOUT_S", "1.0"))
 LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or ("cerebras" if os.getenv("CEREBRAS_API_KEY") else "groq")).lower()
 
 
@@ -1701,10 +1704,12 @@ def _make_llm():
     if len(instances) == 1:
         return instances[0]
     # attempt_timeout bounds the wait for the FIRST token from one provider
-    # before the next one is tried (framework default 5 s). Cerebras' first
-    # token is 350-900 ms on real calls, so 2.5 s is >2x its p95 and turns a
-    # stalled provider into ~3 s of dead air instead of 5-6 s.
-    return _llm.FallbackAdapter(instances, attempt_timeout=2.5, retry_interval=0.2)
+    # before the next one is tried (framework default 5 s). In 1.8.5 it is the
+    # HTTP read timeout of the attempt, so it also caps any gap between chunks.
+    # Cerebras' first token on the 6 Oct call: 0.35-0.48 s on 9 of 11 turns,
+    # 0.81 s once, 2.17 s once (no error, so 2.5 s never fired). 1.0 s keeps
+    # the 0.81 s turn and cuts the 2.17 s one to ~1.4 s (1.0 + the next entry).
+    return _llm.FallbackAdapter(instances, attempt_timeout=LLM_FIRST_TOKEN_TIMEOUT_S, retry_interval=0.2)
 
 
 def prewarm(proc: agents.JobProcess) -> None:
