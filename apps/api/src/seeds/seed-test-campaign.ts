@@ -48,8 +48,12 @@ const ENERGY_SCORING: ScoringConfig = {
 const FLOW_NAME = 'AI Energy Campaign – Outbound Call Script';
 const STT_KEYWORDS = ['AGL', 'Origin', 'EnergyAustralia', 'Alinta', 'Red Energy', 'Simply Energy', 'Lumo', 'Momentum', 'electricity', 'gas', 'quarterly', 'monthly'];
 
-/** The script's opening line, spoken verbatim by the worker before the model's first turn. */
-const OPENING_LINE = 'Hello, my name is Daniel. How are you doing today?';
+/**
+ * The opening line, spoken verbatim by the worker before the model's first
+ * turn. Brief and without names (12 Oct, Nithin): who is calling comes in the
+ * first question, once the customer has answered.
+ */
+const OPENING_LINE = 'Hello, how are you doing today?';
 
 /** The script's hand-off, spoken verbatim by the worker when the transfer starts. */
 const TRANSFER_LINE =
@@ -58,7 +62,7 @@ const TRANSFER_LINE =
 const PROMPT = `You are Daniel, calling on behalf of {{clientName}} about the customer's electricity bills. Follow this call script exactly. Say each scripted line word for word, one step per turn, then wait for their answer. Never skip a step, never add questions that are not in the script, and never repeat a step they have already answered.
 
 Step 1, after they answer "how are you":
-"I'm calling regarding your electricity bills. Are you the person who looks after the electricity account?"
+"This is Daniel from {{clientName}}. I'm calling regarding your electricity bills. Are you the person who looks after the electricity account?"
 - If NO: say "No worries. Thank you for your time. Have a great day!" and then call end_call.
 - If YES: go to step 2.
 
