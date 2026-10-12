@@ -209,6 +209,22 @@ export function LeadDrawer({
     }
   }
 
+  async function resetForTesting() {
+    if (!window.confirm('Reset this lead for a fresh test call? State goes back to FRESH, attempts, score and captured answers are cleared, and pending callbacks are cancelled. Call history is kept.')) return;
+    setBusy(true);
+    try {
+      await api.post(`/leads/${leadId}/reset`);
+      flash('Lead reset — ready for a fresh call.');
+      await load();
+      onChanged?.();
+    } catch (err) {
+      const detail = (err as { response?: { data?: { message?: string } } }).response?.data;
+      flash(typeof detail?.message === 'string' ? detail.message : 'Could not reset the lead.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function reassign(toAgentId: string) {
     setBusy(true);
     try {
@@ -383,6 +399,14 @@ export function LeadDrawer({
                         </button>
                       ))}
                     </div>
+                  </div>
+                  <div>
+                    <button className="btn btn-ghost text-xs" disabled={busy} onClick={resetForTesting}>
+                      Reset for testing
+                    </button>
+                    <p className="mt-1 text-xs" style={{ color: 'var(--text-dim)' }}>
+                      Back to FRESH with no attempts, score or captured answers. Call history stays.
+                    </p>
                   </div>
                 </div>
               )}

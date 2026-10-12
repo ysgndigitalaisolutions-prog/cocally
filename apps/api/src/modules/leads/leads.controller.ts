@@ -337,6 +337,12 @@ export class LeadsController {
     return this.leadsService.update(user.tenantId, id, { id: user.userId, label: user.email }, dto);
   }
 
+  @Post(':id/reset')
+  @Roles('ADMIN', 'SUPERVISOR')
+  resetForTesting(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.leadsService.resetForTesting(user.tenantId, id, { id: user.userId, label: user.email });
+  }
+
   @Post(':id/state')
   @Roles('ADMIN', 'SUPERVISOR')
   setState(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string, @Body() dto: SetStateDto) {

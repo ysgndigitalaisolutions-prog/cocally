@@ -9,6 +9,7 @@ import { LeadList, LeadListDocument } from '../../schemas/lead.schema';
 import { LeadNote, LeadNoteDocument } from '../../schemas/lead.schema';
 import { Campaign, CampaignDocument, RetryRule } from '../../schemas/campaign.schema';
 import { SuppressionEntry, SuppressionEntryDocument } from '../../schemas/suppression.schema';
+import { Callback, CallbackDocument } from '../../schemas/appointment.schema';
 import { AuditService } from '../audit/audit.service';
 import { CountryPacksService } from '../country-packs/country-packs.service';
 import { normalizePhone } from './phone.util';
@@ -66,6 +67,7 @@ export class LeadsService {
     @InjectModel(LeadNote.name) private readonly noteModel: Model<LeadNoteDocument>,
     @InjectModel(SuppressionEntry.name) private readonly suppressionModel: Model<SuppressionEntryDocument>,
     @InjectModel(Campaign.name) private readonly campaignModel: Model<CampaignDocument>,
+    @InjectModel(Callback.name) private readonly callbackModel: Model<CallbackDocument>,
     private readonly packs: CountryPacksService,
     private readonly audit: AuditService,
   ) {}
@@ -599,6 +601,51 @@ export class LeadsService {
       entityId: leadId,
       before: { state_: from },
       after: { state_: to, reason },
+    });
+    return lead.toObject();
+  }
+
+  /**
+   * Put a lead back to how it was imported, for test calls: FRESH, no
+   * attempts, no score, no answers captured, nothing pending. Call history,
+   * recordings and the timeline stay. Refused for a lead that is on the DNC
+   * register or has opted out, same rule as reopening a DNC lead.
+   */
+  async resetForTesting(tenantId: string, leadId: string, actor: { id: string; label: string }) {
+    const lead = await this.leadModel
+      .findOne({ _id: new Types.ObjectId(leadId), tenantId: new Types.ObjectId(tenantId) })
+      .exec();
+    if (!lead) throw new NotFoundException('Lead not found');
+    const optedOut = await this.suppressionModel
+      .findOne({ tenantId: new Types.ObjectId(tenantId), phone: lead.phone, kind: 'OPT_OUT' })
+      .lean()
+      .exec();
+    if (lead.dncListed || optedOut) {
+      throw new BadRequestException(
+        optedOut ? 'This person has opted out — the lead cannot be reset.' : 'Lead is on the DNC register and cannot be reset.',
+      );
+    }
+    const before = { state_: lead.state_, attempts: lead.attempts, score: lead.score };
+    this.transition(lead, 'FRESH', `Reset for testing (by ${actor.label})`);
+    lead.attempts = 0;
+    lead.score = 0;
+    lead.facts = {};
+    lead.manualClaimedBy = undefined;
+    lead.nextAttemptAt = new Date();
+    lead.markModified('facts');
+    await lead.save();
+    const cancelled = await this.callbackModel
+      .updateMany({ tenantId: new Types.ObjectId(tenantId), leadId: lead._id, status: 'PENDING' }, { status: 'CANCELLED' })
+      .exec();
+    await this.audit.record({
+      tenantId,
+      actorId: actor.id,
+      actorLabel: actor.label,
+      action: 'leads.resetForTesting',
+      entityType: 'Lead',
+      entityId: leadId,
+      before,
+      after: { state_: 'FRESH', attempts: 0, score: 0, callbacksCancelled: cancelled.modifiedCount },
     });
     return lead.toObject();
   }
