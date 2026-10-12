@@ -151,6 +151,19 @@ export default function CampaignDetailPage() {
     setTimeout(() => setMessage(''), 4000);
   }
 
+  async function resetLead(leadId: string, name: string) {
+    if (!window.confirm(`Reset ${name} for a fresh test call? State goes back to FRESH; attempts, score and captured answers are cleared and pending callbacks cancelled. Call history is kept.`)) return;
+    try {
+      await api.post(`/leads/${leadId}/reset`);
+      setMessage(`${name} reset — ready for a fresh call.`);
+      await load();
+    } catch (err) {
+      const detail = (err as { response?: { data?: { message?: string } } }).response?.data;
+      setMessage(typeof detail?.message === 'string' ? detail.message : 'Could not reset the lead.');
+    }
+    setTimeout(() => setMessage(''), 4000);
+  }
+
   if (!campaign) return <p style={{ color: 'var(--text-dim)' }}>Loading…</p>;
 
   const availableCount = team.filter((m) => m.presence === 'AVAILABLE').length;
@@ -367,9 +380,14 @@ export default function CampaignDetailPage() {
                     </span>
                   )}
                 </span>
-                <button className="btn btn-ghost text-xs" onClick={() => devDial(lead._id)} title="Places one AI-fronted call to this lead now (real phone call when telephony is SIP)">
-                  AI dial now
-                </button>
+                <span className="flex shrink-0 gap-2">
+                  <button className="btn btn-ghost text-xs" onClick={() => resetLead(lead._id, lead.firstName ?? 'Lead')} title="Back to FRESH with no attempts, score or captured answers, for a fresh test call">
+                    Reset
+                  </button>
+                  <button className="btn btn-ghost text-xs" onClick={() => devDial(lead._id)} title="Places one AI-fronted call to this lead now (real phone call when telephony is SIP)">
+                    AI dial now
+                  </button>
+                </span>
               </li>
             ))}
           </ul>
