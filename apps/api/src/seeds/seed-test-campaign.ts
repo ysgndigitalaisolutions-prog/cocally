@@ -1,11 +1,11 @@
 /**
  * Seeds a ready-to-dial test campaign into an EXISTING tenant:
- *   client → published flow (Energy Bill Review + NBN, modelled on the
- *   "Wendy Anwar" fronter call) → campaign on the IN pack → one lead list →
+ *   client (Australian Deal) → published flow (the AI Energy Campaign call
+ *   script, verbatim) → campaign on the IN pack → one lead list →
  *   one lead per --phone → every active AGENT assigned to the campaign.
  *
  *   node apps/api/dist/seeds/seed-test-campaign.js --tenant-slug ysgn \
- *     --phone +919902352425 --first-name Nithin [--phone +91... --first-name Surya ...] [--client-name "YSGN Energy"]
+ *     --phone +919902352425 --first-name Nithin [--phone +91... --first-name Surya ...] [--client-name "Australian Deal"]
  *
  * Idempotent on campaign name: re-running adds missing leads and re-assigns
  * agents but does not duplicate the flow or campaign. Internal testing only —
@@ -30,52 +30,61 @@ function args(name: string): string[] {
 }
 const arg = (name: string) => args(name)[0];
 
-const CAMPAIGN_NAME = 'Wendy test (India)';
+const CAMPAIGN_NAME = 'AI Energy Campaign (India test)';
+/** Earlier name of the same campaign; renamed in place so its leads and history stay. */
+const OLD_CAMPAIGN_NAMES = ['Wendy test (India)'];
 
 /**
- * Scoring for the energy bill-review script below. The shared default is the
- * solar campaign (owner / noPanels / roof...), which never matched a word of
- * this flow, so the live score sat at 0 and the score-gated transfer could
- * never fire. Facts are booleans extracted from the transcript by
- * `EngineController.recomposeSummary` (see its FACT_GLOSSARY for the exact
- * definitions). The customer's "yes, put me through" (`wantsSpecialist`) is
- * worth 35 and everything else together is 65, so the score-gated transfer can
- * only fire once they have actually agreed — on the first real call it fired
- * mid-sentence, before the question was asked. Transfer at 70 = yes + bill
- * payer (60) + paying too much (90); without the yes the best case is book-only.
- * `notSwitchedRecently` was dropped 2026-09-28: neither reference call asks it
- * (see claude-dev/2026-09-28-reference-call-analysis.md); its 10 went to payingTooMuch.
+ * Scoring for the call script (claude-dev/2026-10-12 golden script). Facts are
+ * booleans extracted from the transcript by `EngineController.recomposeSummary`
+ * (FACT_GLOSSARY). The script transfers once the customer has named their
+ * energy company, so the score can only reach the transfer threshold (100)
+ * after all three answers; it can never fire mid-script.
  */
 const ENERGY_SCORING: ScoringConfig = {
-  weights: { decisionMaker: 25, payingTooMuch: 30, billHigh: 10, wantsSpecialist: 35 },
-  thresholds: { transfer: 70, bookOnly: 50, nurture: 30 },
+  weights: { decisionMaker: 30, billProvided: 20, retailerProvided: 50 },
+  thresholds: { transfer: 100, bookOnly: 50, nurture: 30 },
 };
-const FLOW_NAME = 'Energy Bill Review + NBN (Wendy Anwar)';
+const FLOW_NAME = 'AI Energy Campaign – Outbound Call Script';
+const STT_KEYWORDS = ['AGL', 'Origin', 'EnergyAustralia', 'Alinta', 'Red Energy', 'Simply Energy', 'Lumo', 'Momentum', 'electricity', 'gas', 'quarterly', 'monthly'];
 
-const PROMPT = `You are "Sam", a warm, natural assistant calling on behalf of {{clientName}}, an Australian energy and internet comparison service. You are an AI assistant and you never claim to be human. Goal: a friendly 3-5 minute bill review that qualifies the customer for a better gas or electricity plan and, if there is time, a better NBN plan, then hands them to a product specialist (a human) on this same call.
+/** The script's opening line, spoken verbatim by the worker before the model's first turn. */
+const OPENING_LINE = 'Hello, my name is Daniel. How are you doing today?';
 
-Start by checking they are the person who looks after the energy bill. If not, ask when the bill payer is available and treat that as a callback.
+/** The script's hand-off, spoken verbatim by the worker when the transfer starts. */
+const TRANSFER_LINE =
+  "Perfect, thank you. What I'll do now is connect you with one of our energy specialists, who can review your current situation and explain any suitable offers in detail. They should be available in about 10 seconds, so please hold for just a moment while I connect you.";
 
-Ask ONE question per turn, in this order, and rephrase patiently if they say "sorry?" or "come again?":
-1. Is it electricity, gas, or both they'd like reviewed? (fuelScope)
-2. Who is the current retailer? Prompt with AGL, Origin, EnergyAustralia, Alinta, Red or Simply Energy if they hesitate. (retailer)
-3. Do they have solar panels on the roof? (hasSolar)
-4. Is there any life-support or medical equipment at the property? If yes, reassure them it will be flagged and taken into account. (lifeSupport)
-5. Do they hold a pension, health care or other concession card? (concessionCard)
-6. Read back the supply address on file ({{address}}) and ask if that is right. If the address is blank, ask for their suburb instead. Do not ask for the NMI or date of birth. (addressConfirmed)
-7. Roughly how much is the bill a quarter: "around 200, 300 or 400 dollars?" (billBand)
-8. Do they feel they are paying too much? (payingTooMuch)
-9. What matters more, price or service, or both? (motivation)
-Only if they are engaged after that: who is their internet provider, roughly what they pay a month, and whether a promo price is about to end. (currentIsp, ispPrice, ispPromoEnds)
+const PROMPT = `You are Daniel, calling on behalf of {{clientName}} about the customer's electricity bills. Follow this call script exactly. Say each scripted line word for word, one step per turn, then wait for their answer. Never skip a step, never add questions that are not in the script, and never repeat a step they have already answered.
 
-Then say that based on their answers there is very likely a cheaper plan with no lock-in contract, no joining fee and no exit fee, and that a product specialist can confirm the exact rates in a minute. Ask: "Shall I put you through now?"
-- Yes → intent qualified. Say "One moment, I'll connect you now."
-- Would rather be called back → intent callback. Capture a preferred time, thank them, end.
-- Not interested or asks to be removed → intent not_interested. Apologise, confirm they will not be called again, end.
+Step 1, after they answer "how are you":
+"I'm calling regarding your electricity bills. Are you the person who looks after the electricity account?"
+- If NO: say "No worries. Thank you for your time. Have a great day!" and then call end_call.
+- If YES: go to step 2.
 
-If the conversation drifts: answer any off-topic remark in one short, warm sentence, then return to the next unanswered question. If they need a moment (finding glasses, another person in the room, a doorbell), say "no rush, take your time" and wait; do not repeat the question until they come back. If the phone is handed to someone else, ask who you are speaking with and whether they look after the bill before continuing. If they ask whether you are a real person, say plainly that you are an AI assistant and offer to have a person call them instead. If they ask about rates, government schemes, or anything you cannot answer, say the specialist will cover that rather than guessing.
+Step 2:
+"As you may know, energy prices can be quite expensive, so we're doing a quick survey to see whether there's an opportunity to reduce your electricity bills or find you a better offer. Do you currently have electricity only, or do you have gas as well?"
 
-Rules: never quote specific cents-per-kWh or per-MJ rates; the specialist does that. Never claim the regulator or government has lowered prices, never call them a "pay on time customer", and never talk as if they have already agreed to switch. Keep every turn under two sentences. Many customers are older: speak slowly, one idea per sentence, and repeat or spell things out without any irritation when asked. Objections "I'm already with a broker" or "I don't have my bill handy": reassure and continue; the bill is not needed for this call.`;
+Step 3:
+"No problem. Just to get a rough idea, how much do you usually spend on your electricity bills, either monthly or quarterly? Like 200 to 300 dollars, or more than that?"
+
+Step 4:
+"Okay, thanks for that. Based on what you've told me, there may be an opportunity to find a more competitive offer for your account. Which energy company are you currently with?"
+
+Step 5, once they name their energy company: call request_transfer. Say nothing yourself; the hand-off line is spoken for you.
+
+If an answer is unclear, ask that step again in simpler words. If they ask a question, answer it with the playbook below, then carry on from the step you were on.`;
+
+/** The script's customer questions and answers, verbatim. */
+const playbook = (clientName: string) => [
+  { objection: 'Where are you calling from?', rebuttal: `Say: "I'm calling from ${clientName}. We're an energy broker, and we work with multiple energy retailers to help customers find suitable offers." Then continue the script.` },
+  { objection: 'Which country are you calling from? / Where are you located?', rebuttal: `Say: "We're based in Collingwood, Melbourne, Australia." Then continue the script.` },
+  { objection: "What's the offer? / How much can you save me?", rebuttal: 'Say: "The offer depends on your meter type and current tariff. Give me a moment, and our energy specialist will review the details and explain the available offer to you." Then continue the script.' },
+  { objection: "I'm not interested. / I'm happy with my current offer. / I've recently changed my energy company.", rebuttal: `Say: "I understand. If you're happy to spare just two minutes, our specialist can explain the available offer so you can decide whether it's worth considering."` },
+  { objection: "My number is on the DNC Register. / Don't call me again. / I'll make a complaint.", rebuttal: `Say: "I'm sorry to have bothered you. I'll record your request so your number can be excluded from future calls. Thank you for your time. Goodbye." Then call end_call.` },
+  { objection: "I'm busy right now. / Call me back later. / I'm at work and can't talk.", rebuttal: 'Say: "No problem. What would be a convenient time for us to call you back? If today doesn\'t suit you, which day and time would work best?" When they give a day and time, call schedule_callback with it, confirm it back, say goodbye and call end_call.' },
+  { objection: 'Any question that is not covered in this script', rebuttal: 'Say: "Sure, our energy specialist will be able to explain that to you in more detail. Let me connect you with them and continue the script." Then move to the next step of the script and proceed with the transfer.' },
+];
 
 async function main() {
   const slug = arg('tenant-slug');
@@ -88,7 +97,7 @@ async function main() {
   const firstNames = args('first-name');
   const firstName = firstNames[0] ?? 'Nithin';
   const nameFor = (i: number) => firstNames[i] ?? (i === 0 ? firstName : `Test${i + 1}`);
-  const clientName = arg('client-name') ?? 'YSGN Energy';
+  const clientName = arg('client-name') ?? 'Australian Deal';
 
   await mongoose.connect(config.mongoUri);
   const db = mongoose.connection.db!;
@@ -130,7 +139,7 @@ async function main() {
         type: 'SPEAK',
         mandatory: true,
         config: {
-          text: `Hi {{firstName}}, this is Sam, an AI assistant calling on behalf of ${clientName}. This call may be recorded for quality purposes. Is now a good moment?`,
+          text: OPENING_LINE,
           interruptible: false,
         },
       },
@@ -141,14 +150,11 @@ async function main() {
         config: {
           prompt: PROMPT,
           exitIntents: ['qualified', 'callback', 'not_interested', 'silence', 'max_turns', 'capture_failed'],
-          captureVariables: [
-            'decisionMaker', 'fuelScope', 'retailer', 'hasSolar', 'lifeSupport', 'concessionCard', 'addressConfirmed', 'billBand',
-            'payingTooMuch', 'motivation', 'currentIsp', 'ispPrice', 'ispPromoEnds',
-          ],
+          captureVariables: ['decisionMaker', 'fuelScope', 'billAmount', 'retailer'],
           maxTurns: 24,
         },
       },
-      { id: 'transfer', type: 'TRANSFER', mandatory: false, config: { strategy: 'LONGEST_IDLE', whisperEnabled: false, acceptWindowSeconds: 15 } },
+      { id: 'transfer', type: 'TRANSFER', mandatory: false, config: { strategy: 'LONGEST_IDLE', whisperEnabled: false, acceptWindowSeconds: 15, announceText: TRANSFER_LINE } },
       {
         id: 'book-fallback',
         type: 'SPEAK',
@@ -184,18 +190,17 @@ async function main() {
       console.error(`flow "${FLOW_NAME}" exists but has no published version; publish it in the UI or delete it and re-run`);
       process.exit(1);
     }
-    const current = v.graph?.nodes?.find((n: { type: string }) => n.type === 'AI_CONVERSATION')?.config?.prompt;
-    if (current === PROMPT) {
+    if (JSON.stringify(v.graph) === JSON.stringify(buildGraph())) {
       flowVersionId = v._id as Types.ObjectId;
       console.log(`reusing published flow "${FLOW_NAME}" v${v.version}`);
     } else {
       flowVersionId = new Types.ObjectId();
       await db.collection('flowversions').insertOne({
         _id: flowVersionId, tenantId, flowId: flow._id, version: v.version + 1, state: 'PUBLISHED', graph: buildGraph(), publishedAt: now,
-        changeNote: 'Re-seeded: prompt updated in seed-test-campaign', createdAt: now, updatedAt: now,
+        changeNote: 'Re-seeded: flow updated in seed-test-campaign', createdAt: now, updatedAt: now,
       });
       await db.collection('flowversions').updateOne({ _id: v._id }, { $set: { state: 'ARCHIVED', updatedAt: now } });
-      console.log(`published flow "${FLOW_NAME}" v${v.version + 1} (prompt changed; v${v.version} archived)`);
+      console.log(`published flow "${FLOW_NAME}" v${v.version + 1} (flow changed; v${v.version} archived)`);
     }
   } else {
     const flowId = new Types.ObjectId();
@@ -203,13 +208,17 @@ async function main() {
     flowVersionId = new Types.ObjectId();
     await db.collection('flowversions').insertOne({
       _id: flowVersionId, tenantId, flowId, version: 1, state: 'PUBLISHED', graph: buildGraph(), publishedAt: now,
-      changeNote: 'Seeded from the Wendy Anwar call analysis (seed-test-campaign)', createdAt: now, updatedAt: now,
+      changeNote: 'Seeded from the AI Energy Campaign call script (seed-test-campaign)', createdAt: now, updatedAt: now,
     });
     console.log(`created + published flow "${FLOW_NAME}" v1`);
   }
 
   // Campaign
-  let campaign = await db.collection('campaigns').findOne({ tenantId, name: CAMPAIGN_NAME });
+  let campaign = await db.collection('campaigns').findOne({ tenantId, name: { $in: [CAMPAIGN_NAME, ...OLD_CAMPAIGN_NAMES] } });
+  if (campaign && campaign.name !== CAMPAIGN_NAME) {
+    await db.collection('campaigns').updateOne({ _id: campaign._id }, { $set: { name: CAMPAIGN_NAME, updatedAt: now } });
+    console.log(`renamed campaign "${campaign.name}" -> "${CAMPAIGN_NAME}"`);
+  }
   if (!campaign) {
     const _id = new Types.ObjectId();
     await db.collection('campaigns').insertOne({
@@ -223,12 +232,9 @@ async function main() {
         { outcome: 'ANSWERED_VOICEMAIL', delayMinutes: 10, shiftTimeBand: false, maxAttempts: 2 },
       ],
       frequencyCapDays: 0, scoring: ENERGY_SCORING,
-      rebuttals: [
-        { objection: 'already_with_broker', rebuttal: 'Reassure: this is a free review, no commitment; continue the questions.' },
-        { objection: 'no_bill_handy', rebuttal: 'Reassure: the bill is not needed for this call; a rough quarterly amount is enough.' },
-      ],
+      rebuttals: playbook(clientName),
       aiSelfIdentification: true, transcriptionMode: 'BOTH', whisperEnabled: false, routingStrategy: 'LONGEST_IDLE',
-      transferAcceptWindowSeconds: 15, schedule: [], sttKeywords: ['AGL', 'Origin', 'Alinta', 'NBN', 'Superloop', 'Dodo', 'gas', 'electricity'],
+      transferAcceptWindowSeconds: 15, schedule: [], sttKeywords: STT_KEYWORDS,
       summaryTemplate: 'Lead {{firstName}}. Score {{score}}. Facts: {{facts}}. Objection: {{objection}}.',
       createdAt: now, updatedAt: now,
     });
@@ -236,7 +242,12 @@ async function main() {
     console.log(`created campaign "${CAMPAIGN_NAME}" (IN pack, ACTIVE, frequency cap off, retries every 5 min)`);
   } else {
     // Also repairs campaigns seeded by the first version of this script, which wrote an invalid transcriptionMode.
-    await db.collection('campaigns').updateOne({ _id: campaign._id }, { $set: { activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, updatedAt: now } });
+    await db.collection('campaigns').updateOne({ _id: campaign._id }, {
+      $set: { clientId, activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, rebuttals: playbook(clientName), sttKeywords: STT_KEYWORDS, updatedAt: now },
+    });
+    // Keep the campaign's lists and leads under the same client.
+    await db.collection('leadlists').updateMany({ tenantId, campaignId: campaign._id }, { $set: { clientId, updatedAt: now } });
+    await db.collection('leads').updateMany({ tenantId, campaignId: campaign._id }, { $set: { clientId, updatedAt: now } });
     console.log(`reusing campaign "${CAMPAIGN_NAME}"`);
   }
   const campaignId = campaign._id as Types.ObjectId;

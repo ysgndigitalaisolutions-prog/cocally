@@ -39,7 +39,7 @@ from typing import AsyncIterator
 import aiohttp
 from dotenv import load_dotenv
 from livekit import agents, rtc
-from livekit.agents import Agent, AgentSession, function_tool
+from livekit.agents import Agent, AgentSession, RunContext, function_tool
 from livekit.agents.voice.room_io import AudioInputOptions, AudioOutputOptions, RoomOptions
 from livekit.agents.llm import StopResponse
 from livekit.plugins import deepgram, openai, silero
@@ -315,6 +315,9 @@ class Qualifier(Agent):
         # Background tasks we only hold to keep them from being garbage
         # collected mid-flight (asyncio keeps only weak references).
         self._bg_tasks: set[asyncio.Task] = set()
+        # The flow's hand-off line (TRANSFER node `announceText`, via the brief);
+        # None keeps the default line below.
+        self.transfer_line: str | None = None
 
     @property
     def closing(self) -> bool:
@@ -344,6 +347,43 @@ class Qualifier(Agent):
             # more..." after a declined transfer, cut off by the hang-up.
             raise StopResponse()
         return text
+
+    @function_tool
+    async def end_call(self, context: RunContext) -> None:
+        """End the call. Use only after you have said your goodbye line, when
+        the script says the call ends (e.g. they are not the account holder, or
+        a callback is booked)."""
+        if self._closing:
+            raise StopResponse()
+        self._closing = True
+        self._transfer_triggered = True
+        logger.info("end_call(call=%s): model ended the call", self._call_id)
+        try:
+            # Let the goodbye finish before the line drops.
+            await asyncio.wait_for(context.wait_for_playout(), timeout=10.0)
+        except Exception as e:  # noqa: BLE001 — the hang-up must still happen
+            logger.debug("end_call playout wait: %s", e)
+        await asyncio.sleep(0.5)
+        await _drop_customer_leg(self._ctx, self._call_id)
+        self._ctx.shutdown(reason="model ended the call")  # sync — not awaitable
+        raise StopResponse()
+
+    @function_tool
+    async def schedule_callback(self, when: str, note: str = "") -> str:
+        """Book a callback at the time the customer chose.
+
+        Args:
+            when: the agreed time as ISO 8601 with the customer's UTC offset, e.g. 2026-10-13T17:00:00+05:30.
+            note: optional short note, e.g. "busy at work, prefers evening".
+        """
+        if not self._call_id:
+            return "Callback noted."
+        ok, detail = await _post_callback(self._call_id, when, note)
+        if ok:
+            logger.info("schedule_callback(call=%s): %s", self._call_id, when)
+            return f"Callback booked for {when}. Confirm the time back to them in words, say goodbye, then call end_call."
+        logger.warning("schedule_callback(call=%s) failed: %s", self._call_id, detail)
+        return f"Could not book that time ({detail}). Ask them for another day and time."
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:  # noqa: ANN001
         # Once a transfer is under way or the call is closing, the model gets
@@ -418,7 +458,7 @@ class Qualifier(Agent):
                 # the first real call this await sat behind the AI's previous
                 # utterance, timed out at 15 s, skipped the comfort audio and
                 # delayed the transfer request by the same 15 s.
-                session.say("Great — let me get a specialist on the line for you, one moment.", allow_interruptions=False)
+                session.say(self.transfer_line or DEFAULT_TRANSFER_LINE, allow_interruptions=False)
                 handle = session.say(
                     "",
                     audio=_comfort_audio(stop, self.output_sample_rate, self.hold_music_pcm),
@@ -879,6 +919,23 @@ async def _post_compliance(call_id: str, kind: str, detail: str) -> None:
 # legitimately take minutes. A 30 s timeout used to report FAILED while the
 # server went on to bridge an agent into a room the AI had already left.
 TRANSFER_TIMEOUT_S = 10 * 120 + 15
+# Hand-off line when the flow's TRANSFER node has no `announceText`.
+DEFAULT_TRANSFER_LINE = "Great — let me get a specialist on the line for you, one moment."
+
+
+async def _post_callback(call_id: str, when: str, note: str) -> tuple[bool, str]:
+    if not (ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
+        return False, "engine not configured"
+    url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/callback"
+    headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
+    try:
+        async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json={"when": when, "note": note}, timeout=10) as r:
+            if r.ok:
+                return True, ""
+            body = await r.text()
+            return False, f"HTTP {r.status} {body[:120]}"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
 
 
 async def _post_transfer(call_id: str, reason: str) -> str:
@@ -2003,6 +2060,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             )
 
     qualifier = Qualifier(instructions=instructions, call_id=call_id, job_ctx=ctx)
+    qualifier.transfer_line = ((brief or {}).get("transferLine") or "").strip() or None
     qualifier.session_ref = session
 
     # Prefetch hold music now, in the background, so the transfer hand-off never

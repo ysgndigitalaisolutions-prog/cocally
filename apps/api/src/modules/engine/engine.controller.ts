@@ -17,6 +17,7 @@ import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { TransfersService } from '../workspace/transfers.service';
 import { SchedulingService } from '../leads/scheduling.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
+import { OPT_OUT_CLOSING_LINE } from './lines';
 import { interpolate } from './runtime';
 
 /**
@@ -32,10 +33,6 @@ import { interpolate } from './runtime';
  */
 const OPT_OUT_PATTERN =
   /\b(don'?t (call|ring|contact|phone)( me)?( again| back)?|do not (call|ring|contact)|stop (calling|ringing)|remove me|take me off|unsubscribe|no more calls|delete my (number|details)|do[ -]not[ -]call (list|register)|not interested in (any|being) call)/i;
-
-/** Spoken when an opt-out rail fires. Matches the simulation path's wording. */
-const OPT_OUT_CLOSING_LINE =
-  'Understood — I have removed you from our list. Sorry to have bothered you. Goodbye.';
 
 /**
  * Keypad digit treated as "remove me from your list".
@@ -99,6 +96,18 @@ class ComplianceEventDto {
 class TransferRequestDto {
   @IsString()
   reason: string;
+}
+
+class CallbackRequestDto {
+  /** ISO 8601 with offset, in the customer's local time, e.g. 2026-10-13T17:00:00+05:30. */
+  @IsString()
+  @IsNotEmpty()
+  when: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  note?: string;
 }
 
 class DtmfDto {
@@ -201,6 +210,23 @@ export class EngineController {
 
     const rebuttals = (campaign.rebuttals ?? []).map((r) => `- If they say "${r.objection}": ${r.rebuttal}`).join('\n');
 
+    // The flow owns the words. Its mandatory SPEAK node (the one publishing
+    // requires) is the opening line, and the TRANSFER node's `announceText` is
+    // the hand-off line; both are spoken verbatim by the worker. Without them
+    // the pack's generic disclosure and the worker's default hand-off apply.
+    const graphNodes = (flowVersion?.graph?.nodes ?? []) as Array<{ type: string; mandatory?: boolean; config?: Record<string, unknown> }>;
+    const openingText = graphNodes.find((n) => n.mandatory && n.type === 'SPEAK' && typeof n.config?.text === 'string')?.config?.text as string | undefined;
+    const openingLine = openingText ? interpolate(openingText, vars).trim() : null;
+    const announceText = graphNodes.find((n) => n.type === 'TRANSFER')?.config?.announceText;
+    const transferLine = typeof announceText === 'string' && announceText.trim() ? interpolate(announceText, vars).trim() : null;
+    const tz = lead.timezone || 'UTC';
+    let localNow: string;
+    try {
+      localNow = new Intl.DateTimeFormat('en-AU', { timeZone: tz, dateStyle: 'full', timeStyle: 'short' }).format(new Date());
+    } catch {
+      localNow = new Date().toISOString();
+    }
+
     // Spoken instructions the worker's LLM speaks directly (no JSON envelope).
     const instructions = [
       interpolate(nodePrompt, vars),
@@ -213,11 +239,17 @@ export class EngineController {
       // Keep the client/campaign name out of this line: with it in, the model
       // addressed the customer by the campaign name ("Are you Wendy Test India
       // who looks after…", 28 Sep). The person is `firstName`, nobody else.
-      `- The person you are speaking to is ${vars.firstName || 'the customer'}. You have ALREADY greeted them, said you are an AI assistant and that the call may be recorded. Never repeat that introduction unless they ask who you are; if they do, answer in one short sentence: "${aiDisclosure}"`,
-      '- Keep every reply under 25 words: at most one short acknowledgement, then one question. Short replies are what make you feel quick and natural on the phone.',
+      openingLine
+        ? `- The person you are speaking to is ${vars.firstName || 'the customer'}. You have ALREADY said: "${openingLine}" Never repeat that opening line.`
+        : `- The person you are speaking to is ${vars.firstName || 'the customer'}. You have ALREADY greeted them, said you are an AI assistant and that the call may be recorded. Never repeat that introduction unless they ask who you are; if they do, answer in one short sentence: "${aiDisclosure}"`,
+      '- Say scripted lines word for word. Anything you say off-script stays under 25 words: at most one short acknowledgement, then the next scripted step.',
       '- Never re-ask something already answered.',
       '- If they object, acknowledge warmly and use the playbook below; never argue.',
-      '- When the person clearly qualifies and wants to proceed, call the request_transfer tool to bring in a human specialist.',
+      transferLine
+        ? '- When the script says to connect them, call the request_transfer tool and say nothing yourself: the hand-off line is spoken for you.'
+        : '- When the person clearly qualifies and wants to proceed, call the request_transfer tool to bring in a human specialist.',
+      `- To book a callback, call schedule_callback with the time they chose as ISO 8601 including their UTC offset. It is now ${localNow} for them (${tz}). Confirm the time back to them in words.`,
+      '- When the script ends the call (after your goodbye line), call the end_call tool.',
       '- If they ask to stop or say do-not-call, apologise, confirm removal, and end the call.',
       rebuttals ? `\nOBJECTION PLAYBOOK:\n${rebuttals}` : '',
     ]
@@ -238,8 +270,10 @@ export class EngineController {
       transferAcceptWindowSeconds: campaign.transferAcceptWindowSeconds,
       firstTurnHint: `Greet ${vars.firstName || 'them'}, give the AI + recording disclosure in one sentence, and ask if now is a good moment.`,
       /** Spoken verbatim by the worker before the LLM's first turn, and logged as a compliance event. */
-      disclosureLine: `${campaign.aiSelfIdentification ? `Hi ${vars.firstName || 'there'}. ${aiDisclosure} ${recordingDisclosure}` : `Hi ${vars.firstName || 'there'}. ${recordingDisclosure}`} Is now a good moment for a quick chat?`,
+      disclosureLine: openingLine ?? `${campaign.aiSelfIdentification ? `Hi ${vars.firstName || 'there'}. ${aiDisclosure} ${recordingDisclosure}` : `Hi ${vars.firstName || 'there'}. ${recordingDisclosure}`} Is now a good moment for a quick chat?`,
       instructions,
+      /** Spoken verbatim by the worker when the transfer starts; null = its default line. */
+      transferLine,
       /** Tenant's AI voice (Platform screen); null = the worker's default. */
       voice: tenant?.voice ?? null,
     };
@@ -564,6 +598,8 @@ export class EngineController {
       payingTooMuch: 'true if the customer feels they are paying too much for energy',
       notSwitchedRecently: 'true if the customer has NOT compared or changed energy providers in the last 6-12 months (set true when they say they have not)',
       wantsSpecialist: 'true if the customer agrees to be put through to a specialist now',
+      billProvided: 'true once the customer gives a rough amount for their electricity bill (monthly or quarterly)',
+      retailerProvided: 'true once the customer names the energy company they are currently with',
     };
     const factDescriptions = factKeys.map((k) => `- ${k}: ${FACT_GLOSSARY[k] ?? '(campaign-specific fact, infer from its name)'}`).join('\n');
     const transcriptText = call.transcript.map((t) => `${t.speaker === 'ai' ? 'AI' : 'Lead'}: ${t.redactedText}`).join('\n');
@@ -684,6 +720,29 @@ export class EngineController {
     });
 
     return scoreAction(campaign.scoring, score) === 'TRANSFER';
+  }
+
+  /**
+   * Worker calls this when its `schedule_callback` tool fires: the customer
+   * asked to be called back at a time they chose. The AI dialler rings them
+   * then (handler AI), replacing any outstanding callback for the lead.
+   */
+  @Public()
+  @UseGuards(ServiceTokenGuard)
+  @Post('calls/:id/callback')
+  async callback(@Param('id') id: string, @Body() dto: CallbackRequestDto) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
+    const call = await this.callModel.findById(new Types.ObjectId(id)).lean().exec();
+    if (!call) throw new NotFoundException('Call not found');
+    const cb = await this.scheduling.scheduleCallback({
+      tenantId: call.tenantId.toString(),
+      leadId: call.leadId.toString(),
+      campaignId: call.campaignId.toString(),
+      dueAt: new Date(dto.when),
+      handler: 'AI',
+      notes: dto.note ? `Customer asked for a callback: ${dto.note}` : 'Customer asked for a callback.',
+    });
+    return { ok: true, dueAt: cb.dueAt };
   }
 
   /**

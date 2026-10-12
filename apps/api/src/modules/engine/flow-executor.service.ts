@@ -9,6 +9,7 @@ import {
 } from '@cocally/shared';
 import { PalService } from '../providers/pal.service';
 import { SuppressionService } from '../leads/suppression.service';
+import { OPT_OUT_CLOSING_LINE } from './lines';
 import { composeSystemPrompt } from './prompt';
 import { interpolate, type CallContext, type CallRuntime, type ExecutionOutcome } from './runtime';
 
@@ -254,7 +255,7 @@ export class FlowExecutorService {
       if (OPT_OUT_PATTERN.test(heard)) {
         hooks.onCompliance('OPT_OUT_DETECTED', heard);
         await this.suppression.optOut(context.tenantId, String(context.vars['phone'] ?? ''), `utterance on call ${context.callId}`);
-        const goodbye = 'Understood — I have removed you from our list. Sorry to have bothered you. Goodbye.';
+        const goodbye = OPT_OUT_CLOSING_LINE;
         hooks.onLine('ai', goodbye);
         await runtime.say(goodbye);
         await runtime.hangup();
