@@ -92,7 +92,14 @@ CARTESIA_CONNECT_TRIES = int(os.getenv("CARTESIA_CONNECT_TRIES", "4"))
 # uses to start the LLM before the turn is final. "nova" is the previous stack
 # (nova-2-phonecall + the local end-of-turn model): measured on 28 Sep it spent
 # ~450 ms per turn just waiting for the final transcript. Kept as a fallback.
-STT_MODEL = (os.getenv("STT_MODEL") or "flux").lower()  # flux | nova
+STT_MODEL = (os.getenv("STT_MODEL") or "nova").lower()  # nova | flux
+# 12 Oct: default moved from flux to nova. On 3 of 4 calls Flux heard the
+# caller's first words after a long AI line (VAD fired, loud audio reached it)
+# and emitted nothing, so the stall guard asked them to repeat 4.5 s later.
+# Deepgram's community thread on Flux reports the same: short replies right
+# after the agent stops are lost. Nova-3 streaming + LiveKit's end-of-turn
+# model is the fallback stack below. STT_NOVA_MODEL picks the Deepgram model.
+STT_NOVA_MODEL = os.getenv("STT_NOVA_MODEL") or "nova-3"
 # Deepgram serves the same models from regional hosts: api.deepgram.com (US),
 # api.au.deepgram.com (Sydney), api.eu.deepgram.com. The same key works on all.
 DEEPGRAM_HOST = (os.getenv("DEEPGRAM_HOST") or "api.deepgram.com").strip()
@@ -1541,8 +1548,9 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
           throws the draft away if the person carries on. `eot_timeout_ms` is
           the cap on a mid-sentence pause (Flux default 3 s — too long on a
           call; 1.5 s matches the previous max_delay budget).
-    nova  nova-2-phonecall + the local EnglishModel end-of-turn detector: the
-          pre-28-Sep stack, for A/B or if Flux is unavailable on the key.
+    nova  (default) Deepgram streaming STT_NOVA_MODEL (nova-3) + the local
+          EnglishModel end-of-turn detector, VAD-driven. Slower to commit a
+          turn than Flux but it does not drop the caller's first words.
     """
     keyterm_kw = {"keyterm": STT_KEYTERMS} if STT_KEYTERMS else {}
     if STT_MODEL == "flux":
@@ -1590,9 +1598,11 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
     # >20s waiting for a clean silence gap that a real phone line's background
     # noise never gave it. utterance_end_ms turns on Deepgram's word-timing-based
     # UtteranceEnd signal as a second, noise-robust path to finalize a turn.
+    # Keyterm prompting is nova-3 only; nova-2 models take `keywords` instead.
+    nova_kw = keyterm_kw if STT_NOVA_MODEL.startswith("nova-3") else {}
     stt_engine = deepgram.STT(
         base_url=f"https://{DEEPGRAM_HOST}/v1/listen",
-        model="nova-2-phonecall", utterance_end_ms=1000, endpointing_ms=25, **keyterm_kw
+        model=STT_NOVA_MODEL, utterance_end_ms=1000, endpointing_ms=25, **nova_kw
     )
     turn_handling = {
         # Word-level end-of-turn model: "they have finished" comes from the

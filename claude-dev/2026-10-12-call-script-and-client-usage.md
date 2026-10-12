@@ -52,3 +52,17 @@ Next: (1) NOISE_CANCELLATION=0 for one call (Flux may be getting voice that
 BVC has mangled: VAD fires, Flux hears no words); (2) a fallback that sends a
 VAD-detected segment Flux ignored to nova-3 and commits that transcript, so a
 missed answer costs ~1.5 s instead of a 4.5 s "sorry?".
+
+## Speech-to-text switched from Flux to nova-3 (12 Oct)
+
+Flux missed the caller's first words after a long AI line on 3 of the last 4
+calls (VAD heard them, loud audio reached Flux, no event). Deepgram's own
+community thread (github.com/orgs/deepgram/discussions/1463) reports Flux
+losing short replies right after the agent speaks. Default `STT_MODEL` is now
+`nova`: Deepgram streaming `STT_NOVA_MODEL` (default nova-3, keyterms on) on
+the AU host + LiveKit's EnglishModel end-of-turn detector, VAD-driven
+(dynamic endpointing 0.3-1.5 s). Local test (`scratchpad/nova_test.py`):
+12 s of silence then three answers at 8 kHz -> all three finals correct,
+"Simply Energy" included. Expect ~0.2-0.4 s more per turn than Flux at best;
+`STT_MODEL=flux` in .env.prod switches back. The VM's .env.prod still says
+`STT_MODEL=flux` until changed.
