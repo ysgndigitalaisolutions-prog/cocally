@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { PlatformModule } from '../platform/platform.module';
 import { Call, CallSchema } from '../../schemas/call.schema';
 import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
 import { CliNumber, CliNumberSchema } from '../../schemas/cli-number.schema';
@@ -57,6 +58,7 @@ import { PredictiveDialerService } from './predictive-dialer.service';
     RecordingsModule,
     WebhooksModule,
     WorkspaceModule,
+    PlatformModule,
   ],
   controllers: [
     CallsController,

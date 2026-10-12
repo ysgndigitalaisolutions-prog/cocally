@@ -12,7 +12,10 @@ import { Roles } from '../../common/auth/roles.decorator';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
+import { Tenant, TenantDocument } from '../../schemas/tenant.schema';
 import { User, UserDocument } from '../../schemas/user.schema';
+import { normaliseBilling } from '../platform/billing.service';
+import { UsageService } from '../platform/usage.service';
 import { LeadsService } from '../leads/leads.service';
 import { SchedulingService } from '../leads/scheduling.service';
 import { SuppressionService } from '../leads/suppression.service';
@@ -97,6 +100,8 @@ export class CallsController {
     @InjectModel(Lead.name) private readonly leadModel: Model<LeadDocument>,
     @InjectModel(Campaign.name) private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    @InjectModel(Tenant.name) private readonly tenantModel: Model<TenantDocument>,
+    private readonly usage: UsageService,
     private readonly leads: LeadsService,
     private readonly scheduling: SchedulingService,
     private readonly suppression: SuppressionService,
@@ -163,10 +168,30 @@ export class CallsController {
       : [];
     const agentById = new Map(agents.map((a) => [a._id.toString(), a.name || a.email]));
 
-    return calls.map((call) => ({
-      ...call,
-      agentName: call.agentId ? (agentById.get(call.agentId.toString()) ?? null) : null,
-    }));
+    // Minutes per call, measured the same way as the bill (UsageService), and
+    // the call's own charge at the tenant's base rate for owners/admins: the
+    // month's invoice may land in a cheaper band, so this is "what this call
+    // used", not a line on the invoice.
+    const ids = calls.map((c) => c._id.toString());
+    const seeCharges = user.roles.includes('OWNER') || user.roles.includes('ADMIN');
+    const [usage, tenant] = await Promise.all([
+      ids.length ? this.usage.usage({ callIds: ids, groupBy: '_id' }) : Promise.resolve(new Map()),
+      seeCharges ? this.tenantModel.findById(user.tenantId).select('billing').lean().exec() : Promise.resolve(null),
+    ]);
+    const tier = seeCharges ? normaliseBilling(tenant?.billing).tiers[0]! : null;
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+
+    return calls.map((call) => {
+      const u = usage.get(call._id.toString());
+      return {
+        ...call,
+        agentName: call.agentId ? (agentById.get(call.agentId.toString()) ?? null) : null,
+        ringSeconds: u?.ringSeconds ?? 0,
+        aiSeconds: u?.aiSeconds ?? 0,
+        humanSeconds: u?.humanSeconds ?? 0,
+        ...(tier ? { chargeInr: u ? round2((u.aiSeconds / 60) * tier.aiPerMinInr + u.dials * tier.perDialInr) : 0 } : {}),
+      };
+    });
   }
 
   /** Call deep-dive per DASH-07: replay with score-over-time, signals, compliance events. */
