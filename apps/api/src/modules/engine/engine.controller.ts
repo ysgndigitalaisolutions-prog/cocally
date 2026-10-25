@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Logger, NotFoundException, Param, Post, UseGuards } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { AMD_CLASSES, computeScore, redactPii, scoreAction, type AmdClass } from '@cocally/shared';
-import { IsIn, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsIn, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { Model, Types } from 'mongoose';
 import { Public } from '../../common/auth/public.decorator';
 import { ServiceTokenGuard } from '../../common/auth/service-token.guard';
@@ -17,23 +17,14 @@ import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { TransfersService } from '../workspace/transfers.service';
 import { SchedulingService } from '../leads/scheduling.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
-import { OPT_OUT_CLOSING_LINE } from './lines';
+import { OPT_OUT_CLOSING_LINE, OPT_OUT_PATTERN } from './lines';
 import { interpolate } from './runtime';
 
 /**
- * Server-side opt-out detection. Deliberately the SAME pattern as
- * `FlowExecutorService`'s, so the simulation path and the live LiveKit path
- * cannot drift into disagreeing about what "take me off your list" looks like.
- *
- * This exists because until now the live path had no opt-out rail at all: the
- * only thing standing between a customer saying "do not call me" and being
- * called again tomorrow was a single line in the LLM's prompt asking it to be
- * polite about it. A prompt is not a compliance control — it is a suggestion
- * with a temperature setting. This is the control.
+ * Server-side opt-out detection (pattern shared with the simulation path, see
+ * `lines.ts`). A prompt is not a compliance control — it is a suggestion with
+ * a temperature setting. This is the control.
  */
-const OPT_OUT_PATTERN =
-  /\b(don'?t (call|ring|contact|phone)( me)?( again| back)?|do not (call|ring|contact)|stop (calling|ringing)|remove me|take me off|unsubscribe|no more calls|delete my (number|details)|do[ -]not[ -]call (list|register)|not interested in (any|being) call)/i;
-
 /**
  * Keypad digit treated as "remove me from your list".
  *
@@ -82,6 +73,8 @@ class CallEventDto {
   @IsOptional() @IsIn(['stt', 'llm', 'tts']) stage?: 'stt' | 'llm' | 'tts';
   @IsOptional() @IsNumber() @Min(0) @Max(60_000) jitterMs?: number;
   @IsOptional() @IsNumber() @Min(0) @Max(100) lossPct?: number;
+  /** worker_log only: a batch of log lines, so the worker posts once a second, not once a line. */
+  @IsOptional() @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) @MaxLength(200, { each: true }) lines?: string[];
 }
 
 class ComplianceEventDto {
@@ -108,6 +101,14 @@ class CallbackRequestDto {
   @IsString()
   @MaxLength(300)
   note?: string;
+}
+
+class OptOutRequestDto {
+  /** What the customer said, in the model's words (for the audit trail). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  reason?: string;
 }
 
 class DtmfDto {
@@ -209,6 +210,15 @@ export class EngineController {
     const aiDisclosure = interpolate(pack?.disclosures?.aiIdentificationText ?? "I'm a virtual assistant calling on behalf of {{clientName}}.", vars);
 
     const rebuttals = (campaign.rebuttals ?? []).map((r) => `- If they say "${r.objection}": ${r.rebuttal}`).join('\n');
+    const promptText = interpolate(nodePrompt, vars);
+    // Tagged script lines (`[S2] "..."` in the flow prompt or the playbook).
+    // The model answers with the tag and the worker speaks the line itself,
+    // word for word: an LLM asked to copy a sentence paraphrases it, and a
+    // stalled stream cut lines off mid-word (7 Oct, "One more - do").
+    const scriptLines: Record<string, string> = {};
+    for (const m of `${promptText}\n${rebuttals}`.matchAll(/\[([A-Z]\d{1,2})\]\s*"([^"]+)"/g)) {
+      scriptLines[m[1]!] ??= m[2]!.trim();
+    }
 
     // The flow owns the words. Its mandatory SPEAK node (the one publishing
     // requires) is the opening line, and the TRANSFER node's `announceText` is
@@ -221,15 +231,22 @@ export class EngineController {
     const transferLine = typeof announceText === 'string' && announceText.trim() ? interpolate(announceText, vars).trim() : null;
     const tz = lead.timezone || 'UTC';
     let localNow: string;
+    // The offset in words ("UTC+11:00"): left to work it out from the zone
+    // name, the model booked Melbourne callbacks at +10:30 (25 Oct eval).
+    let utcOffset = 'UTC';
     try {
       localNow = new Intl.DateTimeFormat('en-AU', { timeZone: tz, dateStyle: 'full', timeStyle: 'short' }).format(new Date());
+      const part = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'longOffset' })
+        .formatToParts(new Date())
+        .find((p) => p.type === 'timeZoneName')?.value;
+      if (part) utcOffset = part.replace('GMT', 'UTC').replace(/^UTC$/, 'UTC+00:00');
     } catch {
       localNow = new Date().toISOString();
     }
 
     // Spoken instructions the worker's LLM speaks directly (no JSON envelope).
     const instructions = [
-      interpolate(nodePrompt, vars),
+      promptText,
       '',
       'CONVERSATION RULES:',
       '- Speak naturally, one short question at a time. Never sound like a form.',
@@ -248,9 +265,12 @@ export class EngineController {
       transferLine
         ? '- When the script says to connect them, call the request_transfer tool and say nothing yourself: the hand-off line is spoken for you.'
         : '- When the person clearly qualifies and wants to proceed, call the request_transfer tool to bring in a human specialist.',
-      `- To book a callback, call schedule_callback with the time they chose as ISO 8601 including their UTC offset. It is now ${localNow} for them (${tz}). Confirm the time back to them in words.`,
+      `- To book a callback, call schedule_callback with the time they chose as ISO 8601 including their UTC offset. Only once THEY have said a day or time; never suggest or guess one. It is now ${localNow} for them (${tz}, ${utcOffset}); use offset ${utcOffset.replace('UTC', '')}. Confirm the time back to them in words.`,
       '- When the script ends the call (after your goodbye line), call the end_call tool.',
-      '- If they ask to stop or say do-not-call, apologise, confirm removal, and end the call.',
+      "- If they ask not to be called, mention the Do Not Call Register, or threaten a complaint, call the opt_out tool and say nothing yourself: the closing line is spoken for you and their number is suppressed.",
+      Object.keys(scriptLines).length
+        ? `- SCRIPTED LINES ARE TAGGED like [S2]. To say one, output ONLY its tag, e.g. [S2], and nothing else; it is spoken for you word for word. To answer a question and then carry on, output both tags, e.g. [Q1] [S3]. Never output two S tags in one turn: say one step, then wait for their answer. Write your own words only when no tagged line fits, and keep them under 25 words.`
+        : '',
       rebuttals ? `\nOBJECTION PLAYBOOK:\n${rebuttals}` : '',
     ]
       .filter((l) => l !== '')
@@ -274,6 +294,10 @@ export class EngineController {
       instructions,
       /** Spoken verbatim by the worker when the transfer starts; null = its default line. */
       transferLine,
+      /** Tag -> exact wording; the worker speaks these when the model outputs the tag. */
+      scriptLines,
+      /** Campaign words the STT should favour (retailer names etc). */
+      sttKeywords: campaign.sttKeywords ?? [],
       /** Tenant's AI voice (Platform screen); null = the worker's default. */
       voice: tenant?.voice ?? null,
     };
@@ -347,7 +371,14 @@ export class EngineController {
       const res = await this.callModel
         .updateOne(
           { _id: new Types.ObjectId(id) },
-          { $push: { 'timings.workerLog': { $each: [{ at: new Date(), detail: dto.detail ?? '' }], $slice: -500 } } },
+          {
+            $push: {
+              'timings.workerLog': {
+                $each: (dto.lines?.length ? dto.lines : [dto.detail ?? '']).map((detail) => ({ at: new Date(), detail })),
+                $slice: -500,
+              },
+            },
+          },
         )
         .exec();
       if (res.matchedCount === 0) throw new NotFoundException('Call not found');
@@ -490,6 +521,25 @@ export class EngineController {
     }
 
     await this.recordOptOut(call, 'DTMF_OPT_OUT', `customer pressed "${dto.digit}" on call ${id}`);
+    return { ok: true, optOut: true, closingLine: OPT_OUT_CLOSING_LINE };
+  }
+
+  /**
+   * Model-initiated opt-out. The transcript rail above only catches phrasings
+   * the regex knows; the model's playbook tells it to call `opt_out` for any
+   * do-not-call request, so a paraphrase still suppresses the number. Same
+   * tail as the other rails: suppress first, then the closing line.
+   */
+  @Public()
+  @UseGuards(ServiceTokenGuard)
+  @Post('calls/:id/opt-out')
+  async optOut(@Param('id') id: string, @Body() dto: OptOutRequestDto) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
+    const call = await this.callModel.findById(new Types.ObjectId(id)).exec();
+    if (!call) throw new NotFoundException('Call not found');
+    if (call.outcome !== 'OPT_OUT') {
+      await this.recordOptOut(call, 'OPT_OUT_DETECTED', `AI opt_out on call ${id}: ${redactPii(dto.reason ?? 'no reason given')}`);
+    }
     return { ok: true, optOut: true, closingLine: OPT_OUT_CLOSING_LINE };
   }
 

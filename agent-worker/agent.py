@@ -2,12 +2,12 @@
 CoCally — LiveKit Agents voice worker.
 
 Holds a real spoken conversation in a LiveKit room (streaming STT -> LLM -> TTS
-with barge-in). Providers match the CoCally stack: Deepgram (STT + Aura TTS) and
-Groq (LLM). No ElevenLabs / OpenAI needed.
+with barge-in). Providers: Deepgram STT (Sydney host), Cerebras LLM (Groq as
+fallback), Cartesia/Deepgram/ElevenLabs TTS.
 
 Two ways it runs:
   • Demo (no phone): talk to it from https://agents-playground.livekit.io.
-  • Real call: the CoCally API dials a lead via LiveKit SIP + Twilio and passes
+  • Real call: the CoCally API dials a lead via LiveKit SIP (Telvoq / Twilio) and passes
     the call id in the room metadata; the worker fetches the authoritative brief
     (prompt + disclosure + rebuttals) from the API so conversation content lives
     in one place. See claude-dev/2026-07-19-live-call-build-plan.md.
@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, RunContext, function_tool
 from livekit.agents.voice.room_io import AudioInputOptions, AudioOutputOptions, RoomOptions
-from livekit.agents.llm import StopResponse
+from livekit.agents.llm import ChatChunk, ChoiceDelta, StopResponse
 from livekit.plugins import deepgram, openai, silero
 
 # Local end-of-turn model: decides "they finished speaking" from the words, not
@@ -75,10 +75,12 @@ ENGINE_BASE_URL = _engine_base_url()
 ENGINE_SERVICE_TOKEN = os.getenv("ENGINE_SERVICE_TOKEN")
 
 # ── Speech stack selection (env-driven so the floor can A/B without a deploy) ──
-# Groq retired the Llama 3.x models in 2026. qwen3.8-27b measured ~190 ms to
-# first token with reasoning off and handles the transfer tool reliably;
-# openai/gpt-oss-120b is the higher-quality, slower (~400-650 ms) option.
-LLM_MODEL = os.getenv("LLM_MODEL") or "qwen/qwen3.8-27b"
+# 25 Oct: default moved from qwen3.8-27b to gpt-oss-120b. A text-only eval of
+# the energy script against Cerebras (8 scenarios, the real prompt and tools)
+# had qwen hang up on "Okay."/"I'm fine.", opt a customer out on "Hi." and
+# miss the transfer; gpt-oss followed every path at the same speed (median
+# turn 0.38-0.39 s vs 0.41-0.44 s for qwen). qwen stays as the fallback.
+LLM_MODEL = os.getenv("LLM_MODEL") or "openai/gpt-oss-120b"
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "160"))  # short spoken turns → TTS starts sooner
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | deepgram-flux | elevenlabs | cartesia
 # A Cartesia websocket that takes longer than this to open is on a far
@@ -146,6 +148,12 @@ INTERRUPTION = {
     # heard the customer three times and Flux never got a word, the signature
     # of that substitution staying on; the STT must always hear the caller.
     "discard_audio_if_uninterruptible": False,
+    # An overlap must carry at least one transcribed word to stop the AI: a
+    # cough, a breath or line noise trips the VAD but produces no words, and
+    # with resume_false_interruption off (below) a cut line is lost for good.
+    # Kept at 1, not 2: the framework DROPS an overlapping turn shorter than
+    # min_words, and "Yes"/"Both" said over the AI's last word is a real answer.
+    "min_words": int(os.getenv("INTERRUPTION_MIN_WORDS", "1")),
     # Never pause a reply on a start-of-speech and wait for a transcript to
     # decide: on a phone line Flux/VAD raise starts on noise and echo, and a
     # paused reply with no resume is what the 28 Sep call sounded like. A real
@@ -161,6 +169,10 @@ NO_AGENT_LINE = (
 # Comma-separated words the STT should favour (brand/retailer names). Both
 # Deepgram models accept them; fixes "Simply Energy" -> "simply an async".
 STT_KEYTERMS = [k.strip() for k in (os.getenv("STT_KEYTERMS") or "").split(",") if k.strip()]
+# nova-3 language. Empty = by the lead's number: +61 -> en-AU (the
+# production callers), anything else -> plain "en" (the India test phones).
+# Flux is English-only and takes no language.
+STT_LANGUAGE = (os.getenv("STT_LANGUAGE") or "").strip()
 TTS_VOICE = os.getenv("TTS_VOICE")  # provider-specific voice/model id; sensible default per provider
 NOISE_CANCELLATION = os.getenv("NOISE_CANCELLATION", "1") not in ("0", "false", "no")
 # livekit-agents 1.8 runs an automatic gain control stage on the room audio
@@ -295,6 +307,125 @@ def _classify_amd(text: str) -> str:
     return "HUMAN"
 
 
+# ── Verbatim script lines ──────────────────────────────────────────────────
+#
+# The brief's `scriptLines` maps tags ("S2", "Q1") to the client's exact
+# wording, and the prompt tells the model to answer with the tag alone. The
+# worker swaps each tag for its line before TTS, so the customer hears the
+# script word for word, the transcript and chat history hold the real words,
+# and the model only has to emit ~3 tokens: no paraphrase, and no line cut off
+# mid-sentence by a stalled stream (7 Oct, "One more - do"). Text that is not
+# a known tag passes through unchanged, so a model that ignores the format
+# still speaks.
+_TAG_RE = re.compile(r"\[([A-Z]\d{1,2})\]")
+# Any other short bracketed span is a stage direction the model invented
+# ("[Awaiting response]", "[End of conversation]", seen 25 Oct) and is never
+# spoken. Past _BRACKET_MAX characters an open "[" is ordinary text.
+_BRACKET_RE = re.compile(r"\[[^\[\]\n]{0,48}\]")
+_BRACKET_MAX = 50
+
+
+def expand_script_tags(text: str, lines: dict[str, str]) -> str:
+    """Whole-string version of the stream expander (tests, logging)."""
+    out = _BRACKET_RE.sub(lambda m: f" {lines[m.group(0)[1:-1]]} " if m.group(0)[1:-1] in lines else " ", text)
+    return re.sub(r"\s+", " ", out).strip()
+
+
+async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[str] = frozenset()):  # noqa: ANN001, ANN201 — llm_node chunk stream
+    """Stream form for `llm_node`: text passes straight through except a
+    possible partial tag, which is held until it completes (or cannot).
+
+    The reply ENDS at the first script step (any non-Q tag), at any tagged
+    line that asks a question, or at the first "?" in the model's own words:
+    the customer has to answer it first. Whatever
+    the model writes after that is dropped, unspoken. 25 Oct eval, gpt-oss:
+    "[S1][S2]" (two questions at once), "[S2]We have both electricity and
+    gas.[S3]Around $250 a month." (the model answering for the customer), and
+    "[Q6] ... (We'll use schedule_callback)" all ended up in the TTS before
+    this. Tool calls still pass through. `blocked` tags are never spoken (the
+    callback question once a callback is booked)."""
+    buf = ""
+    last = ""  # last character yielded; "" = nothing spoken yet
+    done = False
+
+    def _line(tag: str) -> str:
+        nonlocal done
+        if tag not in lines or tag in blocked:
+            return " "
+        line = lines[tag]
+        if tag[0] != "Q" or line.rstrip().endswith("?"):
+            done = True
+        return f" {line} "
+
+    def _drain(final: bool) -> str:
+        nonlocal buf, last, done
+        out = ""
+        while buf and not done:
+            i = buf.find("[")
+            text = buf if i < 0 else buf[:i]
+            q = text.find("?")
+            if q >= 0:  # the model's own words end at their first question too
+                out += text[: q + 1]
+                done = True
+                break
+            if i < 0:
+                out, buf = out + buf, ""
+                break
+            out, buf = out + text, buf[i:]
+            m = _BRACKET_RE.match(buf)
+            if m:
+                out += _line(m.group(0)[1:-1])
+                buf = buf[m.end():]
+            elif not final and len(buf) < _BRACKET_MAX and "]" not in buf and "\n" not in buf:
+                break  # may still become a tag; wait for the next chunk
+            else:
+                out, buf = out + buf[0], buf[1:]
+        if done:
+            buf = ""  # the rest of this reply is never spoken
+        # Tag padding never doubles a space or leads the reply.
+        out = re.sub(r" {2,}", " ", out)
+        if (last == "" or last == " ") and out.startswith(" "):
+            out = out[1:]
+        if final:
+            out = out.rstrip()
+        if out:
+            last = out[-1]
+        return out
+
+    async for chunk in chunks:
+        if done and not (isinstance(chunk, ChatChunk) and chunk.delta is not None and chunk.delta.tool_calls):
+            if isinstance(chunk, ChatChunk) and chunk.usage is not None:
+                yield ChatChunk(id=chunk.id, usage=chunk.usage)
+            continue
+        if isinstance(chunk, str):
+            buf += chunk
+        elif isinstance(chunk, ChatChunk) and chunk.delta is not None and chunk.delta.content:
+            buf += chunk.delta.content
+            if chunk.delta.tool_calls or chunk.usage is not None:
+                yield ChatChunk(id=chunk.id, delta=ChoiceDelta(role=chunk.delta.role, tool_calls=chunk.delta.tool_calls), usage=chunk.usage)
+        else:
+            yield chunk
+            continue
+        text = _drain(final=False)
+        if text:
+            yield text
+    text = _drain(final=True)
+    if text:
+        yield text
+
+
+# Words that mean the customer named a time. schedule_callback refuses
+# without one: on 25 Oct the model booked "13:30" for a customer who had only
+# said "I'm at work and can't talk".
+_TIME_WORDS = re.compile(
+    r"\d|\b(am|pm|a\.m|p\.m|o'?clock|noon|midday|morning|afternoon|evening|tonight|night|"
+    r"today|tomorrow|week|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|quarter|lunch|"
+    r"after work|hour|minutes?)\b",
+    re.I,
+)
+
+
 class Qualifier(Agent):
     def __init__(self, instructions: str, call_id: str | None, job_ctx: agents.JobContext) -> None:
         super().__init__(instructions=instructions)
@@ -325,6 +456,25 @@ class Qualifier(Agent):
         # The flow's hand-off line (TRANSFER node `announceText`, via the brief);
         # None keeps the default line below.
         self.transfer_line: str | None = None
+        # Tag -> exact script wording, from the brief; empty = no expansion.
+        self.script_lines: dict[str, str] = {}
+        # Set once the VAD has heard the customer speak at all. A SILENCE AMD
+        # result only hangs up when this is still False: on 29 Sep a real
+        # "Yeah" was never transcribed and SILENCE fired on a live person.
+        self.heard_speech = False
+        # The customer's latest finished turn (see on_user_turn_completed).
+        self.last_user_text = ""
+        # Tags the model may no longer speak (the callback question, once booked).
+        self.blocked_tags: set[str] = set()
+
+    async def llm_node(self, chat_ctx, tools, model_settings):  # noqa: ANN001, ANN201 — framework signature
+        stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
+        if not self.script_lines:
+            async for chunk in stream:
+                yield chunk
+            return
+        async for chunk in _expand_tag_stream(stream, self.script_lines, frozenset(self.blocked_tags)):
+            yield chunk
 
     @property
     def closing(self) -> bool:
@@ -376,6 +526,25 @@ class Qualifier(Agent):
         raise StopResponse()
 
     @function_tool
+    async def opt_out(self, reason: str = "") -> None:
+        """The customer does not want to be called: they asked not to be
+        called again, said they are on the Do Not Call Register, or threatened
+        a complaint. Suppresses their number and ends the call with the
+        approved closing line. Say nothing yourself.
+
+        Args:
+            reason: what they said, in a few words.
+        """
+        if self._closing:
+            raise StopResponse()
+        logger.warning("opt_out(call=%s): model-initiated opt-out: %s", self._call_id, reason[:120])
+        body = await _post_opt_out(self._call_id, reason) if self._call_id else None
+        # Background: the close interrupts the current speech, which is this
+        # tool's own turn, and then waits for its line to play out.
+        self.spawn(self.close_for_opt_out((body or {}).get("closingLine")))
+        raise StopResponse()
+
+    @function_tool
     async def schedule_callback(self, when: str, note: str = "") -> str:
         """Book a callback at the time the customer chose.
 
@@ -383,16 +552,23 @@ class Qualifier(Agent):
             when: the agreed time as ISO 8601 with the customer's UTC offset, e.g. 2026-10-13T17:00:00+05:30.
             note: optional short note, e.g. "busy at work, prefers evening".
         """
+        if not _TIME_WORDS.search(self.last_user_text):
+            logger.info("schedule_callback(call=%s) refused: no time in %r", self._call_id, self.last_user_text[:80])
+            tag = "[Q6]" if "Q6" in self.script_lines else "the callback question"
+            return f"Not booked: they have not said a day or time yet. Output {tag} to ask them."
         if not self._call_id:
-            return "Callback noted."
+            self.blocked_tags.add("Q6")
+            return "Callback booked. Confirm the time back to them in words, say goodbye, then call end_call."
         ok, detail = await _post_callback(self._call_id, when, note)
         if ok:
+            self.blocked_tags.add("Q6")
             logger.info("schedule_callback(call=%s): %s", self._call_id, when)
             return f"Callback booked for {when}. Confirm the time back to them in words, say goodbye, then call end_call."
         logger.warning("schedule_callback(call=%s) failed: %s", self._call_id, detail)
         return f"Could not book that time ({detail}). Ask them for another day and time."
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:  # noqa: ANN001
+        self.last_user_text = (getattr(new_message, "text_content", None) or "").strip()
         # Once a transfer is under way or the call is closing, the model gets
         # no more turns: the worker owns every line from here (hand-off,
         # apology, goodbye).
@@ -600,7 +776,28 @@ class Qualifier(Agent):
             "AMD %s in %sms (call=%s) first-transcript=%r",
             amd_class, latency_ms if latency_ms is not None else "?", self._call_id, (text or "")[:80],
         )
-        self.spawn(_post_amd(self._call_id, amd_class, latency_ms))
+        self.spawn(self._amd_and_maybe_hang_up(amd_class, latency_ms))
+
+    async def _amd_and_maybe_hang_up(self, amd_class: str, latency_ms: int | None) -> None:
+        """Report AMD, and hang up when the API says so (campaign voicemail
+        policy). Until 25 Oct the reply was thrown away and the AI read the
+        whole script to answering machines."""
+        body = await _post_amd(self._call_id, amd_class, latency_ms)
+        if not (body and body.get("hangup")) or self._closing or self._transfer_triggered:
+            return
+        if amd_class == "SILENCE" and self.heard_speech:
+            logger.info("AMD SILENCE but the VAD heard speech — not hanging up (call=%s)", self._call_id)
+            return
+        self._closing = True
+        self._transfer_triggered = True
+        logger.warning("AMD %s -> hanging up per voicemail policy (call=%s)", amd_class, self._call_id)
+        if self.session_ref is not None:
+            try:
+                self.session_ref.interrupt(force=True)
+            except Exception as e:  # noqa: BLE001 — the hang-up must still happen
+                logger.debug("interrupt before AMD hang-up failed: %s", e)
+        await _drop_customer_leg(self._ctx, self._call_id)
+        self._ctx.shutdown(reason=f"AMD {amd_class}")
 
     async def amd_silence_watchdog(self) -> None:
         """No transcript at all within `AMD_SILENCE_TIMEOUT_S` of live audio."""
@@ -669,9 +866,10 @@ async def _post_dtmf(call_id: str, digit: str) -> dict | None:
     return None
 
 
-async def _post_amd(call_id: str, amd_class: str, latency_ms: int | None) -> None:
+async def _post_amd(call_id: str, amd_class: str, latency_ms: int | None) -> dict | None:
+    """Returns `{hangup, ...}`: whether the campaign wants this answer hung up on."""
     if not (ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
-        return
+        return None
     url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/amd"
     headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
     payload: dict = {"amdClass": amd_class}
@@ -679,10 +877,28 @@ async def _post_amd(call_id: str, amd_class: str, latency_ms: int | None) -> Non
         payload["latencyMs"] = latency_ms
     try:
         async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json=payload, timeout=10) as r:
-            if not r.ok:
-                logger.warning("amd post %s -> HTTP %s", call_id, r.status)
+            if r.ok:
+                return await r.json()
+            logger.warning("amd post %s -> HTTP %s", call_id, r.status)
     except Exception as e:  # noqa: BLE001 — reporting is telemetry; a live call outranks it
         logger.warning("amd post failed: %s", e)
+    return None
+
+
+async def _post_opt_out(call_id: str, reason: str) -> dict | None:
+    """Model-initiated opt-out; the server suppresses before it answers."""
+    if not (ENGINE_BASE_URL and ENGINE_SERVICE_TOKEN):
+        return None
+    url = f"{ENGINE_BASE_URL}/engine/calls/{call_id}/opt-out"
+    headers = {"Authorization": f"Bearer {ENGINE_SERVICE_TOKEN}"}
+    try:
+        async with aiohttp.ClientSession() as s, s.post(url, headers=headers, json={"reason": reason[:300]}, timeout=10) as r:
+            if r.ok:
+                return await r.json()
+            logger.error("opt-out post %s -> HTTP %s — number may NOT be suppressed", call_id, r.status)
+    except Exception as e:  # noqa: BLE001
+        logger.error("opt-out post failed (%s) — number may NOT be suppressed", e)
+    return None
 
 
 async def _post_metrics(call_id: str, payload: dict) -> None:
@@ -747,8 +963,11 @@ def _ship_call_log(ctx: agents.JobContext, call_id: str | None) -> None:
         try:
             async with aiohttp.ClientSession() as s:
                 while pending:
-                    line = pending.popleft()
-                    async with s.post(url, headers=headers, json={"kind": "worker_log", "detail": line}, timeout=10):
+                    # One POST per batch, not per line: at ~20 lines a second
+                    # on a busy turn the per-line posts were queuing on the
+                    # call's event loop.
+                    batch = [pending.popleft() for _ in range(min(len(pending), 200))]
+                    async with s.post(url, headers=headers, json={"kind": "worker_log", "lines": batch}, timeout=10):
                         pass
         except Exception:  # noqa: BLE001
             pass
@@ -1538,7 +1757,13 @@ class _FluxSTT(deepgram.STTv2):
         return st
 
 
-def _build_stt():  # noqa: ANN202 — plugin STT types differ
+def _stt_language(lead_phone: str | None) -> str:
+    if STT_LANGUAGE:
+        return STT_LANGUAGE
+    return "en-AU" if (lead_phone or "").startswith("+61") else "en"
+
+
+def _build_stt(keyterms: list[str] | None = None, language: str = "en"):  # noqa: ANN202 — plugin STT types differ
     """STT by env. Returns (stt, turn_handling) because the two are one decision:
 
     flux  Deepgram Flux (`STTv2`). End-of-turn comes from the model itself, so
@@ -1552,7 +1777,9 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
           EnglishModel end-of-turn detector, VAD-driven. Slower to commit a
           turn than Flux but it does not drop the caller's first words.
     """
-    keyterm_kw = {"keyterm": STT_KEYTERMS} if STT_KEYTERMS else {}
+    # Env terms plus the campaign's own (brief `sttKeywords`), deduplicated.
+    terms = list(dict.fromkeys([*STT_KEYTERMS, *(keyterms or [])]))
+    keyterm_kw = {"keyterm": terms} if terms else {}
     if STT_MODEL == "flux":
         try:
             stt_engine = _FluxSTT(
@@ -1602,7 +1829,7 @@ def _build_stt():  # noqa: ANN202 — plugin STT types differ
     nova_kw = keyterm_kw if STT_NOVA_MODEL.startswith("nova-3") else {}
     stt_engine = deepgram.STT(
         base_url=f"https://{DEEPGRAM_HOST}/v1/listen",
-        model=STT_NOVA_MODEL, utterance_end_ms=1000, endpointing_ms=25, **nova_kw
+        model=STT_NOVA_MODEL, language=language, utterance_end_ms=1000, endpointing_ms=25, **nova_kw
     )
     turn_handling = {
         # Word-level end-of-turn model: "they have finished" comes from the
@@ -1851,7 +2078,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     tts_engine = _build_tts()
     disclosure = (brief or {}).get("disclosureLine")
 
-    stt_engine, turn_handling = _build_stt()
+    stt_language = _stt_language((brief or {}).get("leadPhone"))
+    stt_engine, turn_handling = _build_stt((brief or {}).get("sttKeywords") or [], stt_language)
+    logger.info("stt %s language=%s campaign keyterms=%s", STT_MODEL, stt_language if STT_MODEL != "flux" else "en (flux)", (brief or {}).get("sttKeywords"))
     session = AgentSession(
         # Cerebras/Groq (OpenAI-compatible endpoints) for the LLM — see
         # _make_llm. Reasoning is switched off/low explicitly: hidden thinking
@@ -2012,6 +2241,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             except Exception as e:  # noqa: BLE001 — never let diagnostics break a call
                 logger.debug("stt gate probe failed: %s", e)
         if new == "speaking":
+            qualifier.heard_speech = True
             _cancel_stall()
             if not awaiting_reply:
                 last_interim = ""
@@ -2071,6 +2301,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     qualifier = Qualifier(instructions=instructions, call_id=call_id, job_ctx=ctx)
     qualifier.transfer_line = ((brief or {}).get("transferLine") or "").strip() or None
+    qualifier.script_lines = {str(k): str(v) for k, v in ((brief or {}).get("scriptLines") or {}).items() if v}
+    logger.info("script lines: %s", ", ".join(sorted(qualifier.script_lines)) or "none (model speaks freely)")
     qualifier.session_ref = session
 
     # Prefetch hold music now, in the background, so the transfer hand-off never

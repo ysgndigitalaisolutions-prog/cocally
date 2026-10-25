@@ -9,7 +9,7 @@ import {
 } from '@cocally/shared';
 import { PalService } from '../providers/pal.service';
 import { SuppressionService } from '../leads/suppression.service';
-import { OPT_OUT_CLOSING_LINE } from './lines';
+import { OPT_OUT_CLOSING_LINE, OPT_OUT_PATTERN } from './lines';
 import { composeSystemPrompt } from './prompt';
 import { interpolate, type CallContext, type CallRuntime, type ExecutionOutcome } from './runtime';
 
@@ -35,7 +35,6 @@ export interface ExecutorConfig {
 }
 
 const DISTRESS_PATTERN = /\b(fuck|shit|piss off|leave me alone|harass|stop it|angry|upset|crying)\b/i;
-const OPT_OUT_PATTERN = /\b(don'?t call|do not call|stop calling|remove me|take me off|unsubscribe)\b/i;
 
 interface LlmTurnEnvelope {
   reply: string;
