@@ -13,6 +13,7 @@ LINES = {
     "Q6": "What would be a convenient time for us to call you back?",
     "Q1": "I'm calling from Australian Deal.",
     "S3": "How much do you usually spend?",
+    "S4": "Just to get a rough idea, how much do you spend, monthly or quarterly? Like 200 to 300 dollars, or more than that?",
 }
 
 
@@ -68,6 +69,12 @@ def test_tool_call_after_the_step_still_passes():
 
 def test_own_words_end_at_the_first_question():
     assert _text(run(_chunks("Which company are you with? We", "'re with AGL."))) == "Which company are you with?"
+
+
+def test_written_out_line_keeps_its_second_question():
+    # 25 Oct call: the model wrote S3 itself; the cut at "?" lost the rest.
+    out = _text(run(_chunks("No problem. Just to get a rough idea, how much do you ", "spend, monthly or quarterly?", " So")))
+    assert out == "No problem. Just to get a rough idea, how much do you spend, monthly or quarterly? Like 200 to 300 dollars, or more than that?"
 
 
 def test_blocked_tag_is_not_spoken():

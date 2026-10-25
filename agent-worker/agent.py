@@ -357,15 +357,38 @@ async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[s
             done = True
         return f" {line} "
 
+    said = ""  # everything yielded so far in this reply
+
+    def _rest_of_line(spoken: str) -> str:
+        """When the model writes a script line out itself instead of its tag,
+        the cut at the first "?" must not drop the line's second question
+        (25 Oct call: S3 lost "Like 200 to 300 dollars, or more than that?").
+        If what was spoken so far is the start of a script line, return the
+        rest of that line."""
+        words = spoken.split()
+        flats = [re.sub(r"\s+", " ", line).strip() for line in lines.values()]
+        # Longest spoken tail first: the reply may open with an acknowledgement
+        # ("Got it.") that is not part of the line.
+        for i in range(len(words)):
+            tail = " ".join(words[i:]).lower()
+            if len(tail) < 20:
+                break
+            for flat in flats:
+                at = flat.lower().find(tail)
+                if at >= 0:
+                    rest = flat[at + len(tail) :].strip()
+                    return f" {rest}" if rest else ""
+        return ""
+
     def _drain(final: bool) -> str:
-        nonlocal buf, last, done
+        nonlocal buf, last, done, said
         out = ""
         while buf and not done:
             i = buf.find("[")
             text = buf if i < 0 else buf[:i]
             q = text.find("?")
             if q >= 0:  # the model's own words end at their first question too
-                out += text[: q + 1]
+                out += text[: q + 1] + _rest_of_line(said + out + text[: q + 1])
                 done = True
                 break
             if i < 0:
@@ -390,6 +413,7 @@ async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[s
             out = out.rstrip()
         if out:
             last = out[-1]
+        said += out
         return out
 
     async for chunk in chunks:
