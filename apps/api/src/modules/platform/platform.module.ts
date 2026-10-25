@@ -7,6 +7,7 @@ import { PlatformSettings, PlatformSettingsSchema } from '../../schemas/platform
 import { Tenant, TenantSchema } from '../../schemas/tenant.schema';
 import { User, UserSchema } from '../../schemas/user.schema';
 import { BillingController } from './billing.controller';
+import { UsageController } from './usage.controller';
 import { BillingService } from './billing.service';
 import { PlatformService } from './platform.service';
 import { UsageService } from './usage.service';
@@ -23,7 +24,7 @@ import { UsageService } from './usage.service';
       { name: Invoice.name, schema: InvoiceSchema },
     ]),
   ],
-  controllers: [BillingController],
+  controllers: [BillingController, UsageController],
   providers: [PlatformService, BillingService, UsageService],
   exports: [PlatformService, BillingService, UsageService],
 })

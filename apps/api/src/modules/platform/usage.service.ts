@@ -49,7 +49,9 @@ export class UsageService {
     to?: Date;
     tenantId?: string;
     callIds?: string[];
-    groupBy?: 'tenantId' | 'campaignId' | '_id';
+    groupBy?: 'tenantId' | 'campaignId' | '_id' | 'day';
+    /** IANA zone the `day` grouping uses for its calendar dates (default Asia/Kolkata). */
+    timezone?: string;
   }): Promise<Map<string, TenantUsage>> {
     const { from, to } = opts;
     const groupBy = opts.groupBy ?? 'tenantId';
@@ -101,6 +103,7 @@ export class UsageService {
           recorded: 1,
           aiCall: 1,
           ttsChars: 1,
+          day: { $dateToString: { format: '%Y-%m-%d', date: '$startedAt', timezone: opts.timezone ?? 'Asia/Kolkata' } },
           transfer: { $cond: [{ $and: ['$aiCall', { $ifNull: ['$bridgedAt', false] }] }, 1, 0] },
           ringMs: {
             $cond: [
@@ -151,7 +154,7 @@ export class UsageService {
     ];
     const rows = await this.callModel
       .aggregate<{
-        _id: Types.ObjectId;
+        _id: Types.ObjectId | string | null;
         dials: number;
         answered: number;
         voicemail: number;
@@ -166,7 +169,7 @@ export class UsageService {
       .exec();
     const out = new Map<string, TenantUsage>();
     for (const r of rows) {
-      out.set(r._id.toString(), {
+      out.set(String(r._id), {
         dials: r.dials,
         answered: r.answered,
         voicemail: r.voicemail,

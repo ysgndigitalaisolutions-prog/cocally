@@ -63,7 +63,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { href: '/leads', label: 'Leads', icon: LuList, roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
       { href: '/calls', label: 'Calls', icon: LuPhoneCall, roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
       { href: '/reports', label: 'Reports', icon: LuFileText, roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
-      { href: '/usage', label: 'Usage & billing', icon: LuReceipt, roles: ['OWNER', 'ADMIN'] },
+      { href: '/usage', label: 'Usage', icon: LuReceipt, roles: ['OWNER', 'ADMIN'] },
     ],
   },
   {
