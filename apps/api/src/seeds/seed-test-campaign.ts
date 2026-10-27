@@ -46,7 +46,24 @@ const ENERGY_SCORING: ScoringConfig = {
   thresholds: { transfer: 100, bookOnly: 50, nurture: 30 },
 };
 const FLOW_NAME = 'AI Energy Campaign – Outbound Call Script';
-const STT_KEYWORDS = ['AGL', 'Origin', 'EnergyAustralia', 'Alinta', 'Red Energy', 'Simply Energy', 'Lumo', 'Momentum', 'electricity', 'gas', 'quarterly', 'monthly'];
+/** Retailers and distributors customers name (client list, 27 Oct), plus script words. */
+const STT_KEYWORDS = [
+  // Retailers
+  'AGL', 'ActewAGL', 'Origin Energy', 'EnergyAustralia', 'Alinta Energy', '1st Energy', 'Dodo', 'Powershop', 'Red Energy', 'Lumo Energy',
+  'Blue Energy', 'OVO Energy', 'Amber', 'ENGIE', 'Momentum Energy', 'GloBird Energy', 'Sumo', 'Tango Energy', 'Next Business Energy', 'Simply Energy',
+  // Distributors (named from the bill instead of the retailer)
+  'Jemena', 'CitiPower', 'Powercor', 'AusNet', 'United Energy', 'Ausgrid', 'Endeavour Energy', 'Essential Energy', 'SA Power Networks', 'Energex',
+  // Out of area
+  'Aurora Energy', 'Ergon Energy', 'Jacana', 'Synergy',
+  'electricity', 'gas', 'quarterly', 'monthly',
+];
+/**
+ * Regional monopolies the client cannot serve (Tasmania, regional Queensland,
+ * Northern Territory, Western Australia). Client rule, 27 Oct: thank them and
+ * end the call, never transfer.
+ */
+const OUT_OF_AREA_RETAILERS = ['Aurora Energy', 'Ergon Energy', 'Jacana Energy', 'Synergy'];
+const OUT_OF_AREA_LINE = 'Thank you, we cannot cater to your area. Bye, take care.';
 
 /**
  * The opening line, spoken verbatim by the worker before the model's first
@@ -239,6 +256,7 @@ async function main() {
       rebuttals: playbook(clientName),
       aiSelfIdentification: true, transcriptionMode: 'BOTH', whisperEnabled: false, routingStrategy: 'LONGEST_IDLE',
       transferAcceptWindowSeconds: 15, schedule: [], sttKeywords: STT_KEYWORDS,
+      outOfAreaRetailers: OUT_OF_AREA_RETAILERS, outOfAreaLine: OUT_OF_AREA_LINE,
       summaryTemplate: 'Lead {{firstName}}. Score {{score}}. Facts: {{facts}}. Objection: {{objection}}.',
       createdAt: now, updatedAt: now,
     });
@@ -247,7 +265,7 @@ async function main() {
   } else {
     // Also repairs campaigns seeded by the first version of this script, which wrote an invalid transcriptionMode.
     await db.collection('campaigns').updateOne({ _id: campaign._id }, {
-      $set: { clientId, activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, rebuttals: playbook(clientName), sttKeywords: STT_KEYWORDS, updatedAt: now },
+      $set: { clientId, activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, rebuttals: playbook(clientName), sttKeywords: STT_KEYWORDS, outOfAreaRetailers: OUT_OF_AREA_RETAILERS, outOfAreaLine: OUT_OF_AREA_LINE, updatedAt: now },
     });
     // Keep the campaign's lists and leads under the same client.
     await db.collection('leadlists').updateMany({ tenantId, campaignId: campaign._id }, { $set: { clientId, updatedAt: now } });

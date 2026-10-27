@@ -54,6 +54,7 @@ const EVENT_LABELS: Record<string, string> = {
   stall_guard: 'Stall guard forced a turn',
   transfer: 'Transfer',
   llm_fallback: 'LLM fallback',
+  out_of_area: 'Out-of-area retailer, call closed',
 };
 
 /** A turn's timing belongs to the AI line spoken within this long of it. */

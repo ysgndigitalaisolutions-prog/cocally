@@ -456,6 +456,18 @@ _TIME_WORDS = re.compile(
 )
 
 
+def out_of_area_pattern(retailers: list[str]) -> re.Pattern[str] | None:
+    """Regex for a campaign's out-of-area retailers, on the distinctive word of
+    each name ("Ergon Energy" -> "ergon"): customers say "I'm with Ergon"."""
+    generic = {"energy", "power", "electricity", "gas", "the"}
+    words = []
+    for name in retailers:
+        core = [w for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in generic]
+        if core:
+            words.append(re.escape(" ".join(core)))
+    return re.compile(r"\b(" + "|".join(words) + r")\b", re.I) if words else None
+
+
 class Qualifier(Agent):
     def __init__(self, instructions: str, call_id: str | None, job_ctx: agents.JobContext) -> None:
         super().__init__(instructions=instructions)
@@ -499,6 +511,10 @@ class Qualifier(Agent):
         # Undoes the short first-answer end-of-turn cap; called once, on the
         # first completed customer turn.
         self.restore_endpointing = None
+        # Campaign rule: retailers the client cannot serve, and the line that
+        # closes the call (brief `outOfArea`). None = no such rule.
+        self.out_of_area_re: re.Pattern[str] | None = None
+        self.out_of_area_line = ""
 
     async def llm_node(self, chat_ctx, tools, model_settings):  # noqa: ANN001, ANN201 — framework signature
         stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
@@ -605,6 +621,24 @@ class Qualifier(Agent):
         if self.restore_endpointing is not None:
             restore, self.restore_endpointing = self.restore_endpointing, None
             restore()
+        # Out of area: decided here, in code, before the model or the
+        # qualification score can transfer the call (the score reaches the
+        # transfer threshold on the same answer that names the retailer).
+        m = self.out_of_area_re.search(self.last_user_text) if self.out_of_area_re and not self._closing else None
+        if m:
+            self._closing = True
+            self._transfer_triggered = True
+            said = self.last_user_text
+            logger.warning("out-of-area retailer %r (call=%s) — closing", m.group(0), self._call_id)
+            if self._call_id:
+                async def _record() -> None:
+                    await _post_transcript(self._call_id, "customer", said)
+                    await _post_transcript(self._call_id, "ai", self.out_of_area_line)
+                    await _post_event(self._call_id, "out_of_area", None, m.group(0))
+
+                self.spawn(_record())
+            self.spawn(_no_agent_close(self._ctx, self._call_id, self.session_ref, self.out_of_area_line, "out of area"))
+            raise StopResponse()
         # Once a transfer is under way or the call is closing, the model gets
         # no more turns: the worker owns every line from here (hand-off,
         # apology, goodbye).
@@ -1583,6 +1617,7 @@ async def _no_agent_close(
     call_id: str | None = None,
     session: AgentSession | None = None,
     line: str = NO_AGENT_LINE,
+    reason: str = "no agent available",
 ) -> None:
     """Speak the approved apology, let it finish, then hang up.
 
@@ -1603,7 +1638,7 @@ async def _no_agent_close(
             logger.warning("failed to speak the no-agent line: %s", e)
     await asyncio.sleep(0.8)
     await _drop_customer_leg(ctx, call_id)
-    ctx.shutdown(reason="no agent available")  # sync — not awaitable
+    ctx.shutdown(reason=reason)  # sync — not awaitable
 
 
 def _build_tts():  # noqa: ANN202 — plugin TTS types differ
@@ -2338,6 +2373,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     qualifier = Qualifier(instructions=instructions, call_id=call_id, job_ctx=ctx)
     qualifier.transfer_line = ((brief or {}).get("transferLine") or "").strip() or None
     qualifier.script_lines = {str(k): str(v) for k, v in ((brief or {}).get("scriptLines") or {}).items() if v}
+    out_of_area = (brief or {}).get("outOfArea") or {}
+    qualifier.out_of_area_re = out_of_area_pattern(list(out_of_area.get("retailers") or []))
+    qualifier.out_of_area_line = str(out_of_area.get("line") or "Thank you, we cannot cater to your area. Bye, take care.")
+    if qualifier.out_of_area_re is not None:
+        logger.info("out-of-area retailers: %s", qualifier.out_of_area_re.pattern)
     logger.info("script lines: %s", ", ".join(sorted(qualifier.script_lines)) or "none (model speaks freely)")
     qualifier.session_ref = session
 

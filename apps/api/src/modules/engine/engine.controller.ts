@@ -62,7 +62,7 @@ class TurnMetricsDto {
   @IsOptional() @IsInt() @Min(0) heardMs?: number;
 }
 
-export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback', 'net_provider', 'net_media', 'worker_log'] as const;
+export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback', 'net_provider', 'net_media', 'worker_log', 'out_of_area'] as const;
 
 class CallEventDto {
   @IsIn(CALL_EVENT_KINDS) kind: (typeof CALL_EVENT_KINDS)[number];
@@ -298,6 +298,10 @@ export class EngineController {
       scriptLines,
       /** Campaign words the STT should favour (retailer names etc). */
       sttKeywords: campaign.sttKeywords ?? [],
+      /** Retailers to close politely instead of transferring, and the line for it. */
+      outOfArea: (campaign.outOfAreaRetailers ?? []).length
+        ? { retailers: campaign.outOfAreaRetailers, line: campaign.outOfAreaLine || 'Thank you, we cannot cater to your area. Bye, take care.' }
+        : null,
       /** Tenant's AI voice (Platform screen); null = the worker's default. */
       voice: tenant?.voice ?? null,
     };

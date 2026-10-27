@@ -146,6 +146,17 @@ export class Campaign {
   @Prop({ type: [String], default: [] })
   sttKeywords: string[];
 
+  /**
+   * Retailers this client cannot serve (a regional monopoly, e.g. Synergy in
+   * WA). A customer naming one is closed with `outOfAreaLine`, never
+   * transferred. Matched by the worker on every customer turn.
+   */
+  @Prop({ type: [String], default: [] })
+  outOfAreaRetailers: string[];
+
+  @Prop({ default: '' })
+  outOfAreaLine: string;
+
   /** Summary template per PAL-11. */
   @Prop({
     default:
