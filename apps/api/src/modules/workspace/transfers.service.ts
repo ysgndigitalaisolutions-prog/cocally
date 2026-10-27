@@ -250,11 +250,31 @@ export class TransfersService {
       appointmentInterest: 'Wants appointment',
     };
     const merged = { ...(lead.facts ?? {}), ...(liveFacts ?? {}) };
-    const facts = Object.entries(merged).map(([key, value]) => ({
-      label: factLabels[key] ?? key,
-      value: String(value),
-      confirmed: Boolean(value),
-    }));
+    // The customer's own answers (EngineController.handoffAnswers) come first
+    // and replace the yes/no flags they cover: "Retailer: Powershop" tells the
+    // specialist something, "retailerProvided: true" does not.
+    const answers = (merged['answers'] ?? null) as Record<string, string> | null;
+    const answerLabels: Record<string, string> = {
+      accountHolder: 'Account holder',
+      fuel: 'Fuel',
+      bill: 'Bill',
+      retailer: 'Retailer',
+      retailerHeard: 'Retailer (as heard)',
+      other: 'Note',
+    };
+    const coveredFlags = answers ? ['decisionMaker', 'billProvided', 'retailerProvided'] : [];
+    const facts = [
+      ...Object.entries(answers ?? {})
+        .filter(([key, value]) => typeof value === 'string' && value && !(key === 'retailerHeard' && value === answers?.['retailer']))
+        .map(([key, value]) => ({ label: answerLabels[key] ?? key, value: String(value), confirmed: true })),
+      ...Object.entries(merged)
+        .filter(([key]) => key !== 'answers' && key !== 'appointmentSlot' && !coveredFlags.includes(key))
+        .map(([key, value]) => ({
+          label: factLabels[key] ?? key,
+          value: String(value),
+          confirmed: Boolean(value),
+        })),
+    ];
     const openObjection = call.objections.find((o) => !o.recovered)?.label ?? null;
 
     return {

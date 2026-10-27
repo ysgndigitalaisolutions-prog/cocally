@@ -24,6 +24,14 @@ def test_empty_list_means_no_rule():
     assert agent.out_of_area_pattern([]) is None
 
 
+def test_screening_prompts():
+    for said in ["If you record your name and reason for calling, I'll see if this person is available.",
+                 "Please state your name and the reason for your call", "This call is being screened by Google Assistant"]:
+        assert agent._SCREENING_PATTERNS.search(said), said
+    for said in ["Who's calling?", "Yes, who is this?", "Hello?", "What's this about?"]:
+        assert not agent._SCREENING_PATTERNS.search(said), said
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

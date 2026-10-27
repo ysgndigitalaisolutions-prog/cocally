@@ -157,6 +157,10 @@ export class Campaign {
   @Prop({ default: '' })
   outOfAreaLine: string;
 
+  /** Said once to a phone's call-screening assistant ("record your name and reason for calling"). Empty = no reply. */
+  @Prop({ default: '' })
+  screeningLine: string;
+
   /** Summary template per PAL-11. */
   @Prop({
     default:

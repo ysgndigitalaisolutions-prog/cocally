@@ -170,18 +170,27 @@ export class LivekitService {
     if (!config.livekit.sipTrunkId) {
       throw new ServiceUnavailableException('LIVEKIT_SIP_TRUNK_ID is not configured — no outbound SIP trunk set up yet');
     }
+    // Australian numbers go out on the Australian carrier's trunk when one is
+    // configured (Telvoq); everything else (the team's +91 test phones) stays
+    // on the default trunk. Telvoq only presents its own +61 numbers, so a
+    // caller ID from another country falls back to that trunk's default.
+    const au = Boolean(config.livekit.sipTrunkIdAu) && phoneNumber.startsWith('+61');
+    const trunkId = au ? config.livekit.sipTrunkIdAu! : config.livekit.sipTrunkId;
+    const prefix = au ? config.livekit.sipDialPrefixAu : config.livekit.sipDialPrefix;
+    const fromNumber = au && options?.from && !options.from.startsWith('+61') ? undefined : options?.from;
     // Some carriers route on a tech prefix + country code + number with no
     // leading plus (e.g. 1701 61 2xxxxxxxx). Twilio takes E.164 unchanged.
-    const dialTo = config.livekit.sipDialPrefix ? `${config.livekit.sipDialPrefix}${phoneNumber.replace(/^\+/, '')}` : phoneNumber;
+    const dialTo = prefix ? `${prefix}${phoneNumber.replace(/^\+/, '')}` : phoneNumber;
+    this.logger.log(`dial-out call ${callId} via ${au ? 'AU trunk' : 'default trunk'} ${trunkId}`);
     const info = await this.sipClient.createSipParticipant(
-      config.livekit.sipTrunkId,
+      trunkId,
       dialTo,
       this.roomName(callId),
       {
         participantIdentity: this.sipParticipantIdentity(callId),
         participantName: 'Lead',
         playDialtone: true,
-        fromNumber: options?.from,
+        fromNumber,
         // `waitUntilAnswered: true` is the only reliable answer signal on a
         // real trunk: the `participant_joined` webhook fires while the phone
         // is still ringing, and there is no webhook for the SIP status

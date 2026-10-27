@@ -302,6 +302,8 @@ export class EngineController {
       outOfArea: (campaign.outOfAreaRetailers ?? []).length
         ? { retailers: campaign.outOfAreaRetailers, line: campaign.outOfAreaLine || 'Thank you, we cannot cater to your area. Bye, take care.' }
         : null,
+      /** Said once to a call-screening assistant; null = none. */
+      screeningLine: campaign.screeningLine || null,
       /** Tenant's AI voice (Platform screen); null = the worker's default. */
       voice: tenant?.voice ?? null,
     };
@@ -627,6 +629,54 @@ export class EngineController {
    * summary shape everywhere, not a raw transcript dump. Returns whether the
    * campaign's own scoring threshold now says this lead qualifies to transfer.
    */
+  /**
+   * What the customer actually said to the qualifying questions, for the
+   * specialist's transfer card, so they do not re-ask ("I've already told the
+   * guy all this", client call recordings 27 Oct). Only for flows that capture
+   * a `retailer` (the energy script); null otherwise or on any failure.
+   */
+  private async handoffAnswers(call: CallDocument): Promise<Record<string, string> | null> {
+    const flow = call.flowVersionId ? await this.flowVersionModel.findById(call.flowVersionId).lean().exec() : null;
+    const node = flow?.graph?.nodes?.find((n) => n.type === 'AI_CONVERSATION');
+    const capture = (node?.config?.captureVariables ?? []) as string[];
+    if (!capture.includes('retailer')) return null;
+    const transcriptText = call.transcript.map((t) => `${t.speaker === 'ai' ? 'AI' : 'Customer'}: ${t.redactedText}`).join('\n');
+    if (!transcriptText.trim()) return null;
+    const prompt = [
+      "Extract the customer's answers from this Australian energy call transcript (speech-to-text, so names may be misheard).",
+      'Reply with ONLY a JSON object of strings; omit a key the customer has not answered:',
+      '- accountHolder: do they look after the electricity account ("Yes" / "No" / their words).',
+      '- fuel: "Electricity only" or "Electricity and gas" (or their words).',
+      '- bill: the amount and period in plain words, e.g. "About $400 per month". If they gave rates instead of a bill, the rates.',
+      '- retailer: their current energy retailer, corrected for likely mishearings (PowerShell = Powershop, Simple Energy = Simply Energy, IGL = AGL, First Synergy / for Synergy = 1st Energy, Energy Australia = EnergyAustralia). If they named a network distributor (Jemena, CitiPower, Powercor, AusNet, United Energy, Ausgrid, Endeavour, Essential, SA Power Networks, Energex) write "<name> (distributor; retailer not known)". If they do not know, "Not sure".',
+      '- retailerHeard: their exact words for the retailer, as transcribed.',
+      '- other: anything else the specialist should know in under 20 words (a question they asked, solar, a second property, recently switched), or omit.',
+    ].join('\n');
+    const completion = await Promise.race([
+      this.pal.llm(
+        { tenantId: call.tenantId.toString(), campaignId: call.campaignId.toString(), llmRole: 'SUMMARY' },
+        {
+          messages: [
+            { role: 'system', content: prompt },
+            { role: 'user', content: transcriptText },
+          ],
+          jsonMode: true,
+          temperature: 0,
+          maxTokens: 250,
+          speedTier: 'fast',
+        },
+      ),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('handoff extraction timed out')), 2500)),
+    ]);
+    const parsed = JSON.parse(completion.text) as Record<string, unknown>;
+    const out: Record<string, string> = {};
+    for (const k of ['accountHolder', 'fuel', 'bill', 'retailer', 'retailerHeard', 'other']) {
+      const v = parsed[k];
+      if (typeof v === 'string' && v.trim()) out[k] = v.trim().slice(0, 160);
+    }
+    return Object.keys(out).length ? out : null;
+  }
+
   private async recomposeSummary(call: CallDocument): Promise<boolean> {
     const [lead, campaign] = await Promise.all([
       this.leadModel.findById(call.leadId).exec(),
@@ -819,10 +869,20 @@ export class EngineController {
     await call.save();
     this.gateway.updateSummary(call.tenantId.toString(), null, id, `Transfer requested: ${dto.reason}`);
 
+    // The customer's actual answers for the specialist's card, read from the
+    // transcript now: the retailer answer arrives in the same turn as the
+    // transfer, before the per-turn extraction has caught up. Bounded; the
+    // hold line is playing meanwhile.
+    const answers = await this.handoffAnswers(call).catch(() => null);
+    if (answers) {
+      await this.leadModel.updateOne({ _id: call.leadId }, { $set: { 'facts.answers': answers } }).exec();
+    }
+
     const result = await this.transfers.requestTransfer({
       callId: id,
       whisperEnabled: campaign.whisperEnabled,
       acceptWindowSeconds: campaign.transferAcceptWindowSeconds,
+      ...(answers ? { facts: { answers } } : {}),
     });
     const tenantId = call.tenantId.toString();
     if (result === 'BRIDGED') {

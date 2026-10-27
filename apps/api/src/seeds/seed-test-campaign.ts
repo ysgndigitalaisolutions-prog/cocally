@@ -30,9 +30,15 @@ function args(name: string): string[] {
 }
 const arg = (name: string) => args(name)[0];
 
-const CAMPAIGN_NAME = 'AI Energy Campaign (India test)';
+/** Country pack: IN (default, the team's own test phones over Twilio) or AU (+61 leads, dialled over Telvoq). */
+const PACK = (arg('pack') ?? 'IN').toUpperCase() === 'AU' ? 'AU' : 'IN';
+const CAMPAIGN_NAME = PACK === 'AU' ? 'AI Energy Campaign (AU test)' : 'AI Energy Campaign (India test)';
 /** Earlier name of the same campaign; renamed in place so its leads and history stay. */
-const OLD_CAMPAIGN_NAMES = ['Wendy test (India)'];
+const OLD_CAMPAIGN_NAMES = PACK === 'AU' ? [] : ['Wendy test (India)'];
+/** Where the test leads are, for local time (callbacks) and the dialler's calling window. */
+const LEAD_PLACE = PACK === 'AU'
+  ? { suburb: 'Collingwood', state: 'VIC', timezone: 'Australia/Melbourne' }
+  : { suburb: 'Bengaluru', state: 'KA', timezone: 'Asia/Kolkata' };
 
 /**
  * Scoring for the call script (claude-dev/2026-10-12 golden script). Facts are
@@ -64,6 +70,12 @@ const STT_KEYWORDS = [
  */
 const OUT_OF_AREA_RETAILERS = ['Aurora Energy', 'Ergon Energy', 'Jacana Energy', 'Synergy'];
 const OUT_OF_AREA_LINE = 'Thank you, we cannot cater to your area. Bye, take care.';
+/**
+ * Said to a phone's call-screening assistant ("record your name and reason
+ * for calling", seen on the client's own recordings), so the person sees who
+ * is calling and picks up.
+ */
+const SCREENING_LINE = "Hi, this is Daniel from Australian Deal, calling regarding your electricity bills.";
 
 /**
  * The opening line, spoken verbatim by the worker before the model's first
@@ -89,10 +101,12 @@ Step 2:
 Step 3:
 [S3] "No problem. Just to get a rough idea, how much do you usually spend on your electricity bills, either monthly or quarterly? Like 200 to 300 dollars, or more than that?"
 
+If they give their rates (cents per kilowatt hour, supply charge) instead of a bill amount, that counts as the answer: go to step 4.
+
 Step 4:
 [S4] "Okay, thanks for that. Based on what you've told me, there may be an opportunity to find a more competitive offer for your account. Which energy company are you currently with?"
 
-Step 5, once they name their energy company: call request_transfer. Say nothing yourself; the hand-off line is spoken for you.
+Step 5, once they answer step 4: call request_transfer. Say nothing yourself; the hand-off line is spoken for you and asks them to hold. This applies whatever they answer: a retailer, a network company from their bill (Jemena, CitiPower, Powercor, AusNet, United Energy, Ausgrid, Endeavour, Essential, SA Power Networks, Energex), or that they are not sure. Never ask about the company again.
 
 If an answer is unclear, output that step's tag again. If they ask a question, output the playbook answer's tag and then the tag of the step you were on, e.g. [Q1] [S3].`;
 
@@ -131,9 +145,9 @@ async function main() {
   }
   const tenantId = tenant._id as Types.ObjectId;
 
-  const pack = await db.collection('countrypacks').findOne({ code: 'IN' });
+  const pack = await db.collection('countrypacks').findOne({ code: PACK });
   if (!pack) {
-    console.error('IN country pack not seeded yet (the API seeds it on boot)');
+    console.error(`${PACK} country pack not seeded yet (the API seeds it on boot)`);
     process.exit(1);
   }
 
@@ -243,7 +257,7 @@ async function main() {
   if (!campaign) {
     const _id = new Types.ObjectId();
     await db.collection('campaigns').insertOne({
-      _id, tenantId, clientId, name: CAMPAIGN_NAME, countryPackCode: 'IN', status: 'ACTIVE',
+      _id, tenantId, clientId, name: CAMPAIGN_NAME, countryPackCode: PACK, status: 'ACTIVE',
       activeFlowVersionId: flowVersionId, abSplits: [], dailyDialBudget: 200, maxConcurrentCalls: 2, dialsPerAvailableAgent: 1,
       noAgentFallback: 'BOOK', voicemailPolicy: 'SILENT_HANGUP', ivrPolicy: { enabled: false, digits: '1', maxMenuDepth: 3 },
       cliPool: [], cliRules: { geoMatch: false, rotation: 'ROUND_ROBIN' },
@@ -256,16 +270,16 @@ async function main() {
       rebuttals: playbook(clientName),
       aiSelfIdentification: true, transcriptionMode: 'BOTH', whisperEnabled: false, routingStrategy: 'LONGEST_IDLE',
       transferAcceptWindowSeconds: 15, schedule: [], sttKeywords: STT_KEYWORDS,
-      outOfAreaRetailers: OUT_OF_AREA_RETAILERS, outOfAreaLine: OUT_OF_AREA_LINE,
+      outOfAreaRetailers: OUT_OF_AREA_RETAILERS, outOfAreaLine: OUT_OF_AREA_LINE, screeningLine: SCREENING_LINE,
       summaryTemplate: 'Lead {{firstName}}. Score {{score}}. Facts: {{facts}}. Objection: {{objection}}.',
       createdAt: now, updatedAt: now,
     });
     campaign = { _id };
-    console.log(`created campaign "${CAMPAIGN_NAME}" (IN pack, ACTIVE, frequency cap off, retries every 5 min)`);
+    console.log(`created campaign "${CAMPAIGN_NAME}" (${PACK} pack, ACTIVE, frequency cap off, retries every 5 min)`);
   } else {
     // Also repairs campaigns seeded by the first version of this script, which wrote an invalid transcriptionMode.
     await db.collection('campaigns').updateOne({ _id: campaign._id }, {
-      $set: { clientId, activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, rebuttals: playbook(clientName), sttKeywords: STT_KEYWORDS, outOfAreaRetailers: OUT_OF_AREA_RETAILERS, outOfAreaLine: OUT_OF_AREA_LINE, updatedAt: now },
+      $set: { clientId, activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, rebuttals: playbook(clientName), sttKeywords: STT_KEYWORDS, outOfAreaRetailers: OUT_OF_AREA_RETAILERS, outOfAreaLine: OUT_OF_AREA_LINE, screeningLine: SCREENING_LINE, updatedAt: now },
     });
     // Keep the campaign's lists and leads under the same client.
     await db.collection('leadlists').updateMany({ tenantId, campaignId: campaign._id }, { $set: { clientId, updatedAt: now } });
@@ -285,7 +299,7 @@ async function main() {
 
   // Leads (one per --phone), reset to FRESH if they already exist so they can be dialled again
   for (const [i, raw] of phones.entries()) {
-    const p = normalizePhone(raw, regionOf(raw, 'IN'));
+    const p = normalizePhone(raw, regionOf(raw, PACK));
     if (!p.ok) { console.error(`skipping ${raw}: ${p.reason}`); continue; }
     const e164 = p.value.e164;
     const existing = await db.collection('leads').findOne({ tenantId, campaignId, phone: e164 });
@@ -296,7 +310,7 @@ async function main() {
     }
     await db.collection('leads').insertOne({
       tenantId, clientId, listId, campaignId, phone: e164, firstName: nameFor(i), lastName: firstNames[i] || i === 0 ? '' : 'Number',
-      suburb: 'Bengaluru', state: 'KA', timezone: 'Asia/Kolkata', lineType: 'MOBILE', custom: {}, state_: 'FRESH', attempts: 0, facts: {}, score: 0,
+      ...LEAD_PLACE, lineType: 'MOBILE', custom: {}, state_: 'FRESH', attempts: 0, facts: {}, score: 0,
       dncListed: false, timeline: [{ at: now, kind: 'IMPORT', detail: 'seed-test-campaign' }], createdAt: now, updatedAt: now,
     });
     console.log(`created lead ${e164} (${nameFor(i)})`);

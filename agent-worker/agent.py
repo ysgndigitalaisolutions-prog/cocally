@@ -363,44 +363,57 @@ async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[s
             done = True
         return f" {line} "
 
-    said = ""  # everything yielded so far in this reply
+    flats = [re.sub(r"\s+", " ", line).strip() for tag, line in lines.items() if tag not in blocked]
+    pend = ""  # the model's own words, held until "?" or the end of the reply
 
-    def _rest_of_line(spoken: str) -> str:
-        """When the model writes a script line out itself instead of its tag,
-        the cut at the first "?" must not drop the line's second question
-        (25 Oct call: S3 lost "Like 200 to 300 dollars, or more than that?").
-        If what was spoken so far is the start of a script line, return the
-        rest of that line."""
-        words = spoken.split()
-        flats = [re.sub(r"\s+", " ", line).strip() for line in lines.values()]
-        # Longest spoken tail first: the reply may open with an acknowledgement
-        # ("Got it.") that is not part of the line.
+    def _complete(text: str) -> str:
+        """The model often writes a script line out instead of its tag, and
+        trims it: 25 Oct S3 lost "Like 200 to 300 dollars, or more than
+        that?", 28 Oct S4 came out as only "Which energy company are you
+        currently with?". If the words are part of a script line, the whole
+        line is spoken instead. A short acknowledgement in front ("Got it.")
+        is dropped: every script line opens with its own."""
+        # A sentence naming one of our tools is the model talking to itself
+        # ("We need to call end_call."), never something to say aloud.
+        text = re.sub(r"[^.!?]*\b(end_call|request_transfer|schedule_callback|opt_out)\b[^.!?]*[.!?]?", "", text).strip()
+        words = text.split()
         for i in range(len(words)):
-            tail = " ".join(words[i:]).lower()
+            tail = " ".join(words[i:])
             if len(tail) < 20:
                 break
             for flat in flats:
-                at = flat.lower().find(tail)
-                if at >= 0:
-                    rest = flat[at + len(tail) :].strip()
-                    return f" {rest}" if rest else ""
-        return ""
+                if tail.lower() in flat.lower():
+                    head = " ".join(words[:i])
+                    return f"{head} {flat}".strip() if i > 4 else flat
+        return text
 
     def _drain(final: bool) -> str:
-        nonlocal buf, last, done, said
+        nonlocal buf, last, done, pend
         out = ""
         while buf and not done:
             i = buf.find("[")
             text = buf if i < 0 else buf[:i]
+            b = text.find("{")
+            if b >= 0:
+                # JSON in the reply is the model writing a tool call as text
+                # (28 Oct eval: '...Goodbye.{"when": ...}Now end call.'),
+                # never speech: the reply ends where it starts.
+                text = text[:b]
+                out += _complete(pend + text) if (pend + text).strip() else ""
+                pend = ""
+                done = True
+                break
             q = text.find("?")
             if q >= 0:  # the model's own words end at their first question too
-                out += text[: q + 1] + _rest_of_line(said + out + text[: q + 1])
+                out += _complete(pend + text[: q + 1])
+                pend = ""
                 done = True
                 break
             if i < 0:
-                out, buf = out + buf, ""
+                pend, buf = pend + buf, ""
                 break
-            out, buf = out + text, buf[i:]
+            # A tag follows: the words before it are said as they are.
+            out, pend, buf = out + pend + text, "", buf[i:]
             m = _BRACKET_RE.match(buf)
             if m:
                 out += _line(m.group(0)[1:-1])
@@ -408,7 +421,10 @@ async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[s
             elif not final and len(buf) < _BRACKET_MAX and "]" not in buf and "\n" not in buf:
                 break  # may still become a tag; wait for the next chunk
             else:
-                out, buf = out + buf[0], buf[1:]
+                pend, buf = buf[0], buf[1:]
+        if final and not done:
+            out += _complete((pend + buf).strip()) if (pend + buf).strip() else ""
+            pend = buf = ""
         if done:
             buf = ""  # the rest of this reply is never spoken
         # Tag padding never doubles a space or leads the reply.
@@ -419,7 +435,6 @@ async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[s
             out = out.rstrip()
         if out:
             last = out[-1]
-        said += out
         return out
 
     async for chunk in chunks:
@@ -452,6 +467,21 @@ _TIME_WORDS = re.compile(
     r"today|tomorrow|week|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
     r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|quarter|lunch|"
     r"after work|hour|minutes?)\b",
+    re.I,
+)
+
+
+# A phone's call-screening assistant asking who is calling (Google Call
+# Screen, Apple Live Voicemail, carrier screening). A person asking "who's
+# calling?" is not matched: the model answers that from the playbook.
+_SCREENING_PATTERNS = re.compile(
+    r"record your name"
+    r"|(state|say) your name"
+    r"|reason for (your )?call"
+    r"|see if (this person|they|he|she)('s| is)? available"
+    r"|screening (this|your) call"
+    r"|call screen"
+    r"|(google|virtual|digital) assistant",
     re.I,
 )
 
@@ -511,6 +541,8 @@ class Qualifier(Agent):
         self.heard_speech = False
         # The customer's latest finished turn (see on_user_turn_completed).
         self.last_user_text = ""
+        # The text of the AI reply being generated now (see llm_node).
+        self.reply_text = ""
         # Tags the model may no longer speak (the callback question, once booked).
         self.blocked_tags: set[str] = set()
         # Undoes the short first-answer end-of-turn cap; called once, on the
@@ -520,15 +552,56 @@ class Qualifier(Agent):
         # closes the call (brief `outOfArea`). None = no such rule.
         self.out_of_area_re: re.Pattern[str] | None = None
         self.out_of_area_line = ""
+        # Said once to a call-screening assistant (brief `screeningLine`).
+        self.screening_line = ""
+        self._screening_answered = False
 
     async def llm_node(self, chat_ctx, tools, model_settings):  # noqa: ANN001, ANN201 — framework signature
-        stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
-        if not self.script_lines:
-            async for chunk in stream:
-                yield chunk
+        if self._closing:
+            # The call is ending (closing line said, opt-out, out of area):
+            # nothing more is spoken, whatever the model wants to add after a
+            # tool result (28 Oct eval: "...great day!We need to call end_call.").
             return
-        async for chunk in _expand_tag_stream(stream, self.script_lines, frozenset(self.blocked_tags)):
+        stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
+        # What this reply says, for tools called in the same reply (end_call
+        # checks for a goodbye before the reply reaches the chat history).
+        self.reply_text = ""
+        if self.script_lines:
+            stream = _expand_tag_stream(stream, self.script_lines, frozenset(self.blocked_tags))
+        async for chunk in stream:
+            if isinstance(chunk, str):
+                self.reply_text += chunk
+            elif isinstance(chunk, ChatChunk) and chunk.delta is not None and chunk.delta.content:
+                self.reply_text += chunk.delta.content
             yield chunk
+        if self._ends_call(self.reply_text) and not self._closing:
+            self.spawn(self._end_after_reply())
+
+    def _ends_call(self, text: str) -> bool:
+        """A reply that closes the call: a script closing line (E tags, e.g.
+        "No worries. Thank you for your time. Have a great day!"), or a goodbye
+        once a callback is booked. 28 Oct eval: after the goodbye the model
+        wrote end_call as text instead of calling it, leaving the line open."""
+        flat = re.sub(r"\s+", " ", text).strip().lower()
+        if not flat:
+            return False
+        for tag, line in self.script_lines.items():
+            if tag.startswith("E") and re.sub(r"\s+", " ", line).strip().lower()[-30:] in flat:
+                return True
+        return "Q6" in self.blocked_tags and bool(re.search(r"\b(bye|goodbye|take care|talk (to you )?(soon|then|tomorrow))\b", flat))
+
+    async def _end_after_reply(self) -> None:
+        """Hang up once the closing line has played (same as end_call)."""
+        if self._closing:
+            return
+        self._closing = True
+        self._transfer_triggered = True
+        logger.info("closing line said (call=%s) — hanging up after it plays", self._call_id)
+        await asyncio.sleep(0.3)  # let the reply start before waiting for quiet
+        await _wait_until_quiet(self.session_ref, grace=20.0, quiet_for=0.5)
+        await asyncio.sleep(0.5)
+        await _drop_customer_leg(self._ctx, self._call_id)
+        self._ctx.shutdown(reason="closing line said")
 
     @property
     def closing(self) -> bool:
@@ -550,6 +623,12 @@ class Qualifier(Agent):
         Args:
             reason: one short line on why they qualify (for the agent's card).
         """
+        missing = self._last_step_missing()
+        if missing:
+            # 28 Oct eval: the model transferred on "Yes I do." with three
+            # questions still to ask. The specialist needs all the answers.
+            logger.info("request_transfer(call=%s) refused: step %s not asked yet", self._call_id, missing)
+            return f"Not yet: the script is not finished. Output the tag of the next step you have not asked yet (the last one is [{missing}])."
         text = await self._do_transfer(reason)
         if text is None:
             # The worker has already spoken (or is speaking) every line this
@@ -559,13 +638,45 @@ class Qualifier(Agent):
             raise StopResponse()
         return text
 
+    def _goodbye_said(self) -> bool:
+        """True if the current reply, or else the latest AI line, says goodbye
+        (the script's own closing lines and a booked-callback sign-off do)."""
+        texts = [self.reply_text] + [
+            getattr(i, "text_content", "") or "" for i in reversed(self.chat_ctx.items) if getattr(i, "role", None) == "assistant"
+        ][:1]
+        for text in texts:
+            text = text.lower()
+            if text.strip():
+                return bool(re.search(r"\b(bye|goodbye|good day|great day|take care|talk (to you )?(soon|then|tomorrow)|speak (to you )?(soon|then|tomorrow))\b", text))
+        return False
+
+    def _last_step_missing(self) -> str | None:
+        """The last script step's tag (highest S) if it has not been said yet
+        on this call, else None. No script lines = no check."""
+        steps = sorted((t for t in self.script_lines if t.startswith("S") and t[1:].isdigit()), key=lambda t: int(t[1:]))
+        if not steps:
+            return None
+        last = steps[-1]
+        probe = re.sub(r"\s+", " ", self.script_lines[last]).strip().lower()[-40:]
+        for item in self.chat_ctx.items:
+            if getattr(item, "role", None) == "assistant":
+                said = re.sub(r"\s+", " ", getattr(item, "text_content", "") or "").lower()
+                if probe in said:
+                    return None
+        return last
+
     @function_tool
-    async def end_call(self, context: RunContext) -> None:
+    async def end_call(self, context: RunContext) -> str | None:
         """End the call. Use only after you have said your goodbye line, when
         the script says the call ends (e.g. they are not the account holder, or
         a callback is booked)."""
         if self._closing:
             raise StopResponse()
+        if self.script_lines and not self._goodbye_said():
+            # 25 and 28 Oct evals: the model hung up on "Where are you calling
+            # from?". The script only ends a call after a goodbye line.
+            logger.info("end_call(call=%s) refused: no goodbye said", self._call_id)
+            return "Not ended: you have not said goodbye. Answer the customer from the playbook and carry on with the script."
         self._closing = True
         self._transfer_triggered = True
         logger.info("end_call(call=%s): model ended the call", self._call_id)
@@ -606,6 +717,9 @@ class Qualifier(Agent):
             when: the agreed time as ISO 8601 with the customer's UTC offset, e.g. 2026-10-13T17:00:00+05:30.
             note: optional short note, e.g. "busy at work, prefers evening".
         """
+        if "Q6" in self.blocked_tags:
+            # Already booked on this call: one callback, not one per retry.
+            return "Already booked. Confirm the time back to them in words, say goodbye, then call end_call."
         if not _TIME_WORDS.search(self.last_user_text):
             logger.info("schedule_callback(call=%s) refused: no time in %r", self._call_id, self.last_user_text[:80])
             tag = "[Q6]" if "Q6" in self.script_lines else "the callback question"
@@ -626,6 +740,33 @@ class Qualifier(Agent):
         if self.restore_endpointing is not None:
             restore, self.restore_endpointing = self.restore_endpointing, None
             restore()
+        # A time given right after the callback question: book it now. 28 Oct
+        # eval: the model said "We've scheduled a callback" without calling
+        # the tool, so a customer who hung up then had no callback.
+        q6 = self.script_lines.get("Q6", "")
+        if q6 and "Q6" not in self.blocked_tags and _TIME_WORDS.search(self.last_user_text):
+            last_ai = next((getattr(i, "text_content", "") or "" for i in reversed(self.chat_ctx.items) if getattr(i, "role", None) == "assistant"), "")
+            if q6[-40:].lower() in last_ai.lower():
+                turn_ctx.add_message(
+                    role="system",
+                    content="The customer just gave their callback time. Call schedule_callback with it now, before saying anything; then confirm the time in words and say goodbye.",
+                )
+        # A call-screening assistant: tell it who is calling, once, and let
+        # the person pick up. Never handed to the model, which would answer
+        # the bot with step 1 of the script.
+        if self.screening_line and not self._screening_answered and not self._closing and _SCREENING_PATTERNS.search(self.last_user_text):
+            self._screening_answered = True
+            said = self.last_user_text
+            logger.info("call screening detected (call=%s): %r", self._call_id, said[:80])
+            if self._call_id:
+                async def _record_screen() -> None:
+                    await _post_transcript(self._call_id, "customer", said)
+                    await _post_transcript(self._call_id, "ai", self.screening_line)
+
+                self.spawn(_record_screen())
+            if self.session_ref is not None:
+                self.session_ref.say(self.screening_line, add_to_chat_ctx=True)
+            raise StopResponse()
         # Out of area: decided here, in code, before the model or the
         # qualification score can transfer the call (the score reaches the
         # transfer threshold on the same answer that names the retailer).
@@ -2383,6 +2524,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     qualifier.out_of_area_line = str(out_of_area.get("line") or "Thank you, we cannot cater to your area. Bye, take care.")
     if qualifier.out_of_area_re is not None:
         logger.info("out-of-area retailers: %s", qualifier.out_of_area_re.pattern)
+    qualifier.screening_line = str((brief or {}).get("screeningLine") or "")
     logger.info("script lines: %s", ", ".join(sorted(qualifier.script_lines)) or "none (model speaks freely)")
     qualifier.session_ref = session
 

@@ -71,6 +71,8 @@ const envSchema = z.object({
   LIVEKIT_API_SECRET: optionalString(),
   /** LiveKit outbound SIP trunk id (dial-out) once the carrier trunk is wired. */
   LIVEKIT_SIP_TRUNK_ID: optionalString(),
+  /** Outbound trunk for Australian (+61) numbers (Telvoq); others use LIVEKIT_SIP_TRUNK_ID. */
+  LIVEKIT_SIP_TRUNK_ID_AU: optionalString(),
   /**
    * Explicit AI dispatch, OFF by default. When set, the API sends the worker
    * registered under this name into the room once the customer answers.
@@ -86,6 +88,7 @@ const envSchema = z.object({
    * carriers that take plain E.164 (Twilio).
    */
   SIP_DIAL_PREFIX: optionalString(),
+  SIP_DIAL_PREFIX_AU: optionalString(),
   /** Twilio account backing the SIP trunk / numbers. */
   TWILIO_ACCOUNT_SID: optionalString(),
   TWILIO_AUTH_TOKEN: optionalString(),
@@ -195,6 +198,8 @@ export const config = {
     apiSecret: parsed.LIVEKIT_API_SECRET,
     sipTrunkId: parsed.LIVEKIT_SIP_TRUNK_ID,
     sipDialPrefix: parsed.SIP_DIAL_PREFIX?.trim() || undefined,
+    sipTrunkIdAu: parsed.LIVEKIT_SIP_TRUNK_ID_AU?.trim() || undefined,
+    sipDialPrefixAu: parsed.SIP_DIAL_PREFIX_AU?.trim() || undefined,
     agentName: parsed.LIVEKIT_AGENT_NAME,
   },
   twilio: {

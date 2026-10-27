@@ -74,7 +74,21 @@ def test_own_words_end_at_the_first_question():
 def test_written_out_line_keeps_its_second_question():
     # 25 Oct call: the model wrote S3 itself; the cut at "?" lost the rest.
     out = _text(run(_chunks("No problem. Just to get a rough idea, how much do you ", "spend, monthly or quarterly?", " So")))
-    assert out == "No problem. Just to get a rough idea, how much do you spend, monthly or quarterly? Like 200 to 300 dollars, or more than that?"
+    assert out == LINES["S4"]
+
+
+def test_written_out_line_missing_its_start_is_spoken_whole():
+    # 28 Oct eval: the model said only the last question of S4.
+    out = _text(run(_chunks("Got it. Like 200 to 300 ", "dollars, or more than that?")))
+    assert out == LINES["S4"]
+
+
+def test_json_in_reply_is_never_spoken():
+    assert _text(run(_chunks('Booked for 5 pm. Goodbye.', '{"when": "x"}Now end call.'))) == "Booked for 5 pm. Goodbye."
+
+
+def test_tool_talk_is_never_spoken():
+    assert _text(run(_chunks("Thanks for your time. ", "We need to call end_call."))) == "Thanks for your time."
 
 
 def test_blocked_tag_is_not_spoken():
