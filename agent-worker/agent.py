@@ -120,6 +120,12 @@ STT_TURN = (os.getenv("STT_TURN") or "stt").lower()  # stt | vad
 # if no reply has started (see the stall guard in entrypoint). Normal turns
 # start a reply within ~1 s, so 2.5 s only ever fires on an STT stall.
 STALL_GUARD_S = float(os.getenv("STALL_GUARD_S", "2.5"))
+# Longest end-of-turn wait for the customer's FIRST answer (to "How are you
+# doing today?"), restored to the normal cap after it. That answer is short
+# ("good", "who's this?"), but a garbled one reads as unfinished: 27 Oct
+# "Yeah. One of those" waited the full 1.5 s. Mid-script answers keep the
+# long cap so a customer pausing over their bill amount is not cut off.
+FIRST_TURN_MAX_DELAY = float(os.getenv("FIRST_TURN_MAX_DELAY", "0.8"))
 # Fixed wait after the VAD's end-of-speech before the turn is committed, in
 # STT_TURN=vad mode. The framework also waits for Flux's final transcript, so
 # this is a floor, not the whole gap. Measured 28 Sep with 0.3: end of turn
@@ -490,6 +496,9 @@ class Qualifier(Agent):
         self.last_user_text = ""
         # Tags the model may no longer speak (the callback question, once booked).
         self.blocked_tags: set[str] = set()
+        # Undoes the short first-answer end-of-turn cap; called once, on the
+        # first completed customer turn.
+        self.restore_endpointing = None
 
     async def llm_node(self, chat_ctx, tools, model_settings):  # noqa: ANN001, ANN201 — framework signature
         stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
@@ -593,6 +602,9 @@ class Qualifier(Agent):
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:  # noqa: ANN001
         self.last_user_text = (getattr(new_message, "text_content", None) or "").strip()
+        if self.restore_endpointing is not None:
+            restore, self.restore_endpointing = self.restore_endpointing, None
+            restore()
         # Once a transfer is under way or the call is closing, the model gets
         # no more turns: the worker owns every line from here (hand-off,
         # apology, goodbye).
@@ -2423,6 +2435,23 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         room_options=RoomOptions(audio_input=audio_input, audio_output=audio_output),
     )
     _log_pipeline_setup(session, audio_input, call_id)
+
+    normal_max_delay = float(turn_handling.get("endpointing", {}).get("max_delay", 1.5))
+    if 0 < FIRST_TURN_MAX_DELAY < normal_max_delay:
+        try:
+            session.update_options(endpointing_opts={"max_delay": FIRST_TURN_MAX_DELAY})
+            logger.info("first answer: end-of-turn cap %.2fs (then %.2fs)", FIRST_TURN_MAX_DELAY, normal_max_delay)
+
+            def _restore() -> None:
+                try:
+                    session.update_options(endpointing_opts={"max_delay": normal_max_delay})
+                    logger.info("end-of-turn cap back to %.2fs", normal_max_delay)
+                except Exception as e:  # noqa: BLE001 — a wrong cap must never end the call
+                    logger.warning("could not restore the end-of-turn cap: %s", e)
+
+            qualifier.restore_endpointing = _restore
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not set the first-answer end-of-turn cap: %s", e)
     _tap_room_audio(session, call_id)
 
     # Don't speak until someone can actually hear it — see
