@@ -14,7 +14,9 @@ def test_matches_how_customers_say_it():
 
 
 def test_does_not_match_other_retailers():
-    for said in ["AGL", "I think it's Simple Energy.", "Origin Energy", "Energy Australia", "Red Energy", "Powershop", "Yes.", "about 400 a month"]:
+    for said in ["AGL", "I think it's Simple Energy.", "Origin Energy", "Energy Australia", "Red Energy", "Powershop", "Yes.", "about 400 a month",
+                 # 1st Energy as the STT heard it in the specialist recordings
+                 "I'm with First Synergy", "we went for Synergy", "it's 1st synergy", "Force Synergy"]:
         assert not PAT.search(said), said
 
 

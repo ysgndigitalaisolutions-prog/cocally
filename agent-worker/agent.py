@@ -465,7 +465,12 @@ def out_of_area_pattern(retailers: list[str]) -> re.Pattern[str] | None:
         core = [w for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in generic]
         if core:
             words.append(re.escape(" ".join(core)))
-    return re.compile(r"\b(" + "|".join(words) + r")\b", re.I) if words else None
+    # "1st Energy" (a retailer the client does serve) comes out of the STT as
+    # "First Synergy" / "for Synergy" (27 Oct, specialist call recordings).
+    # Synergy right after first/1st/for/fast/forced is that, never out of area.
+    if not words:
+        return None
+    return re.compile(r"(?<!first )(?<!1st )(?<!for )(?<!fast )(?<!forced )(?<!force )\b(" + "|".join(words) + r")\b", re.I)
 
 
 class Qualifier(Agent):
