@@ -416,6 +416,24 @@ async def _expand_tag_stream(
                 return f"{head} {flat}".strip() if i > 4 else flat
         return text
 
+    def _reaction(head: str, tag: str) -> str:
+        """The model's own words in front of a script line: a short warm
+        reaction ("I'm doing well, thanks for asking!", "Oh, I hear you.") is
+        spoken; anything longer than 12 words is dropped, and so is any
+        reaction before a line that opens with its own acknowledgement
+        ("No problem.", "Okay, thanks for that.", "I understand."), which
+        would double up."""
+        if not head.strip():
+            return head
+        if len(head.split()) > 12:
+            return " "
+        if tag.endswith("Q") and tag[:-1] in lines and tag[:-1] not in asked and tag[0] == "S":
+            tag = tag[:-1]
+        line = lines.get(tag, "").strip().lower()
+        if re.match(r"(no problem|no worries|okay|ok\b|perfect|sure|great|i understand|thanks|thank you|sorry|i'm sorry)", line):
+            return " "
+        return head
+
     def _drain(final: bool) -> str:
         nonlocal buf, last, done, pend
         out = ""
@@ -441,8 +459,10 @@ async def _expand_tag_stream(
             if i < 0:
                 pend, buf = pend + buf, ""
                 break
-            # A tag follows: the words before it are said as they are.
-            out, pend, buf = out + pend + text, "", buf[i:]
+            # A tag follows: the words before it are the model's own reaction.
+            m_next = _BRACKET_RE.match(buf[i:])
+            head = _reaction(pend + text, m_next.group(0)[1:-1]) if m_next else pend + text
+            out, pend, buf = out + head, "", buf[i:]
             m = _BRACKET_RE.match(buf)
             if m:
                 out += _line(m.group(0)[1:-1])

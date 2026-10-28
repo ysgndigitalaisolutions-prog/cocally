@@ -40,3 +40,17 @@ export const OPT_OUT_PATTERN = new RegExp(
     ')',
   'i',
 );
+
+/**
+ * Tagged script lines (`[S2] "..."`) from a flow prompt and its playbook:
+ * tag -> exact wording, first occurrence wins. A line starts like a sentence:
+ * on 29 Oct a prompt example ending `... thanks for asking! [S1]".` was read
+ * as step 1, whose "wording" became the next sentence of the instructions.
+ */
+export function extractScriptLines(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of text.matchAll(/\[([A-Z]\d{1,2}Q?)\]\s*"([A-Za-z0-9][^"]*)"/g)) {
+    out[m[1]!] ??= m[2]!.trim();
+  }
+  return out;
+}

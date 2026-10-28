@@ -14,6 +14,7 @@ LINES = {
     "Q1": "I'm calling from Australian Deal.",
     "S3": "How much do you usually spend?",
     "S2Q": "Electricity only, or gas as well?",
+    "S5": "No problem. Who sends you the bill?",
     "S4": "Just to get a rough idea, how much do you spend, monthly or quarterly? Like 200 to 300 dollars, or more than that?",
 }
 
@@ -100,6 +101,19 @@ def test_repeat_question_tag_and_written_out_repeat_stay_short():
 def test_first_ask_is_always_the_full_step():
     assert _text(run(_chunks("[S2Q]"), asked=frozenset())) == LINES["S2"]
     assert _text(run(_chunks("Electricity only, or gas as well?"), asked=frozenset())) == LINES["S2"]
+
+
+def test_short_warm_reaction_before_a_line_is_spoken():
+    assert _text(run(_chunks("Oh, I hear you, prices have gone up. ", "[S2]"))) == f"Oh, I hear you, prices have gone up. {LINES['S2']}"
+
+
+def test_long_reaction_is_dropped():
+    long = "Well I totally understand how you feel about all of this because it is really hard. "
+    assert _text(run(_chunks(long, "[S2]"))) == LINES["S2"]
+
+
+def test_no_reaction_before_a_line_that_opens_with_its_own():
+    assert _text(run(_chunks("Oh wow. ", "[S5]"))) == LINES["S5"]
 
 
 def test_blocked_tag_is_not_spoken():

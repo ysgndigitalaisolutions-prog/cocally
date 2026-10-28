@@ -17,7 +17,7 @@ import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { TransfersService } from '../workspace/transfers.service';
 import { SchedulingService } from '../leads/scheduling.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
-import { OPT_OUT_CLOSING_LINE, OPT_OUT_PATTERN } from './lines';
+import { extractScriptLines, OPT_OUT_CLOSING_LINE, OPT_OUT_PATTERN } from './lines';
 import { interpolate } from './runtime';
 
 /**
@@ -215,10 +215,7 @@ export class EngineController {
     // The model answers with the tag and the worker speaks the line itself,
     // word for word: an LLM asked to copy a sentence paraphrases it, and a
     // stalled stream cut lines off mid-word (7 Oct, "One more - do").
-    const scriptLines: Record<string, string> = {};
-    for (const m of `${promptText}\n${rebuttals}`.matchAll(/\[([A-Z]\d{1,2}Q?)\]\s*"([^"]+)"/g)) {
-      scriptLines[m[1]!] ??= m[2]!.trim();
-    }
+    const scriptLines = extractScriptLines(`${promptText}\n${rebuttals}`);
 
     // The flow owns the words. Its mandatory SPEAK node (the one publishing
     // requires) is the opening line, and the TRANSFER node's `announceText` is
@@ -269,7 +266,7 @@ export class EngineController {
       '- When the script ends the call (after your goodbye line), call the end_call tool.',
       "- If they ask not to be called, mention the Do Not Call Register, or threaten a complaint, call the opt_out tool and say nothing yourself: the closing line is spoken for you and their number is suppressed.",
       Object.keys(scriptLines).length
-        ? `- SCRIPTED LINES ARE TAGGED like [S2]. To say one, output ONLY its tag, e.g. [S2], and nothing else; it is spoken for you word for word. To answer a question and then carry on, output both tags, e.g. [Q1] [S3]. Never output two S tags in one turn: say one step, then wait for their answer. Write your own words only when no tagged line fits, and keep them under 25 words.`
+        ? `- SCRIPTED LINES ARE TAGGED like [S2]. To say one, output its tag, e.g. [S2]; it is spoken for you word for word. Be warm: when the customer shares a feeling or a complaint, or asks how you are, you may put ONE short reaction (under 8 words) before the tag, for example: I'm doing well, thanks for asking! or: Oh, I hear you, prices have gone up. Otherwise output the tag alone. To answer a question and then carry on, output both tags, e.g. [Q1] [S3]. Never output two S tags in one turn: say one step, then wait for their answer. Write your own words only when no tagged line fits, and keep them under 25 words.`
         : '',
       rebuttals ? `\nOBJECTION PLAYBOOK:\n${rebuttals}` : '',
     ]
