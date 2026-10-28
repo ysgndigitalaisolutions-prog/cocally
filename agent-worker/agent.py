@@ -132,8 +132,8 @@ FIRST_TURN_MAX_DELAY = float(os.getenv("FIRST_TURN_MAX_DELAY", "0.8"))
 # audio track the customer hears mixed in; the STT only hears the customer.
 # BACKGROUND_AUDIO=office turns it on; off (default) leaves the line as today.
 BACKGROUND_AUDIO = (os.getenv("BACKGROUND_AUDIO") or "off").lower()
-BG_AMBIENT_VOLUME = float(os.getenv("BG_AMBIENT_VOLUME", "0.15"))
-BG_THINKING_VOLUME = float(os.getenv("BG_THINKING_VOLUME", "0.25"))
+BG_AMBIENT_VOLUME = float(os.getenv("BG_AMBIENT_VOLUME", "0.30"))
+BG_THINKING_VOLUME = float(os.getenv("BG_THINKING_VOLUME", "0.45"))
 # Fixed wait after the VAD's end-of-speech before the turn is committed, in
 # STT_TURN=vad mode. The framework also waits for Flux's final transcript, so
 # this is a floor, not the whole gap. Measured 28 Sep with 0.3: end of turn
