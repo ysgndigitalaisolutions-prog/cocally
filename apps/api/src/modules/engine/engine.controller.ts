@@ -216,7 +216,7 @@ export class EngineController {
     // word for word: an LLM asked to copy a sentence paraphrases it, and a
     // stalled stream cut lines off mid-word (7 Oct, "One more - do").
     const scriptLines: Record<string, string> = {};
-    for (const m of `${promptText}\n${rebuttals}`.matchAll(/\[([A-Z]\d{1,2})\]\s*"([^"]+)"/g)) {
+    for (const m of `${promptText}\n${rebuttals}`.matchAll(/\[([A-Z]\d{1,2}Q?)\]\s*"([^"]+)"/g)) {
       scriptLines[m[1]!] ??= m[2]!.trim();
     }
 

@@ -13,17 +13,18 @@ LINES = {
     "Q6": "What would be a convenient time for us to call you back?",
     "Q1": "I'm calling from Australian Deal.",
     "S3": "How much do you usually spend?",
+    "S2Q": "Electricity only, or gas as well?",
     "S4": "Just to get a rough idea, how much do you spend, monthly or quarterly? Like 200 to 300 dollars, or more than that?",
 }
 
 
-async def _collect(pieces, blocked=frozenset()):
+async def _collect(pieces, blocked=frozenset(), asked=frozenset({"S2"})):
     async def gen():
         for p in pieces:
             yield p
 
     out = []
-    async for c in agent._expand_tag_stream(gen(), LINES, blocked):
+    async for c in agent._expand_tag_stream(gen(), LINES, blocked, asked):
         out.append(c)
     return out
 
@@ -37,8 +38,8 @@ def _chunks(*texts):
     return [ChatChunk(id="x", delta=ChoiceDelta(role="assistant", content=t)) for t in texts]
 
 
-def run(pieces, blocked=frozenset()):
-    return asyncio.run(_collect(pieces, blocked))
+def run(pieces, blocked=frozenset(), asked=frozenset({"S2"})):
+    return asyncio.run(_collect(pieces, blocked, asked))
 
 
 def test_single_tag_whole():
@@ -89,6 +90,16 @@ def test_json_in_reply_is_never_spoken():
 
 def test_tool_talk_is_never_spoken():
     assert _text(run(_chunks("Thanks for your time. ", "We need to call end_call."))) == "Thanks for your time."
+
+
+def test_repeat_question_tag_and_written_out_repeat_stay_short():
+    assert _text(run(_chunks("[S2Q]"))) == LINES["S2Q"]
+    assert _text(run(_chunks("Sorry. Electricity only, or gas ", "as well?"))) == LINES["S2Q"]
+
+
+def test_first_ask_is_always_the_full_step():
+    assert _text(run(_chunks("[S2Q]"), asked=frozenset())) == LINES["S2"]
+    assert _text(run(_chunks("Electricity only, or gas as well?"), asked=frozenset())) == LINES["S2"]
 
 
 def test_blocked_tag_is_not_spoken():

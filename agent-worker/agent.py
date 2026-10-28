@@ -165,9 +165,11 @@ INTERRUPTION = {
     # An overlap must carry at least one transcribed word to stop the AI: a
     # cough, a breath or line noise trips the VAD but produces no words, and
     # with resume_false_interruption off (below) a cut line is lost for good.
-    # Kept at 1, not 2: the framework DROPS an overlapping turn shorter than
-    # min_words, and "Yes"/"Both" said over the AI's last word is a real answer.
-    "min_words": int(os.getenv("INTERRUPTION_MIN_WORDS", "1")),
+    # 2 since 28 Oct (was 1): a lone "Okay." near the end of step 2 restarted
+    # the whole 13-second line. The framework drops an overlapping turn
+    # shorter than this only while the AI is still speaking; a one-word answer
+    # said over the AI's last word ends after it, so it still gets through.
+    "min_words": int(os.getenv("INTERRUPTION_MIN_WORDS", "2")),
     # Never pause a reply on a start-of-speech and wait for a transcript to
     # decide: on a phone line Flux/VAD raise starts on noise and echo, and a
     # paused reply with no resume is what the 28 Sep call sounded like. A real
@@ -331,7 +333,7 @@ def _classify_amd(text: str) -> str:
 # mid-sentence by a stalled stream (7 Oct, "One more - do"). Text that is not
 # a known tag passes through unchanged, so a model that ignores the format
 # still speaks.
-_TAG_RE = re.compile(r"\[([A-Z]\d{1,2})\]")
+_TAG_RE = re.compile(r"\[([A-Z]\d{1,2}Q?)\]")
 # Any other short bracketed span is a stage direction the model invented
 # ("[Awaiting response]", "[End of conversation]", seen 25 Oct) and is never
 # spoken. Past _BRACKET_MAX characters an open "[" is ordinary text.
@@ -345,7 +347,9 @@ def expand_script_tags(text: str, lines: dict[str, str]) -> str:
     return re.sub(r"\s+", " ", out).strip()
 
 
-async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[str] = frozenset()):  # noqa: ANN001, ANN201 — llm_node chunk stream
+async def _expand_tag_stream(
+    chunks, lines: dict[str, str], blocked: frozenset[str] = frozenset(), asked: frozenset[str] = frozenset()
+):  # noqa: ANN001, ANN201 — llm_node chunk stream
     """Stream form for `llm_node`: text passes straight through except a
     possible partial tag, which is held until it completes (or cannot).
 
@@ -357,13 +361,19 @@ async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[s
     gas.[S3]Around $250 a month." (the model answering for the customer), and
     "[Q6] ... (We'll use schedule_callback)" all ended up in the TTS before
     this. Tool calls still pass through. `blocked` tags are never spoken (the
-    callback question once a callback is booked)."""
+    callback question once a callback is booked). `asked` holds the steps
+    already said in full; a repeat-question tag ([S2Q]) for a step not yet
+    asked is spoken as the full step: the model reached for the short form on
+    the first ask (28 Oct eval), dropping "No problem. Just to get a rough
+    idea..." from step 3."""
     buf = ""
     last = ""  # last character yielded; "" = nothing spoken yet
     done = False
 
     def _line(tag: str) -> str:
         nonlocal done
+        if tag.endswith("Q") and tag[:-1] in lines and tag[:-1] not in asked and tag[0] == "S":
+            tag = tag[:-1]
         if tag not in lines or tag in blocked:
             return " "
         line = lines[tag]
@@ -371,7 +381,14 @@ async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[s
             done = True
         return f" {line} "
 
-    flats = [re.sub(r"\s+", " ", line).strip() for tag, line in lines.items() if tag not in blocked]
+    flat_of = {tag: re.sub(r"\s+", " ", line).strip() for tag, line in lines.items() if tag not in blocked}
+    # A written-out repeat of a step not yet asked is completed to the full step.
+    full_for = {
+        flat_of[t]: flat_of[t[:-1]]
+        for t in flat_of
+        if t.endswith("Q") and t[0] == "S" and t[:-1] in flat_of and t[:-1] not in asked
+    }
+    flats = list(flat_of.values())
     pend = ""  # the model's own words, held until "?" or the end of the reply
 
     def _complete(text: str) -> str:
@@ -389,10 +406,14 @@ async def _expand_tag_stream(chunks, lines: dict[str, str], blocked: frozenset[s
             tail = " ".join(words[i:])
             if len(tail) < 20:
                 break
-            for flat in flats:
-                if tail.lower() in flat.lower():
-                    head = " ".join(words[:i])
-                    return f"{head} {flat}".strip() if i > 4 else flat
+            # Shortest line holding the words: a repeated question alone
+            # ([S2Q]) must not grow back into the whole step.
+            hits = [flat for flat in flats if tail.lower() in flat.lower()]
+            if hits:
+                flat = min(hits, key=len)
+                flat = full_for.get(flat, flat)
+                head = " ".join(words[:i])
+                return f"{head} {flat}".strip() if i > 4 else flat
         return text
 
     def _drain(final: bool) -> str:
@@ -570,18 +591,32 @@ class Qualifier(Agent):
             # nothing more is spoken, whatever the model wants to add after a
             # tool result (28 Oct eval: "...great day!We need to call end_call.").
             return
-        stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
         # What this reply says, for tools called in the same reply (end_call
         # checks for a goodbye before the reply reaches the chat history).
         self.reply_text = ""
-        if self.script_lines:
-            stream = _expand_tag_stream(stream, self.script_lines, frozenset(self.blocked_tags))
-        async for chunk in stream:
-            if isinstance(chunk, str):
-                self.reply_text += chunk
-            elif isinstance(chunk, ChatChunk) and chunk.delta is not None and chunk.delta.content:
-                self.reply_text += chunk.delta.content
-            yield chunk
+        # gpt-oss now and then returns a reply with no words and no tool call
+        # (its reasoning, then nothing; 28 Oct eval, ~1 in 7 runs). Silence
+        # would wait 2.5 s for the stall guard and its "sorry, I didn't catch
+        # that", so an empty reply is asked for again, once, at once.
+        for attempt in (1, 2):
+            stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
+            if self.script_lines:
+                stream = _expand_tag_stream(stream, self.script_lines, frozenset(self.blocked_tags), self._steps_asked())
+            produced = False
+            async for chunk in stream:
+                if isinstance(chunk, str):
+                    self.reply_text += chunk
+                    produced = produced or bool(chunk.strip())
+                elif isinstance(chunk, ChatChunk) and chunk.delta is not None:
+                    if chunk.delta.content:
+                        self.reply_text += chunk.delta.content
+                        produced = produced or bool(chunk.delta.content.strip())
+                    if chunk.delta.tool_calls:
+                        produced = True
+                yield chunk
+            if produced or self._closing or attempt == 2:
+                break
+            logger.warning("empty LLM reply (call=%s) — asking again", self._call_id)
         if self._ends_call(self.reply_text) and not self._closing:
             self.spawn(self._end_after_reply())
 
@@ -658,6 +693,21 @@ class Qualifier(Agent):
                 return bool(re.search(r"\b(bye|goodbye|good day|great day|take care|talk (to you )?(soon|then|tomorrow)|speak (to you )?(soon|then|tomorrow))\b", text))
         return False
 
+    def _steps_asked(self) -> frozenset[str]:
+        """Script steps (S tags) already said in full on this call, recognised
+        by the opening of the line, which the repeat question does not share."""
+        said = " ".join(
+            re.sub(r"\s+", " ", getattr(i, "text_content", "") or "").lower()
+            for i in self.chat_ctx.items
+            if getattr(i, "role", None) == "assistant"
+        )
+        out = set()
+        for tag, line in self.script_lines.items():
+            if tag.startswith("S") and not tag.endswith("Q"):
+                if re.sub(r"\s+", " ", line).strip().lower()[:40] in said:
+                    out.add(tag)
+        return frozenset(out)
+
     def _last_step_missing(self) -> str | None:
         """The last script step's tag (highest S) if it has not been said yet
         on this call, else None. No script lines = no check."""
@@ -680,6 +730,15 @@ class Qualifier(Agent):
         a callback is booked)."""
         if self._closing:
             raise StopResponse()
+        closing_line = any(
+            t.startswith("E") and re.sub(r"\s+", " ", l).strip().lower()[-30:] in re.sub(r"\s+", " ", self.reply_text).lower()
+            for t, l in self.script_lines.items()
+        )
+        if self.script_lines and self._last_step_missing() is None and "Q6" not in self.blocked_tags and not closing_line:
+            # 28 Oct eval: "AGL." after the last question -> a goodbye and
+            # end_call instead of the transfer the script calls for.
+            logger.info("end_call(call=%s) refused: last step answered, transfer due", self._call_id)
+            return "Not ended: they have answered the last question. Call request_transfer now and say nothing yourself."
         if self.script_lines and not self._goodbye_said():
             # 25 and 28 Oct evals: the model hung up on "Where are you calling
             # from?". The script only ends a call after a goodbye line.
