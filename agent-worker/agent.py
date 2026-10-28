@@ -126,6 +126,14 @@ STALL_GUARD_S = float(os.getenv("STALL_GUARD_S", "2.5"))
 # "Yeah. One of those" waited the full 1.5 s. Mid-script answers keep the
 # long cap so a customer pausing over their bill amount is not cut off.
 FIRST_TURN_MAX_DELAY = float(os.getenv("FIRST_TURN_MAX_DELAY", "0.8"))
+# Call-centre background under the AI's voice: a quiet office ambience for
+# the whole call, plus keyboard typing while the AI is "thinking", so a pause
+# sounds like a person checking something rather than a dead line. A separate
+# audio track the customer hears mixed in; the STT only hears the customer.
+# BACKGROUND_AUDIO=office turns it on; off (default) leaves the line as today.
+BACKGROUND_AUDIO = (os.getenv("BACKGROUND_AUDIO") or "off").lower()
+BG_AMBIENT_VOLUME = float(os.getenv("BG_AMBIENT_VOLUME", "0.15"))
+BG_THINKING_VOLUME = float(os.getenv("BG_THINKING_VOLUME", "0.25"))
 # Fixed wait after the VAD's end-of-speech before the turn is committed, in
 # STT_TURN=vad mode. The framework also waits for Flux's final transcript, so
 # this is a floor, not the whole gap. Measured 28 Sep with 0.3: end of turn
@@ -2622,6 +2630,20 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         room_options=RoomOptions(audio_input=audio_input, audio_output=audio_output),
     )
     _log_pipeline_setup(session, audio_input, call_id)
+
+    if BACKGROUND_AUDIO == "office":
+        try:
+            from livekit.agents import AudioConfig, BackgroundAudioPlayer, BuiltinAudioClip
+
+            background = BackgroundAudioPlayer(
+                ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=BG_AMBIENT_VOLUME),
+                thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=BG_THINKING_VOLUME),
+            )
+            await background.start(room=ctx.room, agent_session=session)
+            ctx.add_shutdown_callback(background.aclose)
+            logger.info("background audio: office %.2f, typing %.2f while thinking", BG_AMBIENT_VOLUME, BG_THINKING_VOLUME)
+        except Exception as e:  # noqa: BLE001 — ambience is decoration; the call goes on without it
+            logger.warning("background audio unavailable: %s", e)
 
     normal_max_delay = float(turn_handling.get("endpointing", {}).get("max_delay", 1.5))
     if 0 < FIRST_TURN_MAX_DELAY < normal_max_delay:
