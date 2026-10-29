@@ -222,7 +222,9 @@ export class OpsCallsService {
     if (f.campaignId && Types.ObjectId.isValid(f.campaignId)) q.campaignId = new Types.ObjectId(f.campaignId);
     const calls = await this.callModel
       .find(q)
-      .select('campaignId leadId startedAt answeredAt outcome amdClass amdLatencyMs providersUsed timings')
+      // Only the timings this view reads: `timings.workerLog` is up to 500 log
+      // lines per call, which made this 1000-call page tens of MB.
+      .select('campaignId leadId startedAt answeredAt outcome amdClass amdLatencyMs providersUsed timings.turns timings.events')
       .sort({ startedAt: -1 })
       .limit(1000)
       .lean()

@@ -262,7 +262,7 @@ async function main() {
     const _id = new Types.ObjectId();
     await db.collection('campaigns').insertOne({
       _id, tenantId, clientId, name: CAMPAIGN_NAME, countryPackCode: PACK, status: 'ACTIVE',
-      activeFlowVersionId: flowVersionId, abSplits: [], dailyDialBudget: 200, maxConcurrentCalls: 2, dialsPerAvailableAgent: 1,
+      activeFlowVersionId: flowVersionId, abSplits: [], dailyDialBudget: 200, maxConcurrentCalls: 3, dialsPerAvailableAgent: 1,
       noAgentFallback: 'BOOK', voicemailPolicy: 'SILENT_HANGUP', ivrPolicy: { enabled: false, digits: '1', maxMenuDepth: 3 },
       cliPool: [], cliRules: { geoMatch: false, rotation: 'ROUND_ROBIN' },
       retryMatrix: [
@@ -283,7 +283,7 @@ async function main() {
   } else {
     // Also repairs campaigns seeded by the first version of this script, which wrote an invalid transcriptionMode.
     await db.collection('campaigns').updateOne({ _id: campaign._id }, {
-      $set: { clientId, activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, rebuttals: playbook(clientName), sttKeywords: STT_KEYWORDS, outOfAreaRetailers: OUT_OF_AREA_RETAILERS, outOfAreaLine: OUT_OF_AREA_LINE, screeningLine: SCREENING_LINE, updatedAt: now },
+      $set: { clientId, activeFlowVersionId: flowVersionId, transcriptionMode: 'BOTH', scoring: ENERGY_SCORING, rebuttals: playbook(clientName), sttKeywords: STT_KEYWORDS, outOfAreaRetailers: OUT_OF_AREA_RETAILERS, outOfAreaLine: OUT_OF_AREA_LINE, screeningLine: SCREENING_LINE, maxConcurrentCalls: 3, updatedAt: now },
     });
     // Keep the campaign's lists and leads under the same client.
     await db.collection('leadlists').updateMany({ tenantId, campaignId: campaign._id }, { $set: { clientId, updatedAt: now } });

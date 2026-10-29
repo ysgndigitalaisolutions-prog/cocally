@@ -66,8 +66,12 @@ export class Campaign {
   @Prop({ default: 1000 })
   dailyDialBudget: number;
 
-  /** Hard cap on concurrent AI calls for this campaign per TEL-08. */
-  @Prop({ default: 10 })
+  /**
+   * Hard cap on concurrent AI calls for this campaign per TEL-08. 3 (was 10)
+   * since 29 Oct: one 2-vCPU worker VM carries about 5-8 conversations, and
+   * the AI joins while the phone rings, so ringing dials use it too.
+   */
+  @Prop({ default: 3 })
   maxConcurrentCalls: number;
 
   /** Availability-aware pacing per XFER-03: max concurrent dials per free agent. */

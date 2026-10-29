@@ -13,7 +13,7 @@ import { Callback, CallbackDocument } from '../../schemas/appointment.schema';
 import { AuditService } from '../audit/audit.service';
 import { CountryPacksService } from '../country-packs/country-packs.service';
 import { normalizePhone } from './phone.util';
-import { normaliseAuState, timezoneFromAuPostcode } from './au-geo';
+import { auLocationKnown, normaliseAuState, timezoneFromAuPostcode } from './au-geo';
 
 export interface ColumnMapping {
   phone: string;
@@ -194,6 +194,13 @@ export class LeadsService {
 
       const state = normaliseAuState(raw[input.mapping.state ?? ''] ?? '');
       const postcode = (raw[input.mapping.postcode ?? ''] ?? '').trim() || undefined;
+      // Australian leads must say where they are: the dialler calls in the
+      // lead's local hours, and a mobile number alone defaults to Sydney.
+      // Other packs (India for the team's test phones) are not checked.
+      if (pack.code === 'AU' && !auLocationKnown(state, postcode, areaHint)) {
+        rejects.push({ row: i + 1, reason: "no state or postcode: needed for the customer's local calling hours", raw });
+        continue;
+      }
       const timezone = this.inferTimezone(pack.timezoneHints, pack.timezones, areaHint, state, postcode);
 
       // Keep only genuinely custom columns — storing the whole raw row duplicated

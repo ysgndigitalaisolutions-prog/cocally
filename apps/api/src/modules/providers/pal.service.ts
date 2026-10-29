@@ -39,6 +39,7 @@ import { VaultService } from './vault.service';
  * fallback on failure, tracking which provider actually served the call.
  */
 import { config, isLiveTelephony } from '../../common/config';
+import { cooldownMsFor } from './pal-cooldown';
 
 @Injectable()
 export class PalService {
@@ -149,9 +150,11 @@ export class PalService {
     return until !== undefined && until > Date.now();
   }
 
-  private markUnhealthy(providerId: string): void {
-    this.unhealthyUntil.set(providerId, Date.now() + PalService.COOLDOWN_MS);
-    this.logger.warn(`Provider ${providerId} marked unhealthy for ${PalService.COOLDOWN_MS / 1000}s`);
+  private markUnhealthy(providerId: string, message = ''): void {
+    const ms = cooldownMsFor(message, PalService.COOLDOWN_MS);
+    if (ms <= 0) return;
+    this.unhealthyUntil.set(providerId, Date.now() + ms);
+    this.logger.warn(`Provider ${providerId} marked unhealthy for ${ms / 1000}s: ${message.slice(0, 120)}`);
   }
 
   /** Execute TTS through the resolved chain with automatic failover per PAL-05. */
@@ -178,7 +181,11 @@ export class PalService {
   }
 
   async llm(scope: ResolveScope, request: LlmRequest): Promise<LlmResult & { providerId: string }> {
-    const chain = await this.resolveChain('LLM', scope);
+    let chain = await this.resolveChain('LLM', scope);
+    // Per-turn extraction runs on every customer turn of every live call;
+    // Groq's free tier (8k tokens/min) 429s within a few concurrent calls,
+    // so it is not a useful fallback for it.
+    if (scope.llmRole === 'SUMMARY') chain = chain.filter((e) => e.providerId !== 'groq');
     return this.executeChain(chain, async (entry) => {
       const adapter = this.llmAdapters.get(entry.providerId);
       if (!adapter) throw new Error(`Unknown LLM provider ${entry.providerId}`);
@@ -201,7 +208,7 @@ export class PalService {
         return await run(entry);
       } catch (err) {
         errors.push(`${entry.providerId}: ${(err as Error).message}`);
-        this.markUnhealthy(entry.providerId);
+        this.markUnhealthy(entry.providerId, (err as Error).message);
       }
     }
     // Last resort: retry cooling-down providers once rather than failing the call.

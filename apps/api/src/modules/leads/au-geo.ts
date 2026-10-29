@@ -32,3 +32,16 @@ export function normaliseAuState(raw: string): string | undefined {
   };
   return map[key] ?? raw.toUpperCase();
 }
+
+/**
+ * True when an Australian lead's local time zone is known: a state, a
+ * postcode, or a landline area code that names one region. Mobiles (04) carry
+ * no location, and 08 spans SA, WA and NT (up to 2.5 h apart), so without a
+ * state or postcode a WA customer would be called on Sydney time, i.e. at
+ * 6-7 am in Perth.
+ */
+export function auLocationKnown(state: string | undefined, postcode: string | undefined, areaHint: string): boolean {
+  if (state) return true;
+  if (timezoneFromAuPostcode(postcode)) return true;
+  return ['02', '03', '07'].includes(areaHint);
+}
