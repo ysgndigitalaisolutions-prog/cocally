@@ -38,16 +38,16 @@ interface Props {
 
 const KIND_COPY: Record<AgentTransferKind, { label: string; detail: string }> = {
   BLIND: {
-    label: 'Blind',
-    detail: 'Hands the customer straight over. You drop off as soon as they accept — no introduction.',
+    label: 'Hand over now',
+    detail: 'The customer goes straight to them. You leave the call as soon as they accept.',
   },
   WARM: {
-    label: 'Warm',
-    detail: 'Customer waits on hold while you brief the other agent, then you complete the handover.',
+    label: 'Speak to them first',
+    detail: 'The customer waits on hold while you brief them, then you finish the handover.',
   },
   CONFERENCE: {
-    label: 'Conference',
-    detail: 'Both of you stay on with the customer. Nobody is put on hold.',
+    label: 'Stay on together',
+    detail: 'You both stay on with the customer. Nobody is put on hold.',
   },
 };
 
@@ -168,9 +168,9 @@ export default function TransferDialog({ callId, onClose, onOffered, onExternalT
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b px-5 py-3" style={{ borderColor: 'var(--border)' }}>
-          <h2 className="text-lg font-bold">Transfer call</h2>
-          <button className="btn btn-ghost text-sm" onClick={onClose} aria-label="Close transfer dialog">
-            ✕
+          <h2 className="text-lg font-bold">Transfer this call</h2>
+          <button className="btn btn-ghost border text-sm" style={{ borderColor: 'var(--border)' }} onClick={onClose} aria-label="Close transfer dialog">
+            ✕ Close
           </button>
         </div>
 
@@ -191,7 +191,7 @@ export default function TransferDialog({ callId, onClose, onOffered, onExternalT
                   : { color: 'var(--text-dim)' }
               }
             >
-              {value === 'agent' ? 'To an agent' : 'External number'}
+              {value === 'agent' ? 'To a specialist' : 'To another number'}
             </button>
           ))}
         </div>
@@ -206,7 +206,7 @@ export default function TransferDialog({ callId, onClose, onOffered, onExternalT
           {tab === 'agent' ? (
             <>
               <p className="mb-2 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
-                How
+                How do you want to hand over?
               </p>
               <div className="mb-2 flex gap-2">
                 {AGENT_TRANSFER_KINDS.map((value) => (
@@ -230,7 +230,7 @@ export default function TransferDialog({ callId, onClose, onOffered, onExternalT
               </p>
 
               <p className="mb-2 text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
-                Who — available now
+                Who is free now?
               </p>
               {candidates.length === 0 ? (
                 <p className="mb-4 rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)', color: 'var(--text-dim)' }}>
@@ -269,7 +269,7 @@ export default function TransferDialog({ callId, onClose, onOffered, onExternalT
               )}
 
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide" htmlFor="transfer-note" style={{ color: 'var(--text-dim)' }}>
-                Note for the receiving agent (optional)
+                Note for them (optional)
               </label>
               <textarea
                 id="transfer-note"
@@ -285,7 +285,7 @@ export default function TransferDialog({ callId, onClose, onOffered, onExternalT
                   Cancel
                 </button>
                 <button className="btn btn-primary text-sm" onClick={offerToAgent} disabled={busy || !toAgentId}>
-                  {busy ? 'Offering…' : `Offer ${KIND_COPY[kind].label.toLowerCase()} transfer`}
+                  {busy ? 'Offering…' : toAgentId ? `Send to ${candidates.find((c) => c.id === toAgentId)?.name ?? 'them'}` : 'Choose who to send to'}
                 </button>
               </div>
             </>

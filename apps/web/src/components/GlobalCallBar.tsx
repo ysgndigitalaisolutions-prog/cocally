@@ -83,6 +83,17 @@ function formatDuration(seconds: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** "Retailer: AGL" for an answer, the label alone for a yes, struck through for a no. */
+function FactText({ label, value }: { label: string; value: string }) {
+  if (value === 'true') return <>✓ {label}</>;
+  if (value === 'false') return <span className="line-through">{label}</span>;
+  return (
+    <>
+      <span style={{ color: 'var(--text-dim)' }}>{label}:</span> <span className="font-semibold">{value}</span>
+    </>
+  );
+}
+
 function errorMessage(err: unknown, fallback: string): string {
   const detail = (err as { response?: { data?: { message?: string | string[] } } }).response?.data?.message;
   if (Array.isArray(detail)) return detail.join(', ');
@@ -681,6 +692,16 @@ export default function GlobalCallBar() {
     return () => clearInterval(timer);
   }, [transferOffer, setTransferOffer]);
 
+  // Esc minimises the call panel; the transfer picker handles its own Esc first.
+  useEffect(() => {
+    if (!expanded || showTransfer) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [expanded, showTransfer]);
+
   // Ring while any offer is waiting: a visual card alone loses most offers on
   // a floor where the agent is looking at another screen. Synthesised with
   // WebAudio so there is no asset to load, plus a title flash for a hidden tab.
@@ -973,6 +994,15 @@ export default function GlobalCallBar() {
     }
   }
 
+  // The server's wrap-up sweep still returns the agent to the floor on time,
+  // and the `wrapUp` store entry stays so the presence refresh still fires.
+  async function closeWithoutOutcome() {
+    await releaseHoldAudio();
+    roomRef.current?.disconnect();
+    roomRef.current = null;
+    setActiveCall(null);
+  }
+
   function chooseDisposition(value: string) {
     if (!NEEDS_SCHEDULE.has(value)) {
       void submitDisposition(value);
@@ -1026,7 +1056,7 @@ export default function GlobalCallBar() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--accent)' }}>
-            {agentTransferOffer.kind.toLowerCase()} transfer from {agentTransferOffer.fromAgentName}
+            Transfer from {agentTransferOffer.fromAgentName}
           </p>
           <h3 className="mt-1 text-lg font-bold">{agentTransferOffer.leadName}</h3>
           <p className="font-mono text-xs" style={{ color: 'var(--text-dim)' }}>
@@ -1070,35 +1100,40 @@ export default function GlobalCallBar() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--good)' }}>
-            Incoming transfer — {transferOffer.campaignName}
+            Customer waiting · {transferOffer.campaignName}
           </p>
           <h3 className="mt-1 text-lg font-bold">{transferOffer.name}</h3>
           <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-            {transferOffer.location} · score <span className="font-bold" style={{ color: 'var(--good)' }}>{transferOffer.score}</span>
-            {transferOffer.flaggedObjection && <> · objection: {transferOffer.flaggedObjection.replace(/_/g, ' ')}</>}
+            {transferOffer.location !== 'Unknown' && <>{transferOffer.location} · </>}passed on by the AI
           </p>
+          {transferOffer.flaggedObjection && (
+            <p className="text-xs" style={{ color: 'var(--accent)' }}>Objection: {transferOffer.flaggedObjection.replace(/_/g, ' ')}</p>
+          )}
         </div>
         <div
           className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border-4 font-bold"
           style={{ borderColor: aiOfferCountdown <= 4 ? 'var(--bad)' : 'var(--good)' }}
           aria-label={`${aiOfferCountdown} seconds to answer`}
+          title="Seconds left to take this call"
         >
           {aiOfferCountdown}
         </div>
       </div>
       {transferOffer.facts.length > 0 && (
-        <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
+        <ul className="mt-3 space-y-1 rounded-lg p-2 text-sm" style={{ background: 'var(--surface-2)' }}>
           {transferOffer.facts.map((fact) => (
-            <li key={fact.label} style={{ color: fact.confirmed ? 'var(--good)' : 'var(--text-dim)' }}>
-              {fact.confirmed ? '✓' : '·'} {fact.label}
+            <li key={fact.label} style={{ color: fact.confirmed ? 'var(--text)' : 'var(--text-dim)' }}>
+              <FactText label={fact.label} value={fact.value} />
             </li>
           ))}
         </ul>
       )}
-      <p className="mt-2 text-xs italic" style={{ color: 'var(--text-dim)' }}>{transferOffer.suggestedOpener}</p>
+      <p className="mt-2 text-xs" style={{ color: 'var(--text-dim)' }}>
+        <span className="font-semibold">Say first:</span> {transferOffer.suggestedOpener}
+      </p>
       <div className="mt-3 flex gap-2">
         <button className="btn btn-primary flex-1 text-sm" disabled={busy} onClick={acceptAiOffer}>
-          Accept transfer
+          Take call
         </button>
         <button className="btn btn-ghost text-sm" disabled={busy} onClick={declineAiOffer}>
           Decline
@@ -1128,7 +1163,7 @@ export default function GlobalCallBar() {
   }
 
   const leadName = briefing?.leadName || activeCall.leadName;
-  const sourceLabel = activeCall.source === 'manual' ? 'Manual dial' : activeCall.source === 'predictive' ? 'Predictive dial' : 'Warm transfer';
+  const sourceLabel = activeCall.source === 'manual' ? 'Manual dial' : activeCall.source === 'predictive' ? 'Predictive dial' : 'Passed on by the AI';
   const live = phase === 'connected' || phase === 'ringing' || phase === 'dialing';
   const hasBriefing = Boolean(briefing && (briefing.summary || briefing.facts.length > 0 || briefing.rebuttals.length > 0));
 
@@ -1184,7 +1219,9 @@ export default function GlobalCallBar() {
             {phase === 'connected' && (
               <span className="font-mono text-sm font-bold tabular-nums" style={{ color: 'var(--good)' }}>{formatDuration(elapsed)}</span>
             )}
-            <span className="text-xs" style={{ color: 'var(--text-dim)' }}>{expanded ? '▾ collapse' : '▴ expand'}</span>
+            <span className="rounded-lg border px-3 py-1 text-xs font-semibold" style={{ borderColor: 'var(--border)' }}>
+              {expanded ? 'Minimise ▾' : phase === 'ended' ? 'Log outcome ▴' : 'Open ▴'}
+            </span>
           </div>
         </button>
 
@@ -1208,7 +1245,7 @@ export default function GlobalCallBar() {
               >
                 {pendingTransfer.accepted ? (
                   <span>
-                    {pendingTransfer.toAgentName} accepted the {pendingTransfer.kind.toLowerCase()} transfer.
+                    {pendingTransfer.toAgentName} accepted the transfer.
                     {pendingTransfer.kind === 'WARM' && ' The customer is on hold music — brief them, then complete the handover.'}
                   </span>
                 ) : (
@@ -1249,25 +1286,15 @@ export default function GlobalCallBar() {
                     {briefing.facts.length > 0 || briefing.summary ? (
                       <section>
                         <div className="mb-2 flex items-baseline justify-between gap-3">
-                          <h3 className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>Summary</h3>
-                          <span className="rounded-full px-2 py-0.5 font-mono text-xs font-bold" style={{ background: 'var(--surface-2)' }}>
-                            Score {briefing.score}
-                          </span>
+                          <h3 className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>What the customer told the AI</h3>
                         </div>
                         {briefing.facts.length > 0 ? (
                           <ul className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
-                            {briefing.facts.map((fact) => {
-                              const isFlag = fact.value === 'true' || fact.value === 'false';
-                              return (
-                                <li key={fact.label} className="flex gap-2" style={{ color: fact.confirmed ? 'var(--text)' : 'var(--text-dim)' }}>
-                                  <span aria-hidden style={{ color: fact.confirmed ? 'var(--good)' : 'var(--text-dim)' }}>{fact.confirmed ? '✓' : '–'}</span>
-                                  <span>
-                                    {fact.label}
-                                    {!isFlag && <span style={{ color: 'var(--text-dim)' }}>: {fact.value}</span>}
-                                  </span>
-                                </li>
-                              );
-                            })}
+                            {briefing.facts.map((fact) => (
+                              <li key={fact.label} style={{ color: fact.confirmed ? 'var(--text)' : 'var(--text-dim)' }}>
+                                <FactText label={fact.label} value={fact.value} />
+                              </li>
+                            ))}
                           </ul>
                         ) : (
                           <p>{briefing.summary}</p>
@@ -1282,7 +1309,7 @@ export default function GlobalCallBar() {
                     {briefing.rebuttals.length > 0 && (
                       <details className="group" open={Boolean(briefing.objection)}>
                         <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--text-dim)' }}>
-                          Rebuttals ({briefing.rebuttals.length})
+                          How to answer objections ({briefing.rebuttals.length})
                         </summary>
                         <ul className="mt-2 space-y-2">
                           {briefing.rebuttals.map((r) => (
@@ -1341,18 +1368,13 @@ export default function GlobalCallBar() {
                     <div className="mb-3 flex items-start justify-between gap-3">
                       <div>
                         <h3 className="text-base font-bold">Log the outcome</h3>
-                        <p className="text-xs" style={{ color: 'var(--text-dim)' }}>This closes the call.</p>
+                        <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                          Pick one to finish{wrapUp ? ` · next call can come in ${formatDuration(wrapUpLeft)}` : ''}.
+                        </p>
                       </div>
-                      {wrapUp && (
-                        <span
-                          className="font-mono text-lg font-bold tabular-nums"
-                          style={{ color: wrapUpLeft <= 15 ? 'var(--bad)' : 'var(--accent)' }}
-                          role="timer"
-                          aria-label="Wrap-up time left"
-                        >
-                          {formatDuration(wrapUpLeft)}
-                        </span>
-                      )}
+                      <button className="btn btn-ghost shrink-0 border text-sm" style={{ borderColor: 'var(--border)' }} disabled={busy} onClick={() => void closeWithoutOutcome()}>
+                        ✕ Close without logging
+                      </button>
                     </div>
                   )}
 

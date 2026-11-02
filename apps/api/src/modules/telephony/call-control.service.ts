@@ -585,12 +585,14 @@ export class CallControlService {
     // WRAP_UP is included so an un-dispositioned call survives a reload: the
     // bar comes back in its "ended, disposition needed" state instead of the
     // agent being blocked from dialing by a record they can no longer see.
+    // Only during the wrap-up window, which the sweep ends by clearing the
+    // deadline: a call the agent closed unlogged must not reappear for good.
     const call = await this.callModel
       .findOne({
         tenantId: new Types.ObjectId(tenantId),
         $or: [
           { state: { $in: [...LIVE_CALL_STATES] }, $or: [{ agentId: oid }, { participantAgentIds: oid }] },
-          { state: 'WRAP_UP', agentId: oid, disposition: null },
+          { state: 'WRAP_UP', agentId: oid, disposition: null, wrapUpDeadline: { $ne: null } },
         ],
       })
       .sort({ startedAt: -1 })

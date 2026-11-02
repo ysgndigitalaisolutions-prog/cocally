@@ -6,6 +6,7 @@ import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
 import { Transfer, TransferDocument } from '../../schemas/transfer.schema';
+import { answerFacts } from './answer-facts';
 import { PresenceService } from './presence.service';
 import { RealtimeGateway } from './realtime.gateway';
 
@@ -253,22 +254,11 @@ export class TransfersService {
     // The customer's own answers (EngineController.handoffAnswers) come first
     // and replace the yes/no flags they cover: "Retailer: Powershop" tells the
     // specialist something, "retailerProvided: true" does not.
-    const answers = (merged['answers'] ?? null) as Record<string, string> | null;
-    const answerLabels: Record<string, string> = {
-      accountHolder: 'Account holder',
-      fuel: 'Fuel',
-      bill: 'Bill',
-      retailer: 'Retailer',
-      retailerHeard: 'Retailer (as heard)',
-      other: 'Note',
-    };
-    const coveredFlags = answers ? ['decisionMaker', 'billProvided', 'retailerProvided'] : [];
+    const { answers, rest } = answerFacts(merged);
     const facts = [
-      ...Object.entries(answers ?? {})
-        .filter(([key, value]) => typeof value === 'string' && value && !(key === 'retailerHeard' && value === answers?.['retailer']))
-        .map(([key, value]) => ({ label: answerLabels[key] ?? key, value: String(value), confirmed: true })),
-      ...Object.entries(merged)
-        .filter(([key]) => key !== 'answers' && key !== 'appointmentSlot' && !coveredFlags.includes(key))
+      ...answers,
+      ...rest
+        .filter(([key]) => key !== 'appointmentSlot')
         .map(([key, value]) => ({
           label: factLabels[key] ?? key,
           value: String(value),

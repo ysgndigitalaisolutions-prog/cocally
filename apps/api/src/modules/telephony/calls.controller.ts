@@ -21,6 +21,7 @@ import { SchedulingService } from '../leads/scheduling.service';
 import { SuppressionService } from '../leads/suppression.service';
 import { RecordingsService } from '../recordings/recordings.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
+import { answerFacts } from '../workspace/answer-facts';
 import { PresenceService } from '../workspace/presence.service';
 import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { CallOrchestratorService } from './call-orchestrator.service';
@@ -266,11 +267,15 @@ export class CallsController {
       const words = key.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
       return words.charAt(0).toUpperCase() + words.slice(1);
     };
-    const facts = Object.entries(lead?.facts ?? {}).map(([key, value]) => ({
-      label: factLabels[key] ?? humanise(key),
-      value: String(value),
-      confirmed: Boolean(value),
-    }));
+    const { answers, rest } = answerFacts((lead?.facts ?? {}) as Record<string, unknown>);
+    const facts = [
+      ...answers,
+      ...rest.map(([key, value]) => ({
+        label: factLabels[key] ?? humanise(key),
+        value: String(value),
+        confirmed: Boolean(value),
+      })),
+    ];
     const objection = call.objections?.find((o) => !o.recovered)?.label ?? null;
     return {
       callId: call._id.toString(),
