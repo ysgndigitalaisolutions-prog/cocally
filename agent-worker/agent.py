@@ -134,6 +134,13 @@ FIRST_TURN_MAX_DELAY = float(os.getenv("FIRST_TURN_MAX_DELAY", "0.8"))
 BACKGROUND_AUDIO = (os.getenv("BACKGROUND_AUDIO") or "off").lower()
 BG_AMBIENT_VOLUME = float(os.getenv("BG_AMBIENT_VOLUME", "0.30"))
 BG_THINKING_VOLUME = float(os.getenv("BG_THINKING_VOLUME", "0.45"))
+# "phone" (default): the clips in assets/, cut to the phone voice band
+# (300-3400 Hz) with the keyboard clicks rounded off, at the built-ins'
+# loudness. The built-in clips are full-band room recordings and the typing
+# peaks at ~48x its average level, so on a call they sounded harsher and
+# brighter than the voice (2 Nov). "builtin" uses LiveKit's originals.
+BG_CLIPS = (os.getenv("BG_CLIPS") or "phone").lower()
+_ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 # Fixed wait after the VAD's end-of-speech before the turn is committed, in
 # STT_TURN=vad mode. The framework also waits for Flux's final transcript, so
 # this is a floor, not the whole gap. Measured 28 Sep with 0.3: end of turn
@@ -2784,13 +2791,17 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         try:
             from livekit.agents import AudioConfig, BackgroundAudioPlayer, BuiltinAudioClip
 
+            office, typing = BuiltinAudioClip.OFFICE_AMBIENCE, BuiltinAudioClip.KEYBOARD_TYPING
+            phone_office, phone_typing = os.path.join(_ASSETS, "office-phone.wav"), os.path.join(_ASSETS, "typing-phone.wav")
+            if BG_CLIPS == "phone" and os.path.exists(phone_office) and os.path.exists(phone_typing):
+                office, typing = phone_office, phone_typing
             background = BackgroundAudioPlayer(
-                ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=BG_AMBIENT_VOLUME),
-                thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=BG_THINKING_VOLUME),
+                ambient_sound=AudioConfig(office, volume=BG_AMBIENT_VOLUME),
+                thinking_sound=AudioConfig(typing, volume=BG_THINKING_VOLUME),
             )
             await background.start(room=ctx.room, agent_session=session)
             ctx.add_shutdown_callback(background.aclose)
-            logger.info("background audio: office %.2f, typing %.2f while thinking", BG_AMBIENT_VOLUME, BG_THINKING_VOLUME)
+            logger.info("background audio (%s clips): office %.2f, typing %.2f while thinking", "phone" if isinstance(office, str) else "builtin", BG_AMBIENT_VOLUME, BG_THINKING_VOLUME)
         except Exception as e:  # noqa: BLE001 — ambience is decoration; the call goes on without it
             logger.warning("background audio unavailable: %s", e)
 

@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY agent.py ./
+COPY assets ./assets
 # Pre-download VAD + turn-detector model weights so a cold container never
 # fetches them at call time.
 RUN python agent.py download-files
