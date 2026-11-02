@@ -266,7 +266,7 @@ export default function CampaignDetailPage() {
         <section className="card space-y-4 p-6">
           <h2 className="font-semibold">Pacing &amp; policy (ADM-03)</h2>
           <Field
-            label="Daily dial budget"
+            label="Daily dial limit"
             value={campaign.dailyDialBudget}
             onSave={(v) => save({ dailyDialBudget: Number(v) })}
           />

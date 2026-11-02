@@ -7,6 +7,8 @@ import { Call, CallDocument } from '../../schemas/call.schema';
 export interface TenantUsage {
   dials: number;
   answered: number;
+  /** Reached a person. `answered` also counts a line the carrier picked up where nobody spoke. */
+  pickedUp: number;
   voicemail: number;
   transfers: number;
   manualDials: number;
@@ -20,6 +22,7 @@ export interface TenantUsage {
 export const EMPTY_USAGE: TenantUsage = {
   dials: 0,
   answered: 0,
+  pickedUp: 0,
   voicemail: 0,
   transfers: 0,
   manualDials: 0,
@@ -70,6 +73,7 @@ export class UsageService {
           campaignId: 1,
           manual: { $ifNull: ['$manual', false] },
           answered: { $cond: [{ $ifNull: ['$answeredAt', false] }, 1, 0] },
+          pickedUp: { $cond: [{ $eq: ['$outcome', 'ANSWERED_HUMAN'] }, 1, 0] },
           voicemail: { $cond: [{ $eq: ['$amdClass', 'VOICEMAIL'] }, 1, 0] },
           recorded: { $cond: [{ $ifNull: ['$recordingUri', false] }, 1, 0] },
           aiCall: {
@@ -99,6 +103,7 @@ export class UsageService {
           campaignId: 1,
           manual: 1,
           answered: 1,
+          pickedUp: 1,
           voicemail: 1,
           recorded: 1,
           aiCall: 1,
@@ -141,6 +146,7 @@ export class UsageService {
           _id: `$${groupBy}`,
           dials: { $sum: 1 },
           answered: { $sum: '$answered' },
+          pickedUp: { $sum: '$pickedUp' },
           voicemail: { $sum: '$voicemail' },
           transfers: { $sum: '$transfer' },
           manualDials: { $sum: { $cond: ['$manual', 1, 0] } },
@@ -157,6 +163,7 @@ export class UsageService {
         _id: Types.ObjectId | string | null;
         dials: number;
         answered: number;
+        pickedUp: number;
         voicemail: number;
         transfers: number;
         manualDials: number;
@@ -172,6 +179,7 @@ export class UsageService {
       out.set(String(r._id), {
         dials: r.dials,
         answered: r.answered,
+        pickedUp: r.pickedUp,
         voicemail: r.voicemail,
         transfers: r.transfers,
         manualDials: r.manualDials,

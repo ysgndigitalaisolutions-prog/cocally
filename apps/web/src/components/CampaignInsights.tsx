@@ -10,7 +10,6 @@ interface Kpis {
   transfers: number;
   bookings: number;
   qualifyToBook: number;
-  costPerBookingCents: number | null;
   avgHandleTimeMs: number;
   avgQaScore: number | null;
 }
@@ -119,15 +118,11 @@ export default function CampaignInsights({ campaignId }: { campaignId: string })
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <Tile label="Dials" value={String(kpis?.dials ?? 0)} />
         <Tile label="Connect rate" value={kpis ? pct(kpis.connectRate) : '—'} hint={`${kpis?.connects ?? 0} answered`} />
         <Tile label="Transfers" value={String(kpis?.transfers ?? 0)} hint="reached a human" />
         <Tile label="Bookings" value={String(kpis?.bookings ?? 0)} hint={kpis ? `${pct(kpis.qualifyToBook)} of connects` : undefined} />
-        <Tile
-          label="Cost / booking"
-          value={kpis?.costPerBookingCents != null ? `$${(kpis.costPerBookingCents / 100).toFixed(2)}` : '—'}
-        />
         <Tile
           label="Avg QA"
           value={kpis?.avgQaScore != null ? kpis.avgQaScore.toFixed(1) : '—'}

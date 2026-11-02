@@ -61,7 +61,7 @@ export class ProvidersController {
     const providers = this.pal.listProviders();
     const configured = new Set(await this.vault.configuredProviderIds(user.tenantId));
     const withConfigured = (list: typeof providers.tts) =>
-      list.map((info) => ({ ...info, configured: configured.has(info.id) || info.id.startsWith('sim-') }));
+      list.map(({ unitCost: _unitCost, ...info }) => ({ ...info, configured: configured.has(info.id) || info.id.startsWith('sim-') }));
 
     const scope = { tenantId: user.tenantId };
     const [ttsChain, sttChain, convChain, summaryChain, scoringChain] = await Promise.all([

@@ -12,8 +12,6 @@ import {
   LuMegaphone,
   LuPhone,
   LuPhoneCall,
-  LuPlug,
-  LuReceipt,
   LuRadio,
   LuScrollText,
   LuShield,
@@ -63,7 +61,6 @@ export const NAV_SECTIONS: NavSection[] = [
       { href: '/leads', label: 'Leads', icon: LuList, roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
       { href: '/calls', label: 'Calls', icon: LuPhoneCall, roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
       { href: '/reports', label: 'Reports', icon: LuFileText, roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
-      { href: '/usage', label: 'Usage', icon: LuReceipt, roles: ['OWNER', 'ADMIN'] },
     ],
   },
   {
@@ -73,7 +70,6 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { href: '/flows', label: 'Flows', icon: LuGitBranch, roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
       { href: '/cli-numbers', label: 'CLI numbers', icon: LuHash, roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
-      { href: '/providers', label: 'Providers', icon: LuPlug, roles: ['OWNER', 'ADMIN'] },
       { href: '/users', label: 'Users & access', icon: LuShield, roles: ['OWNER', 'ADMIN'] },
       { href: '/audit', label: 'Audit log', icon: LuScrollText, roles: ['OWNER', 'ADMIN', 'QA'] },
       // Dev-only: places a real PSTN call outside every compliance gate.

@@ -6,7 +6,6 @@ import { Campaign, CampaignSchema } from '../../schemas/campaign.schema';
 import { PlatformSettings, PlatformSettingsSchema } from '../../schemas/platform-settings.schema';
 import { Tenant, TenantSchema } from '../../schemas/tenant.schema';
 import { User, UserSchema } from '../../schemas/user.schema';
-import { BillingController } from './billing.controller';
 import { UsageController } from './usage.controller';
 import { BillingService } from './billing.service';
 import { PlatformService } from './platform.service';
@@ -24,7 +23,8 @@ import { UsageService } from './usage.service';
       { name: Invoice.name, schema: InvoiceSchema },
     ]),
   ],
-  controllers: [BillingController, UsageController],
+  // BillingController stays out until pricing is opened to tenants; CoCally's own billing lives under /ops.
+  controllers: [UsageController],
   providers: [PlatformService, BillingService, UsageService],
   exports: [PlatformService, BillingService, UsageService],
 })

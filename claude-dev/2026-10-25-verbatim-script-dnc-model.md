@@ -49,3 +49,12 @@ Tests:
 - There is no AU campaign. The seed is the India test campaign on the IN pack. A real AU call needs a +61 lead on an AU-pack campaign, with the Telvoq trunk (`LIVEKIT_SIP_TRUNK_ID=ST_fGuwwzkowYPr`, `SIP_DIAL_PREFIX=45`).
 - First real calls on nova-3 + `min_words` + gpt-oss: check `timings.workerLog` for "script lines:", "stt nova language=" and any `AMD ... hanging up`.
 - To test Bedrock models: get a new Bedrock key, then rerun the eval on qwen3-32b and ministral-14b.
+
+## 3 Nov 2026: client hand-over view (new tenant, minutes only)
+
+Nithin is handing the app to a client on a new tenant: clean view, minutes only, no prices until pricing is revisited.
+
+- Dashboard rebuilt on `/usage/daily`: total, ring / AI / human minutes, call counts, by day, by campaign. The old KPIs (latency, QA, abandon rate, funnel, objections) left the dashboard. Usage page redirects here.
+- Money removed at the API, not only on screen: `chargeInr` and `costCents` from calls, `costPerBookingCents` from KPIs, `unitCost` from providers, `BillingController` unregistered. Tenant Providers and invoice pages deleted. Ops console keeps billing. To reopen pricing, restore these from git.
+- `pickedUp` added to UsageService (outcome ANSWERED_HUMAN). On real data `answered` said 51 and a person was reached on 41: the carrier also answers lines where nobody speaks.
+- Real data checks: 62 calls, all on YSGN. AI minutes 331.5 raw, 53.4 shown: four hung calls of 66-81 min are capped by UsageService, so the finaliser still misses some calls. No call has ever been classed VOICEMAIL, so the voicemail figure is unproven.

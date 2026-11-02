@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AMD_CLASSES, CALL_OUTCOMES, DISPOSITIONS } from '@cocally/shared';
 import { api } from '@/lib/api';
-import { inr, minutes } from '@/lib/billing';
+import { minutes } from '@/lib/billing';
 
 interface CallRow {
   _id: string;
@@ -20,8 +20,6 @@ interface CallRow {
   ringSeconds?: number;
   aiSeconds?: number;
   humanSeconds?: number;
-  /** Present for owners/admins only: this call's charge at the base rate. */
-  chargeInr?: number;
 }
 
 interface CallDetail extends CallRow {
@@ -56,8 +54,6 @@ const EMPTY = { campaignId: '', agentId: '', outcome: '', disposition: '', amdCl
 
 export default function CallsPage() {
   const [calls, setCalls] = useState<CallRow[]>([]);
-  // The API only sends charges to owners and admins.
-  const showCharge = calls.some((c) => typeof c.chargeInr === 'number');
   const [detail, setDetail] = useState<CallDetail | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   const [recordingNote, setRecordingNote] = useState('');
@@ -215,13 +211,12 @@ export default function CallsPage() {
                 <th className="p-3 text-right">Ring</th>
                 <th className="p-3 text-right">AI min</th>
                 <th className="p-3 text-right">Agent min</th>
-                {showCharge && <th className="p-3 text-right">Charge</th>}
               </tr>
             </thead>
             <tbody>
               {calls.length === 0 && !loading && (
                 <tr>
-                  <td className="p-4 text-center" colSpan={showCharge ? 11 : 10} style={{ color: 'var(--text-dim)' }}>
+                  <td className="p-4 text-center" colSpan={10} style={{ color: 'var(--text-dim)' }}>
                     No calls match these filters.
                   </td>
                 </tr>
@@ -248,7 +243,6 @@ export default function CallsPage() {
                   <td className="p-3 text-right tabular-nums">{secs(call.ringSeconds)}</td>
                   <td className="p-3 text-right tabular-nums">{minutes(call.aiSeconds ?? 0)}</td>
                   <td className="p-3 text-right tabular-nums">{minutes(call.humanSeconds ?? 0)}</td>
-                  {showCharge && <td className="p-3 text-right tabular-nums">{inr(call.chargeInr ?? 0)}</td>}
                 </tr>
               ))}
             </tbody>
@@ -346,20 +340,19 @@ function secs(s?: number): string {
   return r < 60 ? `${r}s` : `${Math.floor(r / 60)}m ${String(r % 60).padStart(2, '0')}s`;
 }
 
-/** Totals for the calls on screen: what the AI and the agents spent, and what it cost. */
+/** Totals for the calls on screen: calls and minutes. */
 function CallTotals({ calls }: { calls: CallRow[] }) {
   if (calls.length === 0) return null;
   const sum = (f: (c: CallRow) => number | undefined) => calls.reduce((a, c) => a + (f(c) ?? 0), 0);
   const answered = calls.filter((c) => c.outcome === 'ANSWERED_HUMAN').length;
   const transferred = calls.filter((c) => Boolean(c.agentId)).length;
-  const hasCharge = calls.some((c) => typeof c.chargeInr === 'number');
   const figures: Array<[string, string]> = [
     ['Calls', String(calls.length)],
     ['Answered', `${answered} (${Math.round((answered / calls.length) * 100)}%)`],
     ['Transferred', String(transferred)],
+    ['Ring minutes', minutes(sum((c) => c.ringSeconds))],
     ['AI minutes', minutes(sum((c) => c.aiSeconds))],
-    ['Agent minutes', minutes(sum((c) => c.humanSeconds))],
-    ...(hasCharge ? ([['Charge', inr(sum((c) => c.chargeInr))]] as Array<[string, string]>) : []),
+    ['Human minutes', minutes(sum((c) => c.humanSeconds))],
   ];
   return (
     <section className="card p-4">
@@ -373,7 +366,6 @@ function CallTotals({ calls }: { calls: CallRow[] }) {
       </div>
       <p className="mt-2 text-xs" style={{ color: 'var(--text-dim)' }}>
         Totals for the {calls.length} calls listed{calls.length >= 200 ? ' (the most recent 200; narrow the dates for more)' : ''}.
-        {hasCharge ? ' Charges are at your base rate; the monthly bill on Usage & billing applies your volume band.' : ''}
       </p>
     </section>
   );

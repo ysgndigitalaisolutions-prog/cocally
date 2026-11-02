@@ -36,8 +36,8 @@ function todayIn(zone: string): string {
 
 /**
  * The tenant's usage board: what was dialled, answered and talked, per day.
- * Counts only, no money (billing is shown separately). Same measurements as
- * invoices (`UsageService`), so the two can never disagree.
+ * Counts and minutes only, no money. Same measurements as invoices
+ * (`UsageService`), so the two can never disagree.
  */
 @Controller('usage')
 export class UsageController {
@@ -47,7 +47,7 @@ export class UsageController {
   ) {}
 
   @Get('daily')
-  @Roles('OWNER', 'ADMIN')
+  @Roles('OWNER', 'ADMIN', 'SUPERVISOR', 'QA')
   async daily(
     @CurrentUser() user: AuthenticatedUser,
     @Query('from') fromQ?: string,

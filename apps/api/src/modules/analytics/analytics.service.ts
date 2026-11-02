@@ -79,7 +79,6 @@ export class AnalyticsService {
       transfers: number;
       booked: number;
       totalTalkMs: number;
-      totalCostCents: number;
       avgQa: number;
     }>([
       { $match: filter },
@@ -92,9 +91,6 @@ export class AnalyticsService {
           booked: { $sum: { $cond: [{ $eq: ['$disposition', 'BOOKED'] }, 1, 0] } },
           totalTalkMs: {
             $sum: { $cond: [{ $and: ['$endedAt', '$answeredAt'] }, { $subtract: ['$endedAt', '$answeredAt'] }, 0] },
-          },
-          totalCostCents: {
-            $sum: { $add: ['$costCents.telco', '$costCents.stt', '$costCents.tts', '$costCents.llm'] },
           },
           avgQa: { $avg: '$qaScore.total' },
         },
@@ -133,7 +129,6 @@ export class AnalyticsService {
       transfers: row?.transfers ?? 0,
       bookings: booked,
       qualifyToBook: connects > 0 ? booked / connects : 0,
-      costPerBookingCents: booked > 0 ? Math.round((row?.totalCostCents ?? 0) / booked) : null,
       avgHandleTimeMs: connects > 0 ? Math.round((row?.totalTalkMs ?? 0) / connects) : 0,
       avgQaScore: row?.avgQa ?? null,
     };

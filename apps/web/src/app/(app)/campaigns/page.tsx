@@ -149,7 +149,7 @@ export default function CampaignsPage() {
               <th className="p-4">Status</th>
               <th className="p-4">Dialer</th>
               <th className="p-4">Pack</th>
-              <th className="p-4">Daily budget</th>
+              <th className="p-4">Daily dial limit</th>
               <th className="p-4">Channels</th>
               <th className="p-4" />
             </tr>
