@@ -149,6 +149,7 @@ export default function GlobalCallBar() {
   const [onHold, setOnHold] = useState(false);
   const [holdBusy, setHoldBusy] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
   const [offerCountdown, setOfferCountdown] = useState(0);
   const [pendingCountdown, setPendingCountdown] = useState(0);
   const [wrapUpLeft, setWrapUpLeft] = useState(0);
@@ -330,6 +331,7 @@ export default function GlobalCallBar() {
     setElapsed(0);
     setExpanded(true);
     setShowTransfer(false);
+    setConfirmClose(false);
     teardownHoldAudio();
     micTrackRef.current = null;
     onHoldRef.current = false;
@@ -696,11 +698,13 @@ export default function GlobalCallBar() {
   useEffect(() => {
     if (!expanded || showTransfer) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setExpanded(false);
+      if (event.key !== 'Escape') return;
+      if (confirmClose) setConfirmClose(false);
+      else setExpanded(false);
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [expanded, showTransfer]);
+  }, [expanded, showTransfer, confirmClose]);
 
   // Ring while any offer is waiting: a visual card alone loses most offers on
   // a floor where the agent is looking at another screen. Synthesised with
@@ -997,6 +1001,7 @@ export default function GlobalCallBar() {
   // The server's wrap-up sweep still returns the agent to the floor on time,
   // and the `wrapUp` store entry stays so the presence refresh still fires.
   async function closeWithoutOutcome() {
+    setConfirmClose(false);
     await releaseHoldAudio();
     roomRef.current?.disconnect();
     roomRef.current = null;
@@ -1172,6 +1177,35 @@ export default function GlobalCallBar() {
       {reconnectStrip}
       {aiOfferCard}
       {offerCard}
+      {confirmClose && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.5)' }}
+          onClick={() => setConfirmClose(false)}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Close without an outcome"
+            className="card w-full max-w-md p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-bold">Please select an outcome</h2>
+            <p className="mt-2 text-sm" style={{ color: 'var(--text-dim)' }}>
+              If you close now, nothing is saved for this call: no callback or booking is scheduled, and a Do not call
+              request is not recorded.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button className="btn btn-ghost text-sm" onClick={() => void closeWithoutOutcome()}>
+                Close anyway
+              </button>
+              <button className="btn btn-primary text-sm" autoFocus onClick={() => setConfirmClose(false)}>
+                Select an outcome
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showTransfer && (
         <TransferDialog
           callId={activeCall.callId}
@@ -1372,7 +1406,7 @@ export default function GlobalCallBar() {
                           Pick one to finish{wrapUp ? ` · next call can come in ${formatDuration(wrapUpLeft)}` : ''}.
                         </p>
                       </div>
-                      <button className="btn btn-ghost shrink-0 border text-sm" style={{ borderColor: 'var(--border)' }} disabled={busy} onClick={() => void closeWithoutOutcome()}>
+                      <button className="btn btn-ghost shrink-0 border text-sm" style={{ borderColor: 'var(--border)' }} disabled={busy} onClick={() => setConfirmClose(true)}>
                         ✕ Close without logging
                       </button>
                     </div>
