@@ -41,6 +41,7 @@ from dotenv import load_dotenv
 from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, RunContext, function_tool
 from livekit.agents.voice.room_io import AudioInputOptions, AudioOutputOptions, RoomOptions
+from livekit.agents import tts as _tts
 from livekit.agents.llm import ChatChunk, ChoiceDelta, StopResponse
 from livekit.plugins import deepgram, openai, silero
 
@@ -134,6 +135,10 @@ LLM_FIRST_WORD_DEADLINE_S = float(os.getenv("LLM_FIRST_WORD_DEADLINE_S", "1.2"))
 # Voice loudness in dB (Nithin chose +4 on 3 Nov; Aura-2 has no volume control
 # of its own). Applied to spoken lines only, not to hold music or background.
 TTS_GAIN_DB = float(os.getenv("TTS_GAIN_DB", "4"))
+# Cartesia sonic-3 delivery, e.g. "excited". Empty = the voice's natural read.
+TTS_EMOTION = os.getenv("TTS_EMOTION", "")
+# Takes over if the chosen voice vendor fails, so a customer never hears silence.
+TTS_FALLBACK_VOICE = os.getenv("TTS_FALLBACK_VOICE", "aura-2-aries-en")
 
 
 def _apply_gain(frame: rtc.AudioFrame, gain_db: float) -> rtc.AudioFrame:
@@ -2028,6 +2033,15 @@ async def _no_agent_close(
     ctx.shutdown(reason=reason)  # sync — not awaitable
 
 
+def _with_tts_fallback(primary):  # noqa: ANN001, ANN202
+    """Deepgram backs up any other voice vendor for the whole call. It is already
+    the STT vendor, so the outage that takes it away ends the call anyway."""
+    if isinstance(primary, deepgram.TTS):
+        return primary
+    backup = deepgram.TTS(model=TTS_FALLBACK_VOICE, base_url=f"https://{DEEPGRAM_HOST}/v1/speak")
+    return _tts.FallbackAdapter([primary, backup])
+
+
 def _build_tts():  # noqa: ANN202 — plugin TTS types differ
     """Pick the TTS by env. Time-to-first-byte is the single biggest lever on
     how "instant" the agent feels, so the fastest streaming voices are first-class:
@@ -2089,7 +2103,11 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
                     logger.info("cartesia websocket open %.0f ms (fastest of %d)%s", took_ms, len(tasks), "" if took_ms <= CARTESIA_SLOW_CONNECT_MS else ": all far back-end")
                     return ws
 
-            return _CartesiaTTS(model="sonic-3.6", **({"voice": TTS_VOICE} if TTS_VOICE else {}))
+            return _CartesiaTTS(
+                model="sonic-3.6",
+                **({"voice": TTS_VOICE} if TTS_VOICE else {}),
+                **({"emotion": TTS_EMOTION} if TTS_EMOTION else {}),
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("cartesia TTS unavailable (%s) — using Deepgram", e)
     if TTS_PROVIDER == "deepgram-flux":
@@ -2536,7 +2554,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     logger.info("starting agent (call=%s, brief=%s, stt=%s/%s, interruption=%s, llm=%s:%s, tts=%s)", call_id, bool(brief), STT_MODEL, STT_TURN, INTERRUPTION["mode"], LLM_PROVIDER, LLM_LABEL, TTS_PROVIDER)
     _ship_call_log(ctx, call_id)
 
-    tts_engine = _build_tts()
+    tts_engine = _with_tts_fallback(_build_tts())
     disclosure = (brief or {}).get("disclosureLine")
 
     stt_language = _stt_language((brief or {}).get("leadPhone"))

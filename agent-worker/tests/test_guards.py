@@ -92,3 +92,15 @@ if __name__ == "__main__":
         if n.startswith("test_"):
             f()
             print("PASS", n)
+
+
+def test_other_voice_vendors_get_a_deepgram_backup():
+    # Deepgram alone stays as it is; anything else must not leave a call silent.
+    os.environ.setdefault("DEEPGRAM_API_KEY", "x")
+    dg = agent.deepgram.TTS(model="aura-2-aries-en", api_key="x")
+    assert agent._with_tts_fallback(dg) is dg
+    from livekit.plugins import cartesia
+
+    wrapped = agent._with_tts_fallback(cartesia.TTS(model="sonic-3.6", api_key="x", emotion="excited"))
+    assert isinstance(wrapped, agent._tts.FallbackAdapter)
+    assert isinstance(wrapped._tts_instances[1], agent.deepgram.TTS)

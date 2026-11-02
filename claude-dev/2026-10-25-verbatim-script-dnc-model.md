@@ -58,3 +58,11 @@ Nithin is handing the app to a client on a new tenant: clean view, minutes only,
 - Money removed at the API, not only on screen: `chargeInr` and `costCents` from calls, `costPerBookingCents` from KPIs, `unitCost` from providers, `BillingController` unregistered. Tenant Providers and invoice pages deleted. Ops console keeps billing. To reopen pricing, restore these from git.
 - `pickedUp` added to UsageService (outcome ANSWERED_HUMAN). On real data `answered` said 51 and a person was reached on 41: the carrier also answers lines where nobody speaks.
 - Real data checks: 62 calls, all on YSGN. AI minutes 331.5 raw, 53.4 shown: four hung calls of 66-81 min are capped by UsageService, so the finaliser still misses some calls. No call has ever been classed VOICEMAIL, so the voicemail figure is unproven.
+
+## 3 Nov 2026: voice moves to Cartesia Arlo (not deployed yet)
+
+Nithin was not happy with Deepgram's voice, heard ElevenLabs and Cartesia at phone quality, and chose Cartesia Arlo (Australian); plain and excited both fine, excited set in `deploy/gcp/.env` with `TTS_GAIN_DB=1`.
+
+Measured from the Sydney worker through the real plugin and the 4-socket race: 50 calls, 250 replies, no errors, median about 95 ms first audio, 2 of 50 calls stuck on a slow socket near 300 ms. ElevenLabs 269 ms, Deepgram Aura-2 200 ms in the plain HTTP test (79 ms live).
+
+New: `TTS_EMOTION`, and `_with_tts_fallback` puts Deepgram behind any other voice vendor. Tested with a broken Cartesia key: Deepgram speaks; the first line took 1.8 s from a Mac, so the first failure is a noticeable pause.
