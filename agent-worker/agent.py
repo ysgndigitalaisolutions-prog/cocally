@@ -374,6 +374,10 @@ async def _expand_tag_stream(
         nonlocal done
         if tag.endswith("Q") and tag[:-1] in lines and tag[:-1] not in asked and tag[0] == "S":
             tag = tag[:-1]
+        elif tag[0] == "S" and not tag.endswith("Q") and tag in asked and f"{tag}Q" in lines:
+            # Asked before: only the question again, never the whole step
+            # (2 Nov eval: the offer answer, then all of step 2 a second time).
+            tag = f"{tag}Q"
         if tag not in lines or tag in blocked:
             return " "
         line = lines[tag]
@@ -388,6 +392,12 @@ async def _expand_tag_stream(
         for t in flat_of
         if t.endswith("Q") and t[0] == "S" and t[:-1] in flat_of and t[:-1] not in asked
     }
+    # ...and a written-out step already asked comes out as its short question.
+    full_for.update({
+        flat_of[t]: flat_of[f"{t}Q"]
+        for t in flat_of
+        if t[0] == "S" and not t.endswith("Q") and t in asked and f"{t}Q" in flat_of
+    })
     flats = list(flat_of.values())
     pend = ""  # the model's own words, held until "?" or the end of the reply
 
@@ -550,6 +560,54 @@ def out_of_area_pattern(retailers: list[str]) -> re.Pattern[str] | None:
     if not words:
         return None
     return re.compile(r"(?<!first )(?<!1st )(?<!for )(?<!fast )(?<!forced )(?<!force )\b(" + "|".join(words) + r")\b", re.I)
+
+
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40, "forty-five": 45, "couple of": 2, "few": 3,
+}
+_RELATIVE_TIME = re.compile(
+    r"\bin (?:about |around |like )?(half an hour|\d+|a couple of|a few|a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty-five|forty)"
+    r"(?: (minutes?|mins?|hours?|hrs?))?\b",
+    re.I,
+)
+
+
+def _relative_callback_time(said: str, model_when: str) -> str | None:
+    """'Call me back in ten minutes' -> now + 10 min, in the offset the model
+    used. The model does this sum itself and got it wrong (2 Nov eval: 'in ten
+    minutes' at 11:30 booked for 12:00). None when the customer gave no
+    relative time, so the model's absolute time stands."""
+    from datetime import datetime, timedelta, timezone
+
+    m = _RELATIVE_TIME.search(said or "")
+    if not m:
+        return None
+    amount_s, unit = m.group(1).lower(), (m.group(2) or "").lower()
+    if amount_s == "half an hour":
+        delta = timedelta(minutes=30)
+    else:
+        if not unit:
+            return None
+        n = int(amount_s) if amount_s.isdigit() else _NUMBER_WORDS.get(amount_s.removeprefix("a ").strip(), _NUMBER_WORDS.get(amount_s))
+        if not n:
+            return None
+        delta = timedelta(hours=n) if unit.startswith(("hour", "hr")) else timedelta(minutes=n)
+    try:
+        tz = datetime.fromisoformat(model_when).tzinfo or timezone.utc
+    except ValueError:
+        tz = timezone.utc
+    return (datetime.now(timezone.utc) + delta).astimezone(tz).replace(microsecond=0).isoformat()
+
+
+# Customer asking for a person: transferred at once, mid-script if need be.
+# "Are you a real person?" is a question, not a request, and is not matched.
+_HUMAN_REQUEST = re.compile(
+    r"\b((speak|talk) (to|with) (a |an |some |the |your )?(real |actual )?(person|human|someone|somebody|manager|supervisor|agent|representative)"
+    r"|(put|transfer|connect|pass) me (through )?(to|with) (a |an |some |the |your )?(real |actual )?(person|human|someone|somebody|manager|supervisor|agent)"
+    r"|(i want|i'd like|i need|give me|get me) (a |an |some |the )?(real |actual )?(person|human|manager|supervisor|agent)\b)",
+    re.I,
+)
 
 
 class Qualifier(Agent):
@@ -813,7 +871,9 @@ class Qualifier(Agent):
             return f"Not booked: they have not said a day or time yet. Output {tag} to ask them."
         if not self._call_id:
             self.blocked_tags.add("Q6")
-            return "Callback booked. Confirm the time back to them in words, say goodbye, then call end_call."
+            when = _relative_callback_time(self.last_user_text, when) or when
+            return f"Callback booked for {when}. Confirm the time back to them in words, say goodbye, then call end_call."
+        when = _relative_callback_time(self.last_user_text, when) or when
         ok, detail = await _post_callback(self._call_id, when, note)
         if ok:
             self.blocked_tags.add("Q6")
@@ -827,6 +887,16 @@ class Qualifier(Agent):
         if self.restore_endpointing is not None:
             restore, self.restore_endpointing = self.restore_endpointing, None
             restore()
+        # The customer asks for a person: hand over now, mid-script if need
+        # be. 2 Nov eval: the model said nothing, or the catch-all line and
+        # step 4, and the last-step transfer guard would refuse it anyway.
+        if not self._closing and not self._transfer_triggered and _HUMAN_REQUEST.search(self.last_user_text):
+            said = self.last_user_text
+            logger.info("customer asked for a person (call=%s): %r", self._call_id, said[:80])
+            if self._call_id:
+                self.spawn(_post_transcript(self._call_id, "customer", said))
+            self.spawn(self._do_transfer("customer asked to speak to a person"))
+            raise StopResponse()
         # A time given right after the callback question: book it now. 28 Oct
         # eval: the model said "We've scheduled a callback" without calling
         # the tool, so a customer who hung up then had no callback.

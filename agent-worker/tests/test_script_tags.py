@@ -19,7 +19,7 @@ LINES = {
 }
 
 
-async def _collect(pieces, blocked=frozenset(), asked=frozenset({"S2"})):
+async def _collect(pieces, blocked=frozenset(), asked=frozenset()):
     async def gen():
         for p in pieces:
             yield p
@@ -39,7 +39,7 @@ def _chunks(*texts):
     return [ChatChunk(id="x", delta=ChoiceDelta(role="assistant", content=t)) for t in texts]
 
 
-def run(pieces, blocked=frozenset(), asked=frozenset({"S2"})):
+def run(pieces, blocked=frozenset(), asked=frozenset()):
     return asyncio.run(_collect(pieces, blocked, asked))
 
 
@@ -94,8 +94,9 @@ def test_tool_talk_is_never_spoken():
 
 
 def test_repeat_question_tag_and_written_out_repeat_stay_short():
-    assert _text(run(_chunks("[S2Q]"))) == LINES["S2Q"]
-    assert _text(run(_chunks("Sorry. Electricity only, or gas ", "as well?"))) == LINES["S2Q"]
+    asked = frozenset({"S2"})
+    assert _text(run(_chunks("[S2Q]"), asked=asked)) == LINES["S2Q"]
+    assert _text(run(_chunks("Sorry. Electricity only, or gas ", "as well?"), asked=asked)) == LINES["S2Q"]
 
 
 def test_first_ask_is_always_the_full_step():
@@ -114,6 +115,11 @@ def test_long_reaction_is_dropped():
 
 def test_no_reaction_before_a_line_that_opens_with_its_own():
     assert _text(run(_chunks("Oh wow. ", "[S5]"))) == LINES["S5"]
+
+
+def test_step_already_asked_is_re_asked_short():
+    assert _text(run(_chunks("[Q1] [S2]"), asked=frozenset({"S2"}))) == f"{LINES['Q1']} {LINES['S2Q']}"
+    assert _text(run(_chunks("[S2]"), asked=frozenset())) == LINES["S2"]
 
 
 def test_blocked_tag_is_not_spoken():
