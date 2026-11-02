@@ -72,6 +72,21 @@ def test_stalled_first_word_is_retried():
     assert calls["n"] == 2 and text == "Hello there." and took < 1.0, (calls, text, took)
 
 
+def test_voice_gain_is_louder_and_never_clips():
+    import numpy as np
+    from livekit import rtc
+
+    pcm = (np.sin(np.linspace(0, 200, 2400)) * 12000).astype(np.int16)
+    out = agent._apply_gain(rtc.AudioFrame(pcm.tobytes(), 24000, 1, 2400), 4.0)
+    y = np.frombuffer(out.data, dtype=np.int16)
+    assert len(y) == 2400 and out.sample_rate == 24000
+    assert abs(np.abs(y).max() / np.abs(pcm).max() - 10 ** (4 / 20)) < 0.02  # quiet audio: exactly +4 dB
+    loud = (np.sin(np.linspace(0, 200, 2400)) * 32000).astype(np.int16)
+    z = np.frombuffer(agent._apply_gain(rtc.AudioFrame(loud.tobytes(), 24000, 1, 2400), 4.0).data, dtype=np.int16)
+    assert np.abs(z).max() < 32767  # loud peaks are rounded off, no hard clipping
+    assert np.abs(z).max() > np.abs(loud).max() * 0.9
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):

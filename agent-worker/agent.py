@@ -131,6 +131,27 @@ FIRST_TURN_MAX_DELAY = float(os.getenv("FIRST_TURN_MAX_DELAY", "0.8"))
 # request hung, waited out the 2.5 s attempt timeout and fell to qwen, a 3.9 s
 # gap. A retry is normally fast; the fallback chain still applies after it.
 LLM_FIRST_WORD_DEADLINE_S = float(os.getenv("LLM_FIRST_WORD_DEADLINE_S", "1.2"))
+# Voice loudness in dB (Nithin chose +4 on 3 Nov; Aura-2 has no volume control
+# of its own). Applied to spoken lines only, not to hold music or background.
+TTS_GAIN_DB = float(os.getenv("TTS_GAIN_DB", "4"))
+
+
+def _apply_gain(frame: rtc.AudioFrame, gain_db: float) -> rtc.AudioFrame:
+    """Louder frame, with peaks above 0.8 of full scale rounded off rather
+    than clipped, which would crackle on a phone line."""
+    import numpy as np
+
+    x = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32) / 32768.0
+    y = x * (10 ** (gain_db / 20))
+    knee = 0.8
+    over = np.abs(y) > knee
+    y[over] = np.sign(y[over]) * (knee + (1 - knee) * np.tanh((np.abs(y[over]) - knee) / (1 - knee)))
+    return rtc.AudioFrame(
+        data=(y * 32767).astype(np.int16).tobytes(),
+        sample_rate=frame.sample_rate,
+        num_channels=frame.num_channels,
+        samples_per_channel=frame.samples_per_channel,
+    )
 
 
 class _FirstWordTimeout(Exception):
@@ -700,6 +721,15 @@ class Qualifier(Agent):
         # Said once to a call-screening assistant (brief `screeningLine`).
         self.screening_line = ""
         self._screening_answered = False
+
+    async def tts_node(self, text, model_settings):  # noqa: ANN001, ANN201 — framework signature
+        async for frame in Agent.default.tts_node(self, text, model_settings):
+            if TTS_GAIN_DB and isinstance(frame, rtc.AudioFrame):
+                try:
+                    frame = _apply_gain(frame, TTS_GAIN_DB)
+                except Exception as e:  # noqa: BLE001 — a line at normal volume beats no line
+                    logger.warning("voice gain failed: %s", e)
+            yield frame
 
     async def llm_node(self, chat_ctx, tools, model_settings):  # noqa: ANN001, ANN201 — framework signature
         if self._closing:
