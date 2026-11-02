@@ -36,7 +36,7 @@ CLIENT = "Australian Deal"
 OPENING = "Hello, how are you doing today?"
 LOCAL_NOW = "Monday 2 November 2026 at 11:30 am"
 
-seed = open(os.path.join(REPO, "apps/api/src/seeds/seed-test-campaign.ts")).read()
+seed = open(os.environ.get("SEED_PATH") or os.path.join(REPO, "apps/api/src/seeds/seed-test-campaign.ts")).read()
 prompt = re.search(r"const PROMPT = `(.*?)`;", seed, re.S).group(1).replace("{{clientName}}", CLIENT)
 pb = re.search(r"const playbook = \(clientName: string\) => \[(.*?)\n\];", seed, re.S).group(1)
 rebuttals = "\n".join(
