@@ -126,6 +126,36 @@ STALL_GUARD_S = float(os.getenv("STALL_GUARD_S", "2.5"))
 # "Yeah. One of those" waited the full 1.5 s. Mid-script answers keep the
 # long cap so a customer pausing over their bill amount is not cut off.
 FIRST_TURN_MAX_DELAY = float(os.getenv("FIRST_TURN_MAX_DELAY", "0.8"))
+# If the model has not started answering within this long, the request is
+# dropped and sent again (same model, fresh connection). 2 Nov: a Cerebras
+# request hung, waited out the 2.5 s attempt timeout and fell to qwen, a 3.9 s
+# gap. A retry is normally fast; the fallback chain still applies after it.
+LLM_FIRST_WORD_DEADLINE_S = float(os.getenv("LLM_FIRST_WORD_DEADLINE_S", "1.2"))
+
+
+class _FirstWordTimeout(Exception):
+    pass
+
+
+async def _first_word_deadline(stream, deadline_s: float):  # noqa: ANN001, ANN201 — llm_node chunk stream
+    """Yield `stream`, raising _FirstWordTimeout if its first chunk takes
+    longer than `deadline_s` (<= 0 disables)."""
+    it = stream.__aiter__()
+    try:
+        first = await (asyncio.wait_for(it.__anext__(), deadline_s) if deadline_s > 0 else it.__anext__())
+    except StopAsyncIteration:
+        return
+    except asyncio.TimeoutError:
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:  # noqa: BLE001
+                pass
+        raise _FirstWordTimeout() from None
+    yield first
+    async for chunk in it:
+        yield chunk
 # Call-centre background under the AI's voice: a quiet office ambience for
 # the whole call, plus keyboard typing while the AI is "thinking", so a pause
 # sounds like a person checking something rather than a dead line. A separate
@@ -609,10 +639,11 @@ def _relative_callback_time(said: str, model_when: str) -> str | None:
 
 # Customer asking for a person: transferred at once, mid-script if need be.
 # "Are you a real person?" is a question, not a request, and is not matched.
+_WHO = r"(real |actual |energy )?(person|human|someone|somebody|manager|supervisor|agent|representative|specialist|expert|consultant)"
 _HUMAN_REQUEST = re.compile(
-    r"\b((speak|talk) (to|with) (a |an |some |the |your )?(real |actual )?(person|human|someone|somebody|manager|supervisor|agent|representative)"
-    r"|(put|transfer|connect|pass) me (through )?(to|with) (a |an |some |the |your )?(real |actual )?(person|human|someone|somebody|manager|supervisor|agent)"
-    r"|(i want|i'd like|i need|give me|get me) (a |an |some |the )?(real |actual )?(person|human|manager|supervisor|agent)\b)",
+    rf"\b((speak|talk) (to|with) (a |an |some |the |your )?{_WHO}"
+    rf"|(put|transfer|connect|pass) (me |us )?(through |straight )?(to|with) (a |an |some |the |your )?{_WHO}"
+    rf"|(i want|i'd like|i need|give me|get me) (a |an |some |the |your )?{_WHO}\b)",
     re.I,
 )
 
@@ -685,20 +716,29 @@ class Qualifier(Agent):
         # that", so an empty reply is asked for again, once, at once.
         for attempt in (1, 2):
             stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
+            # Only the first try has the first-word deadline; the retry waits
+            # on the normal fallback chain.
+            stream = _first_word_deadline(stream, LLM_FIRST_WORD_DEADLINE_S if attempt == 1 else 0)
             if self.script_lines:
                 stream = _expand_tag_stream(stream, self.script_lines, frozenset(self.blocked_tags), self._steps_asked())
             produced = False
-            async for chunk in stream:
-                if isinstance(chunk, str):
-                    self.reply_text += chunk
-                    produced = produced or bool(chunk.strip())
-                elif isinstance(chunk, ChatChunk) and chunk.delta is not None:
-                    if chunk.delta.content:
-                        self.reply_text += chunk.delta.content
-                        produced = produced or bool(chunk.delta.content.strip())
-                    if chunk.delta.tool_calls:
-                        produced = True
-                yield chunk
+            try:
+                async for chunk in stream:
+                    if isinstance(chunk, str):
+                        self.reply_text += chunk
+                        produced = produced or bool(chunk.strip())
+                    elif isinstance(chunk, ChatChunk) and chunk.delta is not None:
+                        if chunk.delta.content:
+                            self.reply_text += chunk.delta.content
+                            produced = produced or bool(chunk.delta.content.strip())
+                        if chunk.delta.tool_calls:
+                            produced = True
+                    yield chunk
+            except _FirstWordTimeout:
+                logger.warning(
+                    "LLM no first word in %.1fs (call=%s) — asking again", LLM_FIRST_WORD_DEADLINE_S, self._call_id
+                )
+                continue
             if produced or self._closing or attempt == 2:
                 break
             logger.warning("empty LLM reply (call=%s) — asking again", self._call_id)
@@ -975,6 +1015,13 @@ class Qualifier(Agent):
         itself ever decides to call request_transfer.
         """
         if self._transfer_triggered or self._closing:
+            return
+        missing = self._last_step_missing()
+        if missing:
+            # The score can already be at the threshold from an earlier call
+            # (2 Nov: a re-called lead transferred on its first "Hello.").
+            # The customer is asked the script on this call first.
+            logger.info("auto-transfer (call=%s) held: step %s not asked on this call yet", self._call_id, missing)
             return
         logger.info("auto-transfer triggered (call=%s): %s", self._call_id, reason)
         # The score arrives while the model is already answering the same turn.
@@ -2340,14 +2387,17 @@ def _openai_compat_llm(provider: str, family: str):
 
 
 def _llm_chain() -> list[tuple[str, str]]:
-    """[(provider, family), ...] in fallback order: primary provider's chosen
-    family, then its other family, then the same on the other provider (only
-    providers with a key)."""
+    """[(provider, family), ...] in fallback order: the chosen family on each
+    provider (primary first), then the other family (only providers with a key)."""
     primary = _family(LLM_MODEL)
     other = "gpt-oss" if primary == "qwen" else "qwen"
     first = LLM_PROVIDER if LLM_PROVIDER in _PROVIDERS else ("cerebras" if os.environ.get("CEREBRAS_API_KEY") else "groq")
     order = [first] + [p for p in _PROVIDERS if p != first]
-    return [(p, f) for p in order if os.environ.get(_PROVIDERS[p]["key_env"]) for f in (primary, other)]
+    # Same model on the other provider before the other model anywhere: on
+    # 2 Nov Cerebras answered gpt-oss with 429 "high traffic" and timeouts,
+    # and the next entry (Cerebras qwen) failed the script ("is his name
+    # Michael?"). gpt-oss on Groq keeps the behaviour the script was tested on.
+    return [(p, f) for f in (primary, other) for p in order if os.environ.get(_PROVIDERS[p]["key_env"])]
 
 
 def _make_llm():
