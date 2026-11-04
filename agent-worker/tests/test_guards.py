@@ -104,3 +104,141 @@ def test_other_voice_vendors_get_a_deepgram_backup():
     wrapped = agent._with_tts_fallback(cartesia.TTS(model="sonic-3.6", api_key="x", emotion="excited"))
     assert isinstance(wrapped, agent._tts.FallbackAdapter)
     assert isinstance(wrapped._tts_instances[1], agent.deepgram.TTS)
+
+
+def test_cartesia_socket_swap_hands_out_the_fast_one():
+    import asyncio
+
+    os.environ.setdefault("CARTESIA_API_KEY", "x")
+    agent.TTS_PROVIDER = "cartesia"
+    closed = []
+    try:
+        tts = agent._build_tts()
+    finally:
+        agent.TTS_PROVIDER = "deepgram"
+    pool = tts._pool
+
+    async def close(ws):
+        closed.append(ws)
+
+    async def scenario(idle):
+        pool._close_cb = close
+        pool._connections["slow"] = __import__("time").time()
+        if idle:
+            pool._available.add("slow")
+        tts._swap_socket("slow", "fast")
+        got = await pool.get(timeout=1)
+        if not idle:
+            pool.put("slow")  # the sentence on the slow socket ends
+        pool.put(got)
+        return got, await pool.get(timeout=1)
+
+    # Idle: the next sentence uses the fast socket and the slow one gets closed.
+    assert asyncio.run(scenario(True)) == ("fast", "fast")
+    assert closed == ["slow"]
+    # Mid-sentence: the slow socket stays usable, then is closed when returned.
+    pool._available.clear()
+    pool._connections.clear()
+    closed.clear()
+    assert asyncio.run(scenario(False)) == ("fast", "fast")
+    assert closed == ["slow"]
+
+
+def test_voicemail_words_overturn_an_early_human_verdict():
+    for greeting in [
+        "Hello. You've reached zero four zero nine one two",  # 4 Nov call, verbatim
+        "Please leave a message.",
+        "Hi. Sorry I missed your call. Please leave a text message, and I will get back to you.",  # 4 Nov, verbatim
+        "Leave your name and number after the tone",
+        "The Telstra mobile you have called is switched off or not answering",
+        "The person you are calling can't take your call right now",
+    ]:
+        assert agent._amd_revises_human(greeting, 5.0), greeting
+
+
+def test_real_people_are_never_taken_for_a_mailbox():
+    for said in [
+        "Hello.", "Yes, I am.", "He's not available.", "She isn't available right now",
+        "Who is this?", "How did you get my number?", "I'm with AGL.", "Sorry, you've got the wrong person",
+        "I don't want to leave my details", "Sorry I missed your call earlier", "He can't come to the phone", "I'll get back to you", "Not interested, take me off your list",
+    ]:
+        assert not agent._amd_revises_human(said, 5.0), said
+
+
+def test_voicemail_revision_only_applies_early_in_the_call():
+    assert not agent._amd_revises_human("Can I leave a message for the specialist?", 90.0)
+    assert not agent._amd_revises_human("You've reached the right person", None)
+
+
+def test_later_words_revise_human_to_voicemail_once():
+    q = agent.Qualifier.__new__(agent.Qualifier)
+    q._call_id, q._amd_reported, q._amd_class, q.audio_live_at = "c", False, None, agent.time.monotonic()
+    spawned = []
+    q.spawn = lambda coro: (spawned.append(coro), coro.close())
+    q.report_amd("Hello.")
+    assert q._amd_class == "HUMAN"
+    q.report_amd("Still just talking")
+    assert q._amd_class == "HUMAN" and len(spawned) == 1
+    q.report_amd("Hello. You've reached zero four zero nine")
+    assert q._amd_class == "VOICEMAIL" and len(spawned) == 2
+    q.report_amd("Please leave a message.")
+    assert q._amd_class == "VOICEMAIL" and len(spawned) == 2
+
+
+def _dead_air_run(script):
+    """Runs a watch with short timers; `script(watch)` plays the call. Returns what it did."""
+    import asyncio
+
+    did = []
+    stopped = {"v": False}
+
+    async def hang_up():
+        did.append("hang_up")
+
+    async def go():
+        w = agent._DeadAirWatch(lambda: did.append("reprompt"), hang_up, lambda: stopped["v"], 0.02, 0.02)
+        await script(w, stopped)
+        w.cancel()
+
+    asyncio.run(go())
+    return did
+
+
+def test_dead_air_asks_once_then_cuts_the_call():
+    import asyncio
+
+    async def silent_line(w, _):
+        w.arm()
+        await asyncio.sleep(0.04)  # the re-check plays, the AI goes back to listening
+        w.arm()
+        await asyncio.sleep(0.04)
+
+    assert _dead_air_run(silent_line) == ["reprompt", "hang_up"]
+
+
+def test_dead_air_customer_speech_starts_it_over():
+    import asyncio
+
+    async def answers_the_check(w, _):
+        w.arm()
+        await asyncio.sleep(0.04)
+        w.customer_spoke()  # "yes, sorry, I'm here"
+        w.arm()
+        await asyncio.sleep(0.01)
+        w.customer_spoke()
+        await asyncio.sleep(0.04)
+
+    assert _dead_air_run(answers_the_check) == ["reprompt"]
+
+
+def test_dead_air_stays_out_of_transfers_and_closing():
+    import asyncio
+
+    async def on_hold(w, stopped):
+        w.arm()
+        stopped["v"] = True  # a transfer or closing line started
+        await asyncio.sleep(0.04)
+        w.arm()
+        await asyncio.sleep(0.04)
+
+    assert _dead_air_run(on_hold) == []

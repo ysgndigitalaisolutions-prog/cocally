@@ -66,3 +66,17 @@ Nithin was not happy with Deepgram's voice, heard ElevenLabs and Cartesia at pho
 Measured from the Sydney worker through the real plugin and the 4-socket race: 50 calls, 250 replies, no errors, median about 95 ms first audio, 2 of 50 calls stuck on a slow socket near 300 ms. ElevenLabs 269 ms, Deepgram Aura-2 200 ms in the plain HTTP test (79 ms live).
 
 New: `TTS_EMOTION`, and `_with_tts_fallback` puts Deepgram behind any other voice vendor. Tested with a broken Cartesia key: Deepgram speaks; the first line took 1.8 s from a Mac, so the first failure is a noticeable pause.
+
+## 4 Nov 2026: first 5 tenant leads, supervised
+
+Nithin confirmed the tenant's Do Not Call check and said go. Retry limits deferred on purpose ("keep a track"), still off. First 5 rows of the tenant's file loaded with Melbourne timezone and no state, name or suburb; started at 3:15pm Melbourne, inside legal hours in every zone. A watcher pauses on any FAILED call, any redial, or after 5 calls.
+
+First test call with the filter off (6aeaaf857b2dc1c26fa3dea7, on speaker): first "Hello" reached STT 6.5 s late against 50-245 ms on the last 10 calls. Cause unproven; ringback reaching STT without the filter is the leading guess.
+
+## 4 Nov 2026: first Australian calls, voicemail and silence fixes
+
+Telvoq: 5 mobiles in 0409 072xxx-073xxx all returned SIP 503 regardless of caller ID format; prefix 25 returns "auth required", prefix 45 stays. Caller ID on trunk `ST_fGuwwzkowYPr` is now `61285316375` (from Telvoq, no plus). Numbers in 0409 12x and 13x connected, both to mailboxes: the first app calls on the AU route. The 503 block is still unexplained.
+
+Both mailboxes passed as HUMAN, because AMD latched on the first word, and the second held the line 3 min 18 s until ended by hand. Fixes: machine-only phrases overturn HUMAN in the first 20 s; `_DeadAirWatch` re-checks after 8 s of silence and cuts the call 7 s later. Backtest: 47 calls, 261 customer lines, only the 2 real mailboxes flagged. Silence timing could not be replayed from transcripts.
+
+Also shipped: ElevenLabs Charlie as first voice backup, Deepgram second; `_hunt_fast_socket` retries Cartesia during ringing (one real sample stayed slow after a swap, so its benefit is unproven; a blocked loop at job start can make a fast socket look slow). First-reply 6.5 s STT delay seen once and not reproduced, no fix shipped. To restart on the VM always pin IMAGE_TAG.

@@ -89,6 +89,8 @@ TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram").lower()  # deepgram | deepg
 # at once and keeps the fastest. See _CartesiaTTS in _build_tts.
 CARTESIA_SLOW_CONNECT_MS = float(os.getenv("CARTESIA_SLOW_CONNECT_MS", "300"))
 CARTESIA_CONNECT_TRIES = int(os.getenv("CARTESIA_CONNECT_TRIES", "4"))
+# Rounds of CARTESIA_CONNECT_TRIES sockets to try for a fast one after a slow start.
+CARTESIA_HUNT_ROUNDS = int(os.getenv("CARTESIA_HUNT_ROUNDS", "6"))
 # STT + turn-taking. "flux" (default) is Deepgram's conversational model: it
 # decides end-of-turn itself from the audio and words (~260 ms after the person
 # stops) and emits an *eager* end-of-turn earlier still, which the framework
@@ -139,6 +141,8 @@ TTS_GAIN_DB = float(os.getenv("TTS_GAIN_DB", "4"))
 TTS_EMOTION = os.getenv("TTS_EMOTION", "")
 # Takes over if the chosen voice vendor fails, so a customer never hears silence.
 TTS_FALLBACK_VOICE = os.getenv("TTS_FALLBACK_VOICE", "aura-2-aries-en")
+# First backup when Cartesia fails. Default is ElevenLabs "Charlie" (Australian).
+TTS_FALLBACK_ELEVENLABS_VOICE = os.getenv("TTS_FALLBACK_ELEVENLABS_VOICE", "IKne3meq5aSn9XLyUdCD")
 
 
 def _apply_gain(frame: rtc.AudioFrame, gain_db: float) -> rtc.AudioFrame:
@@ -356,6 +360,30 @@ _VOICEMAIL_PATTERNS = re.compile(
     r"|message bank",
     re.I,
 )
+# Can overturn an earlier HUMAN. Narrower than the patterns above: a person can
+# say "he's not available", but not "after the tone". 4 Nov: "Hello. You've
+# reached zero four..." was HUMAN from "Hello." and the AI talked to the mailbox.
+_MACHINE_ONLY_PATTERNS = re.compile(
+    r"you'?ve reached"
+    r"|you have reached"
+    r"|(leave|record) (me )?(a|your) ((text|voice|short|brief|quick) )?(message|name)"
+    r"|after the (tone|beep)"
+    r"|at the (tone|beep)"
+    r"|please record"
+    r"|unable to take your call"
+    r"|can'?t take your call"
+    r"|message bank"
+    r"|(mobile|number|person|customer) you (have |are )?(called|calling|dialled|dialed)"
+    r"|switched off or not answering",
+    re.I,
+)
+# How long after pick-up later words can still overturn a HUMAN verdict.
+AMD_REVISE_WINDOW_S = 20.0
+# Silence after the AI stops talking before it checks, then before it cuts the call.
+DEAD_AIR_REPROMPT_S = float(os.getenv("DEAD_AIR_REPROMPT_S", "8"))
+DEAD_AIR_HANG_UP_S = float(os.getenv("DEAD_AIR_HANG_UP_S", "7"))
+DEAD_AIR_REPROMPT_LINE = "Hello, are you still there?"
+DEAD_AIR_GOODBYE_LINE = "I can't hear you, so I'll try another time. Goodbye."
 _IVR_PATTERNS = re.compile(
     r"press (one|two|three|four|five|six|seven|eight|nine|zero|[0-9*#])"
     r"|for (sales|service|support|accounts|billing|enquiries|reception)"
@@ -366,6 +394,51 @@ _IVR_PATTERNS = re.compile(
     r"|calls may be (monitored|recorded) for",
     re.I,
 )
+
+
+class _DeadAirWatch:
+    """Nobody is responding: ask once, then cut the call.
+
+    Nothing else ends a call that goes quiet. 4 Nov: a mailbox greeting passed as
+    a person, the AI asked a question and held the line for 3 min 18 s until it
+    was cut by hand. Covers a phone put down as well as a mailbox. Any customer
+    speech starts it over. It only reads call state, so it cannot delay a reply."""
+
+    def __init__(self, reprompt, hang_up, stopped, reprompt_s: float, hang_up_s: float) -> None:  # noqa: ANN001
+        self._reprompt, self._hang_up, self._stopped = reprompt, hang_up, stopped
+        self._reprompt_s, self._hang_up_s = reprompt_s, hang_up_s
+        self._asked = False
+        self._task: asyncio.Task | None = None
+
+    def arm(self) -> None:
+        self.cancel()
+        if not self._stopped():
+            self._task = asyncio.create_task(self._wait())
+
+    def cancel(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+    def customer_spoke(self) -> None:
+        self._asked = False
+        self.cancel()
+
+    async def _wait(self) -> None:
+        await asyncio.sleep(self._hang_up_s if self._asked else self._reprompt_s)
+        if self._stopped():
+            return
+        if self._asked:
+            await self._hang_up()
+        else:
+            self._asked = True
+            self._reprompt()
+
+
+def _amd_revises_human(text: str, seconds_live: float | None) -> bool:
+    """True when later words prove an earlier HUMAN verdict was a mailbox. Only
+    early in the call: "can I leave a message?" a minute in is a real person."""
+    return seconds_live is not None and seconds_live <= AMD_REVISE_WINDOW_S and bool(_MACHINE_ONLY_PATTERNS.search(text))
 
 
 def _classify_amd(text: str) -> str:
@@ -1139,6 +1212,21 @@ class Qualifier(Agent):
 
     # ── Opt-out rail ───────────────────────────────────────────────────────
 
+    async def hang_up_on_silence(self) -> None:
+        """Say goodbye and cut the call: nobody answered the AI or its re-check."""
+        if self._closing or self._transfer_triggered:
+            return
+        self._closing = True
+        self._transfer_triggered = True
+        logger.warning("no response after re-check -> hanging up (call=%s)", self._call_id)
+        if self.session_ref is not None:
+            try:
+                await asyncio.wait_for(self.session_ref.say(DEAD_AIR_GOODBYE_LINE, allow_interruptions=False), timeout=8.0)
+            except Exception as e:  # noqa: BLE001 — the hang-up must still happen
+                logger.warning("silence goodbye failed: %s", e)
+        await _drop_customer_leg(self._ctx, self._call_id)
+        self._ctx.shutdown(reason="no response")
+
     async def close_for_opt_out(self, closing_line: str | None) -> None:
         """Honour a server-side opt-out.
 
@@ -1217,16 +1305,21 @@ class Qualifier(Agent):
 
     def report_amd(self, text: str | None) -> None:
         """Classify and report, fire-and-forget. Once per call, except that a
-        SILENCE guess is revised the first time the customer is transcribed:
-        29 Sep 04:48 the first "Yeah" was never transcribed, SILENCE fired 6 s
-        after the greeting, and a full conversation was booked as NO_ANSWER."""
+        SILENCE guess is revised the first time the customer is transcribed
+        (29 Sep 04:48: the first "Yeah" was never transcribed, SILENCE fired 6 s
+        after the greeting, and a full conversation was booked as NO_ANSWER),
+        and a HUMAN guess is revised by words only a machine says. A real person
+        therefore never waits for this; a mailbox is caught a moment later."""
         if not self._call_id:
             return
         if self._amd_reported:
-            if not (self._amd_class == "SILENCE" and text):
+            live_s = time.monotonic() - self.audio_live_at if self.audio_live_at else None
+            revise_human = self._amd_class == "HUMAN" and bool(text) and _amd_revises_human(text, live_s)
+            if not (revise_human or (self._amd_class == "SILENCE" and text)):
                 return
+        was_human = self._amd_class == "HUMAN"
         self._amd_reported = True
-        amd_class = _classify_amd(text) if text else "SILENCE"
+        amd_class = "VOICEMAIL" if was_human else (_classify_amd(text) if text else "SILENCE")
         self._amd_class = amd_class
         started = self.audio_live_at
         latency_ms = int(max(0.0, (time.monotonic() - started)) * 1000) if started else None
@@ -2034,12 +2127,27 @@ async def _no_agent_close(
 
 
 def _with_tts_fallback(primary):  # noqa: ANN001, ANN202
-    """Deepgram backs up any other voice vendor for the whole call. It is already
-    the STT vendor, so the outage that takes it away ends the call anyway."""
+    """ElevenLabs then Deepgram back up Cartesia for the whole call, so a customer
+    never hears silence. Deepgram is already the STT vendor, so the outage that
+    takes it away ends the call anyway."""
     if isinstance(primary, deepgram.TTS):
         return primary
-    backup = deepgram.TTS(model=TTS_FALLBACK_VOICE, base_url=f"https://{DEEPGRAM_HOST}/v1/speak")
-    return _tts.FallbackAdapter([primary, backup])
+    chain = [primary]
+    if primary.provider != "ElevenLabs" and os.environ.get("ELEVENLABS_API_KEY"):
+        try:
+            from livekit.plugins import elevenlabs
+
+            chain.append(
+                elevenlabs.TTS(
+                    model="eleven_flash_v2_5",
+                    voice_id=TTS_FALLBACK_ELEVENLABS_VOICE,
+                    api_key=os.environ["ELEVENLABS_API_KEY"],
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("elevenlabs backup unavailable (%s)", e)
+    chain.append(deepgram.TTS(model=TTS_FALLBACK_VOICE, base_url=f"https://{DEEPGRAM_HOST}/v1/speak"))
+    return _tts.FallbackAdapter(chain)
 
 
 def _build_tts():  # noqa: ANN202 — plugin TTS types differ
@@ -2100,8 +2208,56 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
 
                     asyncio.create_task(_discard())
                     ws = winner.result()
-                    logger.info("cartesia websocket open %.0f ms (fastest of %d)%s", took_ms, len(tasks), "" if took_ms <= CARTESIA_SLOW_CONNECT_MS else ": all far back-end")
+                    slow = took_ms >= CARTESIA_SLOW_CONNECT_MS
+                    logger.info("cartesia websocket open %.0f ms (fastest of %d)%s", took_ms, len(tasks), ": all far back-end" if slow else "")
+                    if slow:
+                        self._hunt_task = asyncio.create_task(self._hunt_fast_socket(ws))
                     return ws
+
+                async def _hunt_fast_socket(self, slow_ws) -> None:  # noqa: ANN001
+                    """A slow start is often not a far back-end: at the start of a job the
+                    event loop is busy, so every socket looks slow and the race above picks
+                    one blindly (4 Nov: all 3 real calls, against 2 in 50 in a quiet test).
+                    Keep trying while the phone rings, once the loop is quiet, and swap a
+                    fast socket in. The call never waits on this."""
+                    parent = super()._connect_ws
+
+                    async def timed() -> tuple:
+                        t0 = time.perf_counter()
+                        ws = await parent(5.0)
+                        return ws, (time.perf_counter() - t0) * 1000
+
+                    try:
+                        for attempt in range(1, CARTESIA_HUNT_ROUNDS + 1):
+                            await asyncio.sleep(0.5)
+                            fast, losers = None, []
+                            tasks = [asyncio.create_task(timed()) for _ in range(CARTESIA_CONNECT_TRIES)]
+                            for r in await asyncio.gather(*tasks, return_exceptions=True):
+                                if isinstance(r, BaseException):
+                                    continue
+                                if fast is None and r[1] < CARTESIA_SLOW_CONNECT_MS:
+                                    fast = r
+                                else:
+                                    losers.append(r[0])
+                            for loser in losers:
+                                await loser.close()
+                            if fast is None:
+                                continue
+                            self._swap_socket(slow_ws, fast[0])
+                            logger.info("cartesia swapped to a fast socket: %.0f ms open, hunt round %d", fast[1], attempt)
+                            return
+                        logger.warning("cartesia: no fast socket after %d rounds", CARTESIA_HUNT_ROUNDS)
+                    except Exception as e:  # noqa: BLE001 — the slow socket still works
+                        logger.warning("cartesia socket hunt failed: %s", e)
+
+                def _swap_socket(self, slow_ws, fast_ws) -> None:  # noqa: ANN001
+                    pool = self._pool
+                    pool._connections[fast_ws] = time.time()
+                    pool._available.add(fast_ws)
+                    if slow_ws in pool._available:
+                        pool.remove(slow_ws)
+                    elif slow_ws in pool._connections:
+                        pool._retired.add(slow_ws)  # in use: closed by put() when the sentence ends
 
             return _CartesiaTTS(
                 model="sonic-3.6",
@@ -2681,11 +2837,23 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         if text and getattr(event, "is_final", False):
             logger.info("final transcript %r (call=%s)", text[:120], call_id)
 
+    dead_air = _DeadAirWatch(
+        reprompt=lambda: session.say(DEAD_AIR_REPROMPT_LINE),
+        hang_up=qualifier.hang_up_on_silence,
+        stopped=lambda: qualifier.closing or qualifier._transfer_triggered,
+        reprompt_s=DEAD_AIR_REPROMPT_S,
+        hang_up_s=DEAD_AIR_HANG_UP_S,
+    )
+
     @session.on("agent_state_changed")
     def _on_agent_state(event) -> None:  # noqa: ANN001 — livekit-agents event type
         nonlocal greeted, awaiting_reply
         old, new = getattr(event, "old_state", ""), getattr(event, "new_state", "")
         logger.info("agent %s -> %s (call=%s)", old, new, call_id)
+        if new == "speaking":
+            dead_air.cancel()
+        elif new == "listening" and old == "speaking":
+            dead_air.arm()
         if not greeted and new == "speaking" and qualifier.audio_live_at is not None:
             greeted = True
             qualifier.spawn(_post_event(call_id, "greeting", (time.monotonic() - qualifier.audio_live_at) * 1000, "answer to first AI audio"))
@@ -2720,6 +2888,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             except Exception as e:  # noqa: BLE001 — never let diagnostics break a call
                 logger.debug("stt gate probe failed: %s", e)
         if new == "speaking":
+            dead_air.customer_spoke()
             qualifier.heard_speech = True
             _cancel_stall()
             if not awaiting_reply:
@@ -2728,6 +2897,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             speech_ended_at = time.monotonic()
             awaiting_reply = True
             _arm_stall()
+            dead_air.arm()
 
     @session.on("metrics_collected")
     def _on_metrics(event) -> None:  # noqa: ANN001 — livekit-agents event type
@@ -2825,8 +2995,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # AMD from the FIRST transcript we see — interim partials included,
         # which is the whole point (waiting for `conversation_item_added`, i.e.
         # a *finalised* turn, would give up most of the latency advantage over a
-        # carrier classifier). `report_amd` latches, so the later partials and
-        # the final turn are no-ops.
+        # carrier classifier). `report_amd` latches, so later partials and the
+        # final turn are no-ops unless they prove the first guess wrong.
         @session.on("user_input_transcribed")
         def _on_transcript(event) -> None:  # noqa: ANN001 — livekit-agents event type
             text = (getattr(event, "transcript", "") or "").strip()
