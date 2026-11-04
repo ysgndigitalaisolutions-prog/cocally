@@ -2839,7 +2839,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     dead_air = _DeadAirWatch(
         reprompt=lambda: session.say(DEAD_AIR_REPROMPT_LINE),
-        hang_up=qualifier.hang_up_on_silence,
+        hang_up=lambda: qualifier.hang_up_on_silence(),  # qualifier is created further down
         stopped=lambda: qualifier.closing or qualifier._transfer_triggered,
         reprompt_s=DEAD_AIR_REPROMPT_S,
         hang_up_s=DEAD_AIR_HANG_UP_S,

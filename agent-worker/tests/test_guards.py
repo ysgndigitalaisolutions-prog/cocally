@@ -242,3 +242,27 @@ def test_dead_air_stays_out_of_transfers_and_closing():
         await asyncio.sleep(0.04)
 
     assert _dead_air_run(on_hold) == []
+
+
+def test_entrypoint_builds_nothing_from_qualifier_before_it_exists():
+    # 4 Nov: `hang_up=qualifier.hang_up_on_silence` ran before `qualifier = ...`
+    # and every call crashed at pick-up. Handlers and lambdas run later and are fine.
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(agent))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "entrypoint")
+    assigned = min(
+        n.lineno for n in ast.walk(fn)
+        if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "qualifier" for t in n.targets)
+    )
+    deferred = set()
+    for n in ast.walk(fn):
+        if isinstance(n, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef)) and n is not fn:
+            deferred.update(id(c) for c in ast.walk(n))
+    early = [
+        n.lineno for n in ast.walk(fn)
+        if isinstance(n, ast.Name) and n.id == "qualifier" and isinstance(n.ctx, ast.Load)
+        and n.lineno < assigned and id(n) not in deferred
+    ]
+    assert not early, f"qualifier read before it is assigned, lines {early}"
