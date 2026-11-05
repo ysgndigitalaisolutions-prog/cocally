@@ -374,13 +374,21 @@ _MACHINE_ONLY_PATTERNS = re.compile(
     r"|can'?t take your call"
     r"|message bank"
     r"|(mobile|number|person|customer) you('?re|'?ve| are| have)? (called|calling|dialled|dialed|trying to reach) (is (not|un|switched|currently|busy)|isn'?t|has|cannot|can'?t)"
-    r"|switched off or not answering",
+    r"|switched off or not answering"
+    r"|(mobile|phone|number)( phone)? is not monitored"
+    r"|thank you for getting in touch",
     re.I,
 )
 # The carrier's gate in front of the handset, agreed with the vendor: "To connect
 # your call, press two." The digit changes on every prompt.
+# With the noise filter on, or the greeting playing over it, often only the tail
+# survives ("press seven.", 5 Nov, 8 calls) and no final transcript ever comes.
+# So a short phrase ending in "press <digit>" counts too, partials included.
 _GATE_PROMPT = re.compile(r"to connect (your|the) call", re.I)
-_GATE_DIGIT = re.compile(r"to connect (?:your|the) call,? press (zero|one|two|three|four|five|six|seven|eight|nine|\d)\b", re.I)
+_GATE_DIGIT = re.compile(r"\bpress (zero|one|two|three|four|five|six|seven|eight|nine|\d)[.!?]?\s*$", re.I)
+GATE_PROMPT_MAX_WORDS = 9
+# The gate re-prompts about every 9 s. A partial and its final are one prompt.
+GATE_REPRESS_S = 4.0
 _GATE_WORDS = {w: str(i) for i, w in enumerate("zero one two three four five six seven eight nine".split())}
 GATE_MAX_PRESSES = 3
 # After pressing: no word from anyone in this long means nobody picked up.
@@ -447,9 +455,10 @@ class _DeadAirWatch:
 
 
 def _gate_digit(text: str) -> str | None:
-    """The digit a connect gate asks for, or None if this is not a full prompt."""
+    """The digit a connect gate asks for, or None. A long sentence or a menu
+    ("press one for sales") is not the gate."""
     m = _GATE_DIGIT.search(text)
-    if not m:
+    if not m or len(text.split()) > GATE_PROMPT_MAX_WORDS:
         return None
     return _GATE_WORDS.get(m.group(1).lower(), m.group(1))
 
@@ -805,6 +814,9 @@ class Qualifier(Agent):
         # Connect gate: digit pressed, the handset has not spoken yet.
         self.awaiting_connect = False
         self.gate_presses = 0
+        self._gate_last_press = (None, 0.0)
+        # A person has said something other than the gate: stop looking for it.
+        self.customer_spoke = False
         self.opening_line: str | None = None
         self._gate_timeout: asyncio.Task | None = None
         # The customer's latest finished turn (see on_user_turn_completed).
@@ -1065,8 +1077,12 @@ class Qualifier(Agent):
         """Press what the gate asked for, then stay silent until the handset
         speaks: the greeting already went to the gate. What answers next gets a
         fresh person-or-machine decision."""
-        if self._closing or self._transfer_triggered or self.gate_presses >= GATE_MAX_PRESSES:
+        if self._closing or self._transfer_triggered or self.customer_spoke or self.gate_presses >= GATE_MAX_PRESSES:
             return
+        last_digit, last_at = self._gate_last_press
+        if digit == last_digit and time.monotonic() - last_at < GATE_REPRESS_S:
+            return
+        self._gate_last_press = (digit, time.monotonic())
         self.gate_presses += 1
         self.awaiting_connect = True
         self.heard_speech = False
@@ -1096,13 +1112,16 @@ class Qualifier(Agent):
         self._closing = True
         self._transfer_triggered = True
         logger.warning("connect gate: nobody spoke after the digit -> hanging up (call=%s)", self._call_id)
+        if self._call_id:
+            await _post_amd(self._call_id, "IVR", None)
         await _drop_customer_leg(self._ctx, self._call_id)
         self._ctx.shutdown(reason="no answer after connect gate")
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:  # noqa: ANN001
         self.last_user_text = (getattr(new_message, "text_content", None) or "").strip()
-        if _GATE_PROMPT.search(self.last_user_text):
+        if _GATE_PROMPT.search(self.last_user_text) or _gate_digit(self.last_user_text) is not None:
             raise StopResponse()  # the gate, not a person: never a turn for the model
+        self.customer_spoke = True
         if self.awaiting_connect:
             # The first words from the handset. They never heard our greeting.
             self.awaiting_connect = False
@@ -3076,13 +3095,14 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             text = (getattr(event, "transcript", "") or "").strip()
             if not text:
                 return
-            if _GATE_PROMPT.search(text):
+            digit = None if qualifier.customer_spoke else _gate_digit(text)
+            if digit is not None:
                 # Not a person and not a mailbox: says nothing about who answers next.
-                digit = _gate_digit(text) if getattr(event, "is_final", False) else None
-                if digit is not None:
-                    _cancel_stall()
-                    dead_air.cancel()
-                    qualifier.spawn(qualifier.press_gate(digit))
+                _cancel_stall()
+                dead_air.cancel()
+                qualifier.spawn(qualifier.press_gate(digit))
+                return
+            if _GATE_PROMPT.search(text):
                 return
             qualifier.report_amd(text)
 

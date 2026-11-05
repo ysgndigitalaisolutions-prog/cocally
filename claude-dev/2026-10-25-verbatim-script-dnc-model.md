@@ -97,3 +97,7 @@ Also shipped: ElevenLabs Charlie as first voice backup, Deepgram second; `_hunt_
 - Calls page is full width with a popup, shows caller ID and plain results. Score, latency and compliance panels removed from it.
 - Rate card shows source and confidence. Billing checked in the browser: Google `cocally` project only, Oct INR 7,507.52; Gemini token rates confirmed. LiveKit, Cartesia, Deepgram, Atlas not yet read. Telvoq is not our cost.
 - 5 calls on 5 Nov were wrongly saved as answered by a person (4 gates, 1 business message); records not corrected yet. Google lists Gemini 2.5 Flash as retired 20 Oct 2026; one failure with fallback seen on 5 Nov, cause unchecked.
+
+## 5 Nov 2026: gate tail, instant redial
+
+With the filter on only "press seven." reached STT on 8 gate calls, as partials, so the gate press never fired and the AI looped "Sorry, I didn't catch that". Gate detection now takes a short phrase ending "press <digit>", partials included, debounced. The 3-at-once test also rang 2 people twice within a minute: an answered call set no wait. Answered now waits 24 h and no retry is under 30 min. LiveKit billed 185 SIP minutes for October against 25.6 in our database: unexplained.

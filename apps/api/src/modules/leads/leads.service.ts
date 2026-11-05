@@ -43,6 +43,14 @@ const DEFAULT_RETRY_MATRIX: RetryRule[] = [
  * dialling real lists.
  */
 const ENFORCE_ATTEMPT_LIMITS = false;
+/**
+ * No lead is rung again sooner than this, whatever a campaign's rules say. 5 Nov:
+ * two people were called twice inside a minute, one after an answered call, which
+ * had no wait at all.
+ */
+const MIN_RETRY_MINUTES = 30;
+/** After a person answered and nobody logged an outcome. A logged outcome overrides this. */
+const ANSWERED_RETRY_MINUTES = 24 * 60;
 
 /** How each call outcome reads to a supervisor when it is the reason a lead stopped being dialled. */
 const OUTCOME_LABELS: Record<CallOutcome, string> = {
@@ -361,6 +369,7 @@ export class LeadsService {
       if (lead.state_ === 'FRESH' || lead.state_ === 'ATTEMPTED') {
         this.transition(lead, 'CONTACTED', 'Human answered');
       }
+      lead.nextAttemptAt = new Date(Date.now() + ANSWERED_RETRY_MINUTES * 60 * 1000);
       await lead.save();
       return;
     }
@@ -396,7 +405,7 @@ export class LeadsService {
     }
 
     if (lead.state_ === 'FRESH') this.transition(lead, 'ATTEMPTED', 'First attempt made');
-    let nextAt = new Date(Date.now() + rule.delayMinutes * 60 * 1000);
+    let nextAt = new Date(Date.now() + Math.max(rule.delayMinutes, MIN_RETRY_MINUTES) * 60 * 1000);
     if (rule.shiftTimeBand) {
       // Push into a different time band: add 4h so a morning miss retries in the afternoon.
       nextAt = new Date(nextAt.getTime() + 4 * 60 * 60 * 1000);

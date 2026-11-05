@@ -35,6 +35,8 @@ describe('final call classification', () => {
     expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, customerLines: gate })).toBe('IVR');
     expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, customerLines: [...gate, say('Hello?', 25)] })).toBe('HUMAN');
     expect(finalAmdClass({ bridged: false, customerLines: [...gate, say('Please leave a message.', 25)] })).toBe('VOICEMAIL');
+    expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, customerLines: [say('press seven.')] })).toBe('IVR');
+    expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, customerLines: [say('As this mobile phone is not monitored, please email us.')] })).toBe('VOICEMAIL');
   });
 
   it('never calls an unclassified silent call a person', () => {

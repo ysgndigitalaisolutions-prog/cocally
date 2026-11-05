@@ -298,9 +298,14 @@ def test_connect_gate_digit_is_read_from_the_prompt():
         ("To connect your call, press two.", "2"),
         ("to connect your call press 5", "5"),
         ("To connect your call, press zero.", "0"),
+        ("press seven.", "7"),  # all that survives with the filter on, 5 Nov
+        ("your call, press nine", "9"),
     ]:
         assert agent._gate_digit(said) == digit, said
-    for said in ["To connect your call", "To connect your call, press", "Press two for sales", "Hello?", "press two"]:
+    for said in [
+        "To connect your call", "To connect your call, press", "Press two for sales", "Hello?",
+        "I think you told me I should go and press two",
+    ]:
         assert agent._gate_digit(said) is None, said
 
 
@@ -310,6 +315,7 @@ def _gate_qualifier(monkey_ctx):
     q._closing = q._transfer_triggered = q.awaiting_connect = q.heard_speech = False
     q._amd_reported, q._amd_class = True, "HUMAN"
     q.gate_presses, q._gate_timeout, q.audio_live_at = 0, None, 0.0
+    q._gate_last_press, q.customer_spoke = (None, 0.0), False
     q.opening_line = "Hello, how are you doing today?"
     return q
 
@@ -329,10 +335,32 @@ def test_gate_press_sends_the_digit_and_waits_for_the_handset():
         q = _gate_qualifier(ctx)
         await q.press_gate("2")
         assert q.awaiting_connect and not q._amd_reported and q._amd_class is None
-        for _ in range(4):
-            await q.press_gate("7")  # the gate re-prompts: capped
+        await q.press_gate("2")  # the final of the same prompt: not pressed twice
+        assert len(sent) == 1
+        for d in "7890":
+            await q.press_gate(d)  # the gate re-prompts with new digits: capped
         q._gate_timeout.cancel()
         return q
 
     q = asyncio.run(go())
     assert sent[0] == (2, "2") and len(sent) == agent.GATE_MAX_PRESSES and q.gate_presses == agent.GATE_MAX_PRESSES
+
+
+def test_gate_is_ignored_once_a_person_has_spoken():
+    import asyncio
+    from types import SimpleNamespace
+
+    sent = []
+
+    async def dtmf(code, digit):
+        sent.append(digit)
+
+    q = _gate_qualifier(SimpleNamespace(room=SimpleNamespace(local_participant=SimpleNamespace(publish_dtmf=dtmf))))
+    q.customer_spoke = True
+    asyncio.run(q.press_gate("2"))
+    assert sent == [] and not q.awaiting_connect
+
+
+def test_machine_recordings_overturn_human():
+    assert agent._amd_revises_human("As this mobile phone is not monitored, can you call us", 5.0)
+    assert agent._amd_revises_human("Thank you for getting in touch with Solar Boat.", 5.0)
