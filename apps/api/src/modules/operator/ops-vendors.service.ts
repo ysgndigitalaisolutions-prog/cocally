@@ -32,14 +32,14 @@ const CACHE_MS = 5 * 60_000;
 
 const VENDORS: Array<{ id: VendorId; name: string; usedFor: string; balance: string; account: string | null; billingUrl: string | null }> = [
   { id: 'google', name: 'Google Cloud', usedFor: 'Server, Gemini AI, recordings', balance: 'Our server has no billing access', account: 'ysgndigitalaisolutions@gmail.com', billingUrl: 'https://console.cloud.google.com/billing/01E15E-A27387-92236C' },
-  { id: 'atlas', name: 'MongoDB Atlas', usedFor: 'Main database', balance: 'No key for its billing', account: null, billingUrl: 'https://cloud.mongodb.com' },
-  { id: 'livekit', name: 'LiveKit', usedFor: 'Call rooms and phone connection', balance: 'No balance API', account: null, billingUrl: 'https://cloud.livekit.io' },
+  { id: 'atlas', name: 'MongoDB Atlas', usedFor: 'Main database', balance: '$8.06 in October', account: "YSGN Digital's Org", billingUrl: 'https://cloud.mongodb.com' },
+  { id: 'livekit', name: 'LiveKit', usedFor: 'Call rooms and phone connection', balance: 'Build plan: $0, 1,000 SIP minutes a month', account: 'Project CoCally', billingUrl: 'https://cloud.livekit.io' },
   { id: 'telvoq', name: 'Telvoq', usedFor: 'Australian phone route', balance: 'Not billed to us', account: 'WhatsApp contact', billingUrl: null },
   { id: 'twilio', name: 'Twilio', usedFor: 'Indian test calls', balance: 'No Twilio key on our server', account: null, billingUrl: 'https://console.twilio.com' },
-  { id: 'deepgram', name: 'Deepgram', usedFor: 'Speech-to-text, last-resort voice', balance: 'Our key has no billing permission', account: 'ysgndigitalaisolutions@gmail.com', billingUrl: 'https://console.deepgram.com' },
-  { id: 'cartesia', name: 'Cartesia', usedFor: 'Main voice (Arlo)', balance: 'No balance API', account: null, billingUrl: 'https://play.cartesia.ai' },
+  { id: 'deepgram', name: 'Deepgram', usedFor: 'Speech-to-text, last-resort voice', balance: '$196.30 credit on 5 Nov', account: 'ysgndigitalaisolutions@gmail.com', billingUrl: 'https://console.deepgram.com' },
+  { id: 'cartesia', name: 'Cartesia', usedFor: 'Main voice (Arlo)', balance: 'Pro plan: 153,538 credits on 5 Nov; overage off', account: 'nithinyakateela@gmail.com', billingUrl: 'https://play.cartesia.ai/subscription' },
   { id: 'elevenlabs', name: 'ElevenLabs', usedFor: 'Backup voice', balance: 'Our key has no billing permission', account: null, billingUrl: 'https://elevenlabs.io/app/subscription' },
-  { id: 'cerebras', name: 'Cerebras', usedFor: 'Backup AI, summaries', balance: 'No balance API', account: null, billingUrl: 'https://cloud.cerebras.ai' },
+  { id: 'cerebras', name: 'Cerebras', usedFor: 'Backup AI, summaries', balance: '$18.94 on 5 Nov', account: 'YSGN Digital Innovative AI Solutions', billingUrl: 'https://cloud.cerebras.ai' },
   { id: 'groq', name: 'Groq', usedFor: 'Backup AI', balance: 'No balance API', account: null, billingUrl: 'https://console.groq.com/settings/billing' },
   { id: 'github', name: 'GitHub', usedFor: 'Code and deploys', balance: 'No key for its billing', account: 'Organisation ysgndigitalaisolutions-prog', billingUrl: 'https://github.com/settings/billing' },
 ];

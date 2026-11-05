@@ -5,27 +5,27 @@ import { useCallback, useEffect, useState } from 'react';
 import { fmtDateTime, LinkBox, Pill } from '@/components/ops/ui';
 import { OPS_OPERATOR_KEY, OPS_TOKEN_KEY, opsApi, opsError, type OperatorProfile } from '@/lib/ops-api';
 
-type Confidence = 'PUBLISHED' | 'ESTIMATE' | 'NOT_OURS';
+type Confidence = 'CONFIRMED' | 'ESTIMATE' | 'NOT_OURS';
 
 /** Measured on real AI calls, 5 Nov 2026 (15 calls, 15 AI minutes): a small sample. */
 const VOICE_CHARS_PER_AI_MIN = 638;
 const RING_SHARE_PER_AI_MIN = 0.3;
 
 const RATE_ROWS: Array<{ key: string; vendor: string; item: string; unit: string; confidence: Confidence; basis: string; perAiMin?: (v: number) => number }> = [
-  { key: 'sttPerMin', vendor: 'Deepgram', item: 'Speech-to-text (Nova-3)', unit: 'per AI min', confidence: 'PUBLISHED', basis: 'Pay-as-you-go streaming list price', perAiMin: (v) => v },
-  { key: 'llmPerMin', vendor: 'Google', item: 'Gemini 2.5 Flash', unit: 'per AI min', confidence: 'ESTIMATE', basis: '3.5 requests a minute × 1,824 tokens at $0.30 per 1M, plus a little output', perAiMin: (v) => v },
-  { key: 'ttsPer1kChars', vendor: 'Cartesia', item: 'Voice (Sonic)', unit: 'per 1,000 chars', confidence: 'ESTIMATE', basis: 'About 1 credit a character; $49 for 1.25M. Your plan may differ', perAiMin: (v) => (v * VOICE_CHARS_PER_AI_MIN) / 1000 },
-  { key: 'livekitAgentPerMin', vendor: 'LiveKit', item: 'Agent session', unit: 'per AI min', confidence: 'ESTIMATE', basis: '$0.01 is the Cloud agent rate. Our worker runs on our own server, so check the invoice', perAiMin: (v) => v },
-  { key: 'livekitSipPerMin', vendor: 'LiveKit', item: 'Phone line (SIP)', unit: 'per phone min', confidence: 'ESTIMATE', basis: 'From a forum reply, not a price list; ringing counts too. Check the invoice', perAiMin: (v) => v * (1 + RING_SHARE_PER_AI_MIN) },
-  { key: 'livekitWebrtcPerMin', vendor: 'LiveKit', item: 'Agent browser', unit: 'per human min', confidence: 'ESTIMATE', basis: 'Old value, not rechecked' },
-  { key: 'recordingPerMin', vendor: 'LiveKit', item: 'Recording', unit: 'per recorded min', confidence: 'ESTIMATE', basis: 'Old value, not rechecked', perAiMin: (v) => v },
+  { key: 'sttPerMin', vendor: 'Deepgram', item: 'Speech-to-text (Nova-3)', unit: 'per AI min', confidence: 'CONFIRMED', basis: 'Pay As You Go, paid from credit ($196.30 left). List price', perAiMin: (v) => v },
+  { key: 'llmPerMin', vendor: 'Google', item: 'Gemini 2.5 Flash', unit: 'per AI min', confidence: 'CONFIRMED', basis: 'Token rates match the Google bill; usage from 15 calls', perAiMin: (v) => v },
+  { key: 'ttsPer1kChars', vendor: 'Cartesia', item: 'Voice (Sonic)', unit: 'per 1,000 chars', confidence: 'CONFIRMED', basis: 'Pro plan: $5 for 100K credits. Startup is $0.039; overage is $0.065', perAiMin: (v) => (v * VOICE_CHARS_PER_AI_MIN) / 1000 },
+  { key: 'livekitAgentPerMin', vendor: 'LiveKit', item: 'Agent session', unit: 'per AI min', confidence: 'CONFIRMED', basis: 'No charge on the invoice: our worker runs on our own server', perAiMin: (v) => v },
+  { key: 'livekitSipPerMin', vendor: 'LiveKit', item: 'Phone line (SIP)', unit: 'per phone min', confidence: 'CONFIRMED', basis: '$0 on the Build plan, up to 1,000 minutes a month. A paid plan changes this', perAiMin: (v) => v * (1 + RING_SHARE_PER_AI_MIN) },
+  { key: 'livekitWebrtcPerMin', vendor: 'LiveKit', item: 'Agent browser', unit: 'per human min', confidence: 'CONFIRMED', basis: '$0 on the Build plan, up to 5,000 minutes a month' },
+  { key: 'recordingPerMin', vendor: 'LiveKit', item: 'Recording', unit: 'per recorded min', confidence: 'CONFIRMED', basis: '$0 on the Build plan, up to 60 transcode minutes a month', perAiMin: (v) => v },
   { key: 'telcoPerMin', vendor: 'Telvoq', item: 'Phone carrier', unit: 'per connected min', confidence: 'NOT_OURS', basis: 'Not billed to us', perAiMin: (v) => v },
-  { key: 'fixedMonthlyUsd', vendor: 'All', item: 'Server, database, plans', unit: 'per month', confidence: 'ESTIMATE', basis: 'Old figure; add up the real invoices' },
-  { key: 'inrPerUsd', vendor: 'Exchange rate', item: 'Rupees per US dollar', unit: '₹ per $', confidence: 'ESTIMATE', basis: 'Old value, not rechecked' },
+  { key: 'fixedMonthlyUsd', vendor: 'All', item: 'Google $79, Atlas $8, Cartesia $5', unit: 'per month', confidence: 'CONFIRMED', basis: 'From the bills, October 2026. LiveKit is $0 on Build', },
+  { key: 'inrPerUsd', vendor: 'Exchange rate', item: 'Rupees per US dollar', unit: '₹ per $', confidence: 'ESTIMATE', basis: 'Not rechecked' },
 ];
 
 const CONFIDENCE: Record<Confidence, { label: string; color: string }> = {
-  PUBLISHED: { label: 'Published price', color: 'var(--good)' },
+  CONFIRMED: { label: 'Confirmed', color: 'var(--good)' },
   ESTIMATE: { label: 'Estimate', color: 'var(--accent)' },
   NOT_OURS: { label: 'Not our cost', color: 'var(--text-dim)' },
 };
@@ -70,7 +70,7 @@ function RateCard() {
       <div>
         <h2 className="font-semibold">What each provider costs us</h2>
         <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-          US dollars, checked 5 Nov 2026. These drive every cost and margin figure. The invoices are the final word.
+          US dollars, from your accounts on 5 Nov 2026. These drive every cost and margin figure. Costs on the LiveKit lines start when a paid plan does.
         </p>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
