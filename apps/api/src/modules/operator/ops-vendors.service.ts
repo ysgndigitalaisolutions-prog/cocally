@@ -17,6 +17,8 @@ export interface VendorRow {
   keyDetail: string;
   /** Why no balance is shown. No vendor gives us one with today's keys. */
   balance: string;
+  /** Login that owns it, when we can prove it. Null means not confirmed. */
+  account: string | null;
   lastUsedAt: string | null;
   billingFailures24h: number;
   billingFailures7d: number;
@@ -28,15 +30,18 @@ export interface VendorRow {
 const DAY = 86_400_000;
 const CACHE_MS = 5 * 60_000;
 
-const VENDORS: Array<{ id: VendorId; name: string; usedFor: string; balance: string; billingUrl: string | null }> = [
-  { id: 'google', name: 'Google Cloud', usedFor: 'Server, Gemini AI, recordings', balance: 'Our server has no billing access', billingUrl: 'https://console.cloud.google.com/billing' },
-  { id: 'livekit', name: 'LiveKit', usedFor: 'Call rooms and phone connection', balance: 'No balance API', billingUrl: 'https://cloud.livekit.io' },
-  { id: 'telvoq', name: 'Telvoq', usedFor: 'Australian phone route', balance: 'No API; ask Telvoq', billingUrl: null },
-  { id: 'deepgram', name: 'Deepgram', usedFor: 'Speech-to-text, last-resort voice', balance: 'Our key has no billing permission', billingUrl: 'https://console.deepgram.com' },
-  { id: 'cartesia', name: 'Cartesia', usedFor: 'Main voice (Arlo)', balance: 'No balance API', billingUrl: 'https://play.cartesia.ai' },
-  { id: 'elevenlabs', name: 'ElevenLabs', usedFor: 'Backup voice', balance: 'Our key has no billing permission', billingUrl: 'https://elevenlabs.io/app/subscription' },
-  { id: 'cerebras', name: 'Cerebras', usedFor: 'Backup AI, summaries', balance: 'No balance API', billingUrl: 'https://cloud.cerebras.ai' },
-  { id: 'groq', name: 'Groq', usedFor: 'Backup AI', balance: 'No balance API', billingUrl: 'https://console.groq.com/settings/billing' },
+const VENDORS: Array<{ id: VendorId; name: string; usedFor: string; balance: string; account: string | null; billingUrl: string | null }> = [
+  { id: 'google', name: 'Google Cloud', usedFor: 'Server, Gemini AI, recordings', balance: 'Our server has no billing access', account: 'ysgndigitalaisolutions@gmail.com', billingUrl: 'https://console.cloud.google.com/billing/01E15E-A27387-92236C' },
+  { id: 'atlas', name: 'MongoDB Atlas', usedFor: 'Main database', balance: 'No key for its billing', account: null, billingUrl: 'https://cloud.mongodb.com' },
+  { id: 'livekit', name: 'LiveKit', usedFor: 'Call rooms and phone connection', balance: 'No balance API', account: null, billingUrl: 'https://cloud.livekit.io' },
+  { id: 'telvoq', name: 'Telvoq', usedFor: 'Australian phone route', balance: 'No API; ask Telvoq', account: 'WhatsApp contact', billingUrl: null },
+  { id: 'twilio', name: 'Twilio', usedFor: 'Indian test calls', balance: 'No Twilio key on our server', account: null, billingUrl: 'https://console.twilio.com' },
+  { id: 'deepgram', name: 'Deepgram', usedFor: 'Speech-to-text, last-resort voice', balance: 'Our key has no billing permission', account: 'ysgndigitalaisolutions@gmail.com', billingUrl: 'https://console.deepgram.com' },
+  { id: 'cartesia', name: 'Cartesia', usedFor: 'Main voice (Arlo)', balance: 'No balance API', account: null, billingUrl: 'https://play.cartesia.ai' },
+  { id: 'elevenlabs', name: 'ElevenLabs', usedFor: 'Backup voice', balance: 'Our key has no billing permission', account: null, billingUrl: 'https://elevenlabs.io/app/subscription' },
+  { id: 'cerebras', name: 'Cerebras', usedFor: 'Backup AI, summaries', balance: 'No balance API', account: null, billingUrl: 'https://cloud.cerebras.ai' },
+  { id: 'groq', name: 'Groq', usedFor: 'Backup AI', balance: 'No balance API', account: null, billingUrl: 'https://console.groq.com/settings/billing' },
+  { id: 'github', name: 'GitHub', usedFor: 'Code and deploys', balance: 'No key for its billing', account: 'Organisation ysgndigitalaisolutions-prog', billingUrl: 'https://github.com/settings/billing' },
 ];
 
 /**
@@ -102,15 +107,24 @@ export class OpsVendorsService {
         return { ok: false, detail: 'Rejected or unreachable' };
       }
     };
-    const [deepgram, cartesia, elevenlabs, cerebras, groq, lk] = await Promise.all([
+    const atlas = async () => {
+      try {
+        await this.callModel.db.db?.admin().ping();
+        return { ok: true, detail: 'Database answering' };
+      } catch {
+        return { ok: false, detail: 'Database not answering' };
+      }
+    };
+    const [deepgram, cartesia, elevenlabs, cerebras, groq, lk, db] = await Promise.all([
       probe('https://api.deepgram.com/v1/projects', { Authorization: `Token ${env.DEEPGRAM_API_KEY}` }, env.DEEPGRAM_API_KEY),
       probe('https://api.cartesia.ai/voices?limit=1', { 'X-API-Key': env.CARTESIA_API_KEY ?? '', 'Cartesia-Version': '2025-04-16' }, env.CARTESIA_API_KEY),
       probe('https://api.elevenlabs.io/v1/models', { 'xi-api-key': env.ELEVENLABS_API_KEY ?? '' }, env.ELEVENLABS_API_KEY),
       probe('https://api.cerebras.ai/v1/models', { Authorization: `Bearer ${env.CEREBRAS_API_KEY}` }, env.CEREBRAS_API_KEY),
       probe('https://api.groq.com/openai/v1/models', { Authorization: `Bearer ${env.GROQ_API_KEY}` }, env.GROQ_API_KEY),
       livekit(),
+      atlas(),
     ]);
-    return { deepgram, cartesia, elevenlabs, cerebras, groq, livekit: lk };
+    return { deepgram, cartesia, elevenlabs, cerebras, groq, livekit: lk, atlas: db };
   }
 
   /** Billing failures and last good use, read from real calls of the past 7 days. */
@@ -153,7 +167,7 @@ export class OpsVendorsService {
       }
       const onTelvoq = auLeads.has(call.leadId.toString());
       if (call.answeredAt) used('livekit', at);
-      if (call.answeredAt && onTelvoq) used('telvoq', at);
+      if (call.answeredAt) used(onTelvoq ? 'telvoq' : 'twilio', at);
       for (const line of t.workerLog ?? []) {
         const vendor = billingFailureVendor(line.detail ?? '');
         if (vendor && vendor !== 'unknown') fail(vendor, at, line.detail ?? '');

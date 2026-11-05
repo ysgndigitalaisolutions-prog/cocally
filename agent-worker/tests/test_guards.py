@@ -267,3 +267,27 @@ def test_entrypoint_builds_nothing_from_qualifier_before_it_exists():
         and n.lineno < assigned and id(n) not in deferred
     ]
     assert not early, f"qualifier read before it is assigned, lines {early}"
+
+
+def test_dead_air_hang_up_survives_the_goodbye_cancelling_the_timer():
+    # 5 Nov: the goodbye made the agent "speaking", which cancelled the watch's
+    # task, which was the task running the hang-up. The line stayed open.
+    import asyncio
+
+    done = []
+
+    async def go():
+        async def hang_up():
+            await asyncio.sleep(0.02)  # the goodbye playing
+            done.append("line dropped")
+
+        w = agent._DeadAirWatch(lambda: None, hang_up, lambda: False, 0.01, 0.01)
+        w.arm()
+        await asyncio.sleep(0.02)  # re-check asked
+        w.arm()
+        await asyncio.sleep(0.02)  # hang-up has started, goodbye playing
+        w.cancel()  # what agent_state_changed -> speaking does
+        await asyncio.sleep(0.05)
+
+    asyncio.run(go())
+    assert done == ["line dropped"]

@@ -1,4 +1,4 @@
-export type VendorId = 'google' | 'livekit' | 'telvoq' | 'deepgram' | 'cartesia' | 'elevenlabs' | 'cerebras' | 'groq';
+export type VendorId = 'google' | 'atlas' | 'livekit' | 'telvoq' | 'twilio' | 'deepgram' | 'cartesia' | 'elevenlabs' | 'cerebras' | 'groq' | 'github';
 
 const BILLING_ERROR =
   /(status|http|code|error|sip)[^\d\n]{0,16}402\b|payment required|insufficient[ _](funds|credits?|balance|quota)|out of credits|credits? (exhausted|exceeded)|exceeded your (current )?quota|billing[ _](is[ _])?(disabled|not[ _]enabled)|account (is )?suspended|delinquent/i;
@@ -10,7 +10,9 @@ const VENDOR_WORDS: Array<[VendorId, RegExp]> = [
   ['cerebras', /cerebras/i],
   ['groq', /groq/i],
   ['google', /vertex|gemini|googleapis|billing[ _]disabled/i],
+  ['atlas', /atlas|mongo/i],
   ['livekit', /livekit/i],
+  ['twilio', /twilio/i],
   ['telvoq', /telvoq|sip /i],
 ];
 

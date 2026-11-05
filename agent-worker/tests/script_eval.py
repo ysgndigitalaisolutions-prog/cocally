@@ -81,6 +81,9 @@ SCENARIOS = {
     "call_soon": ["Good.", "Can you call me back in ten minutes? I'm driving."],
     "language": ["Hello.", "Sorry, my English not good. You speak Hindi?"],
     "who": ["Who is this? I don't know any Daniel."],
+    "who_first": ["Hi. Who is this?", "Yes."],
+    "who_mid": ["Good.", "Yes.", "Sorry, who did you say you are?", "Electricity only."],
+    "where": ["Good.", "Where are you calling from?", "Yes."],
     "price_push": ["Good.", "Yes.", "Just tell me how much I'll save, give me a number.", "Electricity only."],
 }
 

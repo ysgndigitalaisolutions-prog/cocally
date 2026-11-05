@@ -409,6 +409,7 @@ class _DeadAirWatch:
         self._reprompt_s, self._hang_up_s = reprompt_s, hang_up_s
         self._asked = False
         self._task: asyncio.Task | None = None
+        self._hanging_up: asyncio.Task | None = None
 
     def arm(self) -> None:
         self.cancel()
@@ -429,7 +430,9 @@ class _DeadAirWatch:
         if self._stopped():
             return
         if self._asked:
-            await self._hang_up()
+            # Its own task: the goodbye makes the agent "speaking", which cancels
+            # this one (5 Nov: the goodbye played and the line never dropped).
+            self._hanging_up = asyncio.create_task(self._hang_up())
         else:
             self._asked = True
             self._reprompt()

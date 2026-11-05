@@ -11,6 +11,7 @@ interface Vendor {
   keyOk: boolean | null;
   keyDetail: string;
   balance: string;
+  account: string | null;
   lastUsedAt: string | null;
   billingFailures24h: number;
   billingFailures7d: number;
@@ -73,7 +74,7 @@ export default function OpsVendorsPage() {
       )}
       {rows && (
         <section className="card overflow-x-auto">
-          <table className="w-full min-w-[860px] text-sm">
+          <table className="w-full min-w-[1020px] text-sm">
             <thead>
               <tr className="text-left text-xs text-dim">
                 <th className="px-4 py-3 font-medium">Vendor</th>
@@ -82,6 +83,7 @@ export default function OpsVendorsPage() {
                 <th className="px-3 py-3 font-medium">Worked on a call</th>
                 <th className="px-3 py-3 text-right font-medium">Billing failures 24h / 7d</th>
                 <th className="px-3 py-3 font-medium">Balance</th>
+                <th className="px-3 py-3 font-medium">Account</th>
                 <th className="px-4 py-3" />
               </tr>
             </thead>
@@ -99,6 +101,7 @@ export default function OpsVendorsPage() {
                   <td className="px-3 py-3">{ago(v.lastUsedAt)}</td>
                   <td className="px-3 py-3 text-right tabular-nums">{v.billingFailures24h} / {v.billingFailures7d}</td>
                   <td className="px-3 py-3 text-xs text-dim">{v.balance}</td>
+                  <td className="px-3 py-3 text-xs break-all">{v.account ?? <span className="text-dim">Not confirmed</span>}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     {v.billingUrl && (
                       <a href={v.billingUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline">Billing</a>

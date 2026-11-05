@@ -116,7 +116,7 @@ If an answer is unclear, or they cut in before you finished a step, output that 
 
 /** The script's customer questions and answers, verbatim. */
 const playbook = (clientName: string) => [
-  { objection: 'Where are you calling from?', rebuttal: `Say: [Q1] "I'm calling from ${clientName}. We're an energy broker, and we compare retailers to find you a better offer." Then output the tag of the step you were on.` },
+  { objection: "Who is this? / Who's calling? / Where are you calling from?", rebuttal: `If you have not said step 1 yet, output [S1] alone: it already says who is calling. Otherwise say: [Q1] "I'm calling from ${clientName}, an energy broker." Then output the tag of the step you were on.` },
   { objection: 'Which country are you calling from? / Where are you located?', rebuttal: `Say: [Q2] "We're based in Collingwood, Melbourne, Australia." Then output the tag of the step you were on.` },
   { objection: "What's the offer? / How much can you save me?", rebuttal: 'Say: [Q3] "The offer depends on your meter type and current tariff. Give me a moment, and our energy specialist will review the details and explain the available offer to you." Then output the tag of the step you were on.' },
   { objection: "I'm not interested. / I'm happy with my current offer. / I've recently changed my energy company.", rebuttal: `Say: [Q4] "I understand. If you're happy to spare just two minutes, our specialist can explain the available offer so you can decide whether it's worth considering."` },
