@@ -261,7 +261,11 @@ NOISE_CANCELLATION = os.getenv("NOISE_CANCELLATION", "1") not in ("0", "false", 
 # livekit-agents 1.8 runs an automatic gain control stage on the room audio
 # before the VAD and STT see it. Switchable without a code change for A/B.
 AUTO_GAIN_CONTROL = os.getenv("AUTO_GAIN_CONTROL", "1") not in ("0", "false", "no")
-WORKER_IDLE_PROCESSES = int(os.getenv("WORKER_IDLE_PROCESSES", "2"))
+WORKER_IDLE_PROCESSES = int(os.getenv("WORKER_IDLE_PROCESSES", "5"))
+# Calls this worker takes at once. The library default refuses jobs at 70% CPU,
+# and starting processes alone passes that: on 5 Nov the fifth of 5 calls got no
+# AI until its line had already dropped. So capacity counts calls, not CPU.
+WORKER_MAX_CALLS = int(os.getenv("WORKER_MAX_CALLS", "6"))
 
 # Same variable the API reads (`config.floor.holdMusicUrl`). Set it in BOTH
 # environments: the API hands it to the agent's browser for hold, this worker
@@ -376,7 +380,10 @@ _MACHINE_ONLY_PATTERNS = re.compile(
     r"|(mobile|number|person|customer) you('?re|'?ve| are| have)? (called|calling|dialled|dialed|trying to reach) (is (not|un|switched|currently|busy)|isn'?t|has|cannot|can'?t)"
     r"|switched off or not answering"
     r"|(mobile|phone|number)( phone)? is not monitored"
-    r"|thank you for getting in touch",
+    r"|thank you for getting in touch"
+    r"|forwarded to (the )?(voicemail|message)"
+    r"|no message can be left"
+    r"|finished recording",
     re.I,
 )
 # The carrier's gate in front of the handset, agreed with the vendor: "To connect
@@ -813,6 +820,7 @@ class Qualifier(Agent):
         self.heard_speech = False
         # Connect gate: digit pressed, the handset has not spoken yet.
         self.awaiting_connect = False
+        self._handset_live = False
         self.gate_presses = 0
         self._gate_last_press = (None, 0.0)
         # A person has said something other than the gate: stop looking for it.
@@ -1089,6 +1097,7 @@ class Qualifier(Agent):
         self._amd_reported = False
         self._amd_class = None
         self.audio_live_at = time.monotonic()
+        self._handset_live = False
         logger.info("connect gate: pressing %s, try %d (call=%s)", digit, self.gate_presses, self._call_id)
         if self.session_ref is not None:
             try:
@@ -1403,6 +1412,15 @@ class Qualifier(Agent):
         therefore never waits for this; a mailbox is caught a moment later."""
         if not self._call_id:
             return
+        if self.awaiting_connect:
+            # After the digit the line is still connecting and ringing, so quiet
+            # is normal: `_gate_no_answer` ends it if nobody comes. Decisions run
+            # from the first word of whatever answered, not from the press.
+            if not text:
+                return
+            if not self._handset_live:
+                self._handset_live = True
+                self.audio_live_at = time.monotonic()
         if self._amd_reported:
             live_s = time.monotonic() - self.audio_live_at if self.audio_live_at else None
             revise_human = self._amd_class == "HUMAN" and bool(text) and _amd_revises_human(text, live_s)
@@ -2734,10 +2752,18 @@ def _make_llm():
     return _llm.FallbackAdapter(instances, attempt_timeout=LLM_FIRST_TOKEN_TIMEOUT_S, retry_interval=0.2)
 
 
+def _calls_load(server) -> float:  # noqa: ANN001
+    return len(server.active_jobs) / max(WORKER_MAX_CALLS, 1)
+
+
 def prewarm(proc: agents.JobProcess) -> None:
     """Load the VAD and end-of-turn models once per worker process, not once
     per call: ~1 s of model loading used to sit between "customer answered" and
     the first word on every single dial."""
+    # Otherwise each call imports these on its own event loop, up to 5.8 s, all at
+    # once when calls go out together.
+    from livekit.plugins import cartesia, elevenlabs, google  # noqa: F401
+
     proc.userdata["vad"] = silero.VAD.load(
         # Phone audio: a slightly higher threshold ignores line hiss without
         # missing a quiet speaker; short min-silence lets endpointing be fast.
@@ -3292,6 +3318,10 @@ if __name__ == "__main__":
             # Warm processes with models already loaded, so a burst of answered
             # calls does not queue behind model loading.
             num_idle_processes=WORKER_IDLE_PROCESSES,
+            load_fnc=_calls_load,
+            load_threshold=1.0,
+            # Warm-up imports the provider plugins; on 2 vCPUs a burst of them is slow.
+            initialize_process_timeout=45.0,
             **({"port": _port} if _port else {}),
         )
     )

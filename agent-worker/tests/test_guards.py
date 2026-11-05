@@ -173,6 +173,7 @@ def test_voicemail_revision_only_applies_early_in_the_call():
 
 def test_later_words_revise_human_to_voicemail_once():
     q = agent.Qualifier.__new__(agent.Qualifier)
+    q.awaiting_connect = False
     q._call_id, q._amd_reported, q._amd_class, q.audio_live_at = "c", False, None, agent.time.monotonic()
     spawned = []
     q.spawn = lambda coro: (spawned.append(coro), coro.close())
@@ -364,3 +365,45 @@ def test_gate_is_ignored_once_a_person_has_spoken():
 def test_machine_recordings_overturn_human():
     assert agent._amd_revises_human("As this mobile phone is not monitored, can you call us", 5.0)
     assert agent._amd_revises_human("Thank you for getting in touch with Solar Boat.", 5.0)
+
+
+def _after_press(seconds_ago=0.0):
+    import time
+
+    q = _gate_qualifier(None)
+    q._call_id, q.awaiting_connect, q._handset_live = "c1", True, False
+    q._amd_reported, q._amd_class = False, None
+    q.audio_live_at = time.monotonic() - seconds_ago
+    q.spawn = lambda coro: coro.close()
+    return q
+
+
+def test_quiet_after_the_gate_press_is_not_silence():
+    # 5 Nov: SILENCE fired 5 s after "press four" and cut a line still connecting.
+    q = _after_press()
+    q.report_amd(None)
+    assert not q._amd_reported and q._amd_class is None
+
+
+def test_voicemail_after_the_gate_is_timed_from_its_first_word():
+    # 5 Nov: the mailbox line came 21.7 s after the press, past the 20 s window,
+    # so the AI greeted the voicemail.
+    q = _after_press(seconds_ago=20.0)
+    q.report_amd("Your call has")
+    assert q._amd_class == "HUMAN"
+    q.report_amd("Your call has been forwarded to voicemail.")
+    assert q._amd_class == "VOICEMAIL"
+
+
+def test_more_machine_wording_overturns_human():
+    assert agent._amd_revises_human("No message can be left on this service.", 2.0)
+    assert agent._amd_revises_human("You have finished recording, you may hang up.", 2.0)
+
+
+def test_worker_capacity_counts_calls_not_cpu():
+    from types import SimpleNamespace
+
+    five = SimpleNamespace(active_jobs=[object()] * 5)
+    assert agent._calls_load(five) < 1.0  # a fifth call in progress: still takes a sixth
+    six = SimpleNamespace(active_jobs=[object()] * agent.WORKER_MAX_CALLS)
+    assert agent._calls_load(six) >= 1.0
