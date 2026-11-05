@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, type PipelineStage } from 'mongoose';
 import { Call, CallDocument } from '../../schemas/call.schema';
+import { inBucket } from './usage-buckets';
 
 /** Raw usage over a period, measured from calls. */
 export interface TenantUsage {
@@ -10,6 +11,9 @@ export interface TenantUsage {
   /** Reached a person. `answered` also counts a line the carrier picked up where nobody spoke. */
   pickedUp: number;
   voicemail: number;
+  noAnswer: number;
+  /** Never rang: the carrier refused the call (e.g. SIP 503) or the number is dead. */
+  failed: number;
   transfers: number;
   manualDials: number;
   ringSeconds: number;
@@ -24,6 +28,8 @@ export const EMPTY_USAGE: TenantUsage = {
   answered: 0,
   pickedUp: 0,
   voicemail: 0,
+  noAnswer: 0,
+  failed: 0,
   transfers: 0,
   manualDials: 0,
   ringSeconds: 0,
@@ -73,8 +79,10 @@ export class UsageService {
           campaignId: 1,
           manual: { $ifNull: ['$manual', false] },
           answered: { $cond: [{ $ifNull: ['$answeredAt', false] }, 1, 0] },
-          pickedUp: { $cond: [{ $eq: ['$outcome', 'ANSWERED_HUMAN'] }, 1, 0] },
-          voicemail: { $cond: [{ $eq: ['$amdClass', 'VOICEMAIL'] }, 1, 0] },
+          pickedUp: inBucket('pickedUp'),
+          voicemail: inBucket('voicemail'),
+          noAnswer: inBucket('noAnswer'),
+          failed: inBucket('failed'),
           recorded: { $cond: [{ $ifNull: ['$recordingUri', false] }, 1, 0] },
           aiCall: {
             $and: [
@@ -105,6 +113,8 @@ export class UsageService {
           answered: 1,
           pickedUp: 1,
           voicemail: 1,
+          noAnswer: 1,
+          failed: 1,
           recorded: 1,
           aiCall: 1,
           ttsChars: 1,
@@ -148,6 +158,8 @@ export class UsageService {
           answered: { $sum: '$answered' },
           pickedUp: { $sum: '$pickedUp' },
           voicemail: { $sum: '$voicemail' },
+          noAnswer: { $sum: '$noAnswer' },
+          failed: { $sum: '$failed' },
           transfers: { $sum: '$transfer' },
           manualDials: { $sum: { $cond: ['$manual', 1, 0] } },
           ringMs: { $sum: '$ringMs' },
@@ -165,6 +177,8 @@ export class UsageService {
         answered: number;
         pickedUp: number;
         voicemail: number;
+        noAnswer: number;
+        failed: number;
         transfers: number;
         manualDials: number;
         ringMs: number;
@@ -181,6 +195,8 @@ export class UsageService {
         answered: r.answered,
         pickedUp: r.pickedUp,
         voicemail: r.voicemail,
+        noAnswer: r.noAnswer,
+        failed: r.failed,
         transfers: r.transfers,
         manualDials: r.manualDials,
         ringSeconds: Math.round(r.ringMs / 1000),

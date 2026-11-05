@@ -8,6 +8,7 @@ import { OperatorAuthService } from './operator-auth.service';
 import { OpsAuditService } from './ops-audit.service';
 import { OpsCallsService } from './ops-calls.service';
 import { OpsTenantsService } from './ops-tenants.service';
+import { OpsVendorsService } from './ops-vendors.service';
 import {
   ActiveDto,
   CreateOperatorDto,
@@ -42,6 +43,7 @@ function parseDate(raw: string | undefined, field: string): Date | undefined {
 @Controller('operator')
 export class OpsController {
   constructor(
+    private readonly vendors: OpsVendorsService,
     private readonly tenants: OpsTenantsService,
     private readonly calls: OpsCallsService,
     private readonly billing: BillingService,
@@ -51,6 +53,11 @@ export class OpsController {
   ) {}
 
   // ── Overview ───────────────────────────────────────────────────────────
+
+  @Get('vendors')
+  vendorStatus() {
+    return this.vendors.list();
+  }
 
   @Get('overview')
   async overview(@Query('from') fromRaw?: string, @Query('to') toRaw?: string) {
@@ -64,6 +71,11 @@ export class OpsController {
       this.billing.listAllInvoices({ overdueOnly: true }),
     ]);
     const alerts: Array<{ level: 'bad' | 'warn' | 'info'; tenantId?: string; text: string }> = [];
+    for (const v of await this.vendors.list().catch(() => [])) {
+      if (v.keyOk === false) alerts.push({ level: 'bad', text: `${v.name}: key rejected (${v.usedFor}). Check Vendors.` });
+      else if (v.billingFailures24h > 0) alerts.push({ level: 'bad', text: `${v.name}: ${v.billingFailures24h} billing failure(s) on calls today. Check Vendors.` });
+      else if (v.status === 'WARN') alerts.push({ level: 'warn', text: `${v.name}: recent failures on calls. Check Vendors.` });
+    }
     for (const inv of overdue) {
       alerts.push({ level: 'bad', tenantId: inv.tenantId, text: `${inv.tenantName}: invoice ${inv.number} is overdue (₹${inv.totalInr.toLocaleString('en-IN')})` });
     }

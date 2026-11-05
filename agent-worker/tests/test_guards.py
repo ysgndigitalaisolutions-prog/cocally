@@ -152,6 +152,7 @@ def test_voicemail_words_overturn_an_early_human_verdict():
         "Leave your name and number after the tone",
         "The Telstra mobile you have called is switched off or not answering",
         "The person you are calling can't take your call right now",
+        "To voicemail. The person you're trying to reach is not available.",  # 4 Nov, verbatim
     ]:
         assert agent._amd_revises_human(greeting, 5.0), greeting
 
@@ -160,7 +161,7 @@ def test_real_people_are_never_taken_for_a_mailbox():
     for said in [
         "Hello.", "Yes, I am.", "He's not available.", "She isn't available right now",
         "Who is this?", "How did you get my number?", "I'm with AGL.", "Sorry, you've got the wrong person",
-        "I don't want to leave my details", "Sorry I missed your call earlier", "He can't come to the phone", "I'll get back to you", "Not interested, take me off your list",
+        "I don't want to leave my details", "Sorry I missed your call earlier", "Who's the person you're calling?", "Is this the number you called?", "He can't come to the phone", "I'll get back to you", "Not interested, take me off your list",
     ]:
         assert not agent._amd_revises_human(said, 5.0), said
 

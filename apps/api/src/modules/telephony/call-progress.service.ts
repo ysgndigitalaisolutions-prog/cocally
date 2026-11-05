@@ -14,6 +14,7 @@ import { RealtimeGateway } from '../workspace/realtime.gateway';
 import { TransfersService } from '../workspace/transfers.service';
 import { CliService } from './cli.service';
 import { LiveCallDriver } from './live-call.driver';
+import { finalAmdClass } from './call-classify';
 import { LivekitService } from './livekit.service';
 
 /**
@@ -281,12 +282,19 @@ export class CallProgressService {
     // What answered matters more than how it ended: a voicemail the worker
     // hung up on is ANSWERED_VOICEMAIL (24 h retry), not a human contact that
     // would freeze the lead under the frequency cap for two weeks.
-    // SILENCE is only ever a guess made early in the call ("nothing heard yet").
-    // If the customer's words are on the transcript, a person answered: 29 Sep
-    // a full conversation was finalised as NO_ANSWER because the first "Yeah"
-    // was missed and the guess was never revised.
-    const customerSpoke = (snapshot.transcript ?? []).some((t) => t.speaker === 'customer' && t.text?.trim());
-    const amdClass = snapshot.amdClass === 'SILENCE' && customerSpoke ? 'HUMAN' : snapshot.amdClass;
+    // The worker's verdict is a live guess on partial words, and it has none if
+    // it crashed, so the whole transcript gets the last word. 29 Sep: a SILENCE
+    // guess hid a full conversation. 4 Nov: mailboxes recorded as people.
+    const answerOffsetMs = snapshot.answeredAt ? snapshot.answeredAt.getTime() - snapshot.startedAt.getTime() : 0;
+    const amdClass = answered
+      ? finalAmdClass({
+          amdClass: snapshot.amdClass,
+          bridged: Boolean(snapshot.bridgedAt),
+          customerLines: (snapshot.transcript ?? [])
+            .filter((t) => t.speaker === 'customer' && t.text)
+            .map((t) => ({ text: t.text, seconds: Math.max(0, (t.startMs - answerOffsetMs) / 1000) })),
+        })
+      : snapshot.amdClass;
     const byAmd = answered ? this.outcomeForAmd(amdClass) : null;
     const outcome: CallOutcome = answered && snapshot.outcome ? snapshot.outcome : (byAmd ?? derived);
     const state: CallState = outcome === 'FAILED' ? 'FAILED' : 'COMPLETED';
@@ -299,6 +307,7 @@ export class CallProgressService {
           endedAt,
           endReason,
           outcome,
+          ...(amdClass ? { amdClass } : {}),
           ...(input.sipStatus !== undefined ? { sipStatusCode: input.sipStatus } : {}),
         },
         { new: true },

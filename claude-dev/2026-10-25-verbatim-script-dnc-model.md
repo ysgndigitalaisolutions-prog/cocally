@@ -80,3 +80,12 @@ Telvoq: 5 mobiles in 0409 072xxx-073xxx all returned SIP 503 regardless of calle
 Both mailboxes passed as HUMAN, because AMD latched on the first word, and the second held the line 3 min 18 s until ended by hand. Fixes: machine-only phrases overturn HUMAN in the first 20 s; `_DeadAirWatch` re-checks after 8 s of silence and cuts the call 7 s later. Backtest: 47 calls, 261 customer lines, only the 2 real mailboxes flagged. Silence timing could not be replayed from transcripts.
 
 Also shipped: ElevenLabs Charlie as first voice backup, Deepgram second; `_hunt_fast_socket` retries Cartesia during ringing (one real sample stayed slow after a swap, so its benefit is unproven; a blocked loop at job start can make a fast socket look slow). First-reply 6.5 s STT delay seen once and not reproduced, no fix shipped. To restart on the VM always pin IMAGE_TAG.
+
+## 5 Nov 2026: caller IDs on the campaign, Vendors page, correct call counts
+
+- Worker crash: fb4e84f read `qualifier` before it existed, so every call died at pick-up. 4 answered calls got silence (1 real person, 3 mailboxes per the recordings). Fixed in 9ceeff7. Rule: a call to Nithin's number must work before customers after any worker deploy.
+- Campaign page has a Caller IDs section (`cliPool`); Calls page shows the number used; numbers need a plus, stay in the campaign's country, and reach Telvoq without the plus.
+- Ops Vendors page: key check, last real use, billing failures from call logs. No vendor gives a balance with today's keys, so it warns on failures, not low credit. Google billing status is not read: using the recordings account for it was blocked.
+- Dashboard tiles add up: Picked up, Voicemail, No answer, Failed (`usage-buckets.ts`). Old "No answer" was a remainder holding 6 SIP 503s.
+- `finalAmdClass` decides what answered at call end from the whole transcript; an unclassified silent call is no longer a person. Replay on 58 answered calls: no conversation became a mailbox.
+- 5 mailbox records corrected by hand to ANSWERED_VOICEMAIL. Still open: Telvoq 503s on 6 of 12 mobiles, first-reply delay seen once, retry limits off, no new tenant yet.

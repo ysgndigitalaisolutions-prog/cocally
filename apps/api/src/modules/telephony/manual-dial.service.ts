@@ -323,6 +323,7 @@ export class ManualDialService {
     await lead.save();
 
     const cliNumber = await this.cli.selectCli({
+      countryPackCode: campaign.countryPackCode,
       tenantId,
       poolIds: campaign.cliPool,
       leadState: lead.state,

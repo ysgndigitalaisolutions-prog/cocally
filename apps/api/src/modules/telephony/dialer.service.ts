@@ -382,6 +382,7 @@ export class DialerService {
       }
 
       const cli = await this.cli.selectCli({
+        countryPackCode: campaign.countryPackCode,
         tenantId: campaign.tenantId.toString(),
         poolIds: campaign.cliPool,
         leadState: lead.state,

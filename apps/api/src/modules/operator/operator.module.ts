@@ -14,6 +14,7 @@ import { OperatorAuthGuard } from './operator-auth.guard';
 import { OperatorAuthService } from './operator-auth.service';
 import { OpsAuditService } from './ops-audit.service';
 import { OpsCallsService } from './ops-calls.service';
+import { OpsVendorsService } from './ops-vendors.service';
 import { OpsController } from './ops.controller';
 import { OpsTenantsService } from './ops-tenants.service';
 
@@ -35,6 +36,6 @@ import { OpsTenantsService } from './ops-tenants.service';
     PlatformModule,
   ],
   controllers: [OperatorAuthController, OpsController],
-  providers: [OperatorAuthGuard, OperatorAuthService, OpsAuditService, OpsCallsService, OpsTenantsService],
+  providers: [OperatorAuthGuard, OperatorAuthService, OpsAuditService, OpsCallsService, OpsVendorsService, OpsTenantsService],
 })
 export class OperatorModule {}

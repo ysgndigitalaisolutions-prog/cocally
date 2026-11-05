@@ -17,6 +17,7 @@ interface CallRow {
   finalScore: number;
   summary: string;
   qaScore?: { total: number; notes: string };
+  cli?: string;
   ringSeconds?: number;
   aiSeconds?: number;
   humanSeconds?: number;
@@ -208,6 +209,7 @@ export default function CallsPage() {
                 <th className="p-3">Disposition</th>
                 <th className="p-3">Score</th>
                 <th className="p-3">QA</th>
+                <th className="p-3">Caller ID</th>
                 <th className="p-3 text-right">Ring</th>
                 <th className="p-3 text-right">AI min</th>
                 <th className="p-3 text-right">Agent min</th>
@@ -216,7 +218,7 @@ export default function CallsPage() {
             <tbody>
               {calls.length === 0 && !loading && (
                 <tr>
-                  <td className="p-4 text-center" colSpan={10} style={{ color: 'var(--text-dim)' }}>
+                  <td className="p-4 text-center" colSpan={11} style={{ color: 'var(--text-dim)' }}>
                     No calls match these filters.
                   </td>
                 </tr>
@@ -240,6 +242,7 @@ export default function CallsPage() {
                   <td className="p-3">{call.disposition ?? '—'}</td>
                   <td className="p-3 font-semibold">{call.finalScore}</td>
                   <td className="p-3">{call.qaScore?.total ?? '—'}</td>
+                  <td className="p-3 font-mono text-xs">{call.cli ?? 'Default'}</td>
                   <td className="p-3 text-right tabular-nums">{secs(call.ringSeconds)}</td>
                   <td className="p-3 text-right tabular-nums">{minutes(call.aiSeconds ?? 0)}</td>
                   <td className="p-3 text-right tabular-nums">{minutes(call.humanSeconds ?? 0)}</td>

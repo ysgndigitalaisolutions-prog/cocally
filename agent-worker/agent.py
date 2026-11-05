@@ -373,7 +373,7 @@ _MACHINE_ONLY_PATTERNS = re.compile(
     r"|unable to take your call"
     r"|can'?t take your call"
     r"|message bank"
-    r"|(mobile|number|person|customer) you (have |are )?(called|calling|dialled|dialed)"
+    r"|(mobile|number|person|customer) you('?re|'?ve| are| have)? (called|calling|dialled|dialed|trying to reach) (is (not|un|switched|currently|busy)|isn'?t|has|cannot|can'?t)"
     r"|switched off or not answering",
     re.I,
 )

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { LuBuilding2, LuFileText, LuLayoutDashboard, LuPhoneCall, LuScrollText, LuSettings } from 'react-icons/lu';
+import { LuBuilding2, LuFileText, LuPlug, LuLayoutDashboard, LuPhoneCall, LuScrollText, LuSettings } from 'react-icons/lu';
 import { OPS_OPERATOR_KEY, OPS_TOKEN_KEY, opsApi, type OperatorProfile } from '@/lib/ops-api';
 
 const NAV = [
@@ -11,6 +11,7 @@ const NAV = [
   { href: '/ops/tenants', label: 'Tenants', icon: LuBuilding2 },
   { href: '/ops/calls', label: 'Calls', icon: LuPhoneCall },
   { href: '/ops/invoices', label: 'Invoices', icon: LuFileText },
+  { href: '/ops/vendors', label: 'Vendors', icon: LuPlug },
   { href: '/ops/audit', label: 'Audit log', icon: LuScrollText },
   { href: '/ops/settings', label: 'Settings', icon: LuSettings },
 ];

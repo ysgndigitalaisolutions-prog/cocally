@@ -9,6 +9,8 @@ interface Usage {
   dials: number;
   pickedUp: number;
   voicemail: number;
+  noAnswer: number;
+  failed: number;
   transfers: number;
   ringSeconds: number;
   aiSeconds: number;
@@ -47,7 +49,6 @@ const MINUTES = [
 
 const mins = (s: number) => num(Math.round((s / 60) * 10) / 10, 1);
 const totalSeconds = (u: Usage) => u.ringSeconds + u.aiSeconds + u.humanSeconds;
-const noAnswer = (u: Usage) => Math.max(0, u.dials - u.pickedUp - u.voicemail);
 const pct = (a: number, b: number) => (b > 0 ? `${Math.round((a / b) * 100)}%` : '–');
 
 function dayLabel(day: string): string {
@@ -168,11 +169,12 @@ export default function DashboardPage() {
             </div>
           </section>
 
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
             <Figure label="Calls" value={num(t.dials)} />
             <Figure label="Picked up" value={num(t.pickedUp)} hint={`${pct(t.pickedUp, t.dials)} of calls`} />
-            <Figure label="No answer" value={num(noAnswer(t))} hint={`${pct(noAnswer(t), t.dials)} of calls`} />
-            <Figure label="Voicemail" value={num(t.voicemail)} hint={`${pct(t.voicemail, t.dials)} of calls`} />
+            <Figure label="No answer" value={num(t.noAnswer)} hint="Rang, nobody picked up" />
+            <Figure label="Voicemail" value={num(t.voicemail)} hint="Mailbox or phone menu" />
+            <Figure label="Failed" value={num(t.failed)} hint="Never rang" />
             <Figure label="Transfers" value={num(t.transfers)} hint={`${pct(t.transfers, t.pickedUp)} of pick-ups`} />
           </div>
 

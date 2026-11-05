@@ -5,6 +5,7 @@ import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { CliNumber, CliNumberDocument } from '../../schemas/cli-number.schema';
+import { cliCandidateFilter, isValidCliNumber } from './cli-rules';
 
 /** Minimum answered-or-not sample before the 7-day rate is trusted enough to act on — a handful of unlucky dials must not quarantine a healthy number. */
 const MIN_SAMPLE_FOR_QUARANTINE = 20;
@@ -45,13 +46,10 @@ export class CliService {
     poolIds: Types.ObjectId[];
     leadState?: string;
     geoMatch: boolean;
+    /** Only numbers from the campaign's country: a +61 caller ID fails on the Indian test route. */
+    countryPackCode?: string;
   }): Promise<CliNumberDocument | null> {
-    const filter = {
-      tenantId: new Types.ObjectId(input.tenantId),
-      status: 'ACTIVE' as const,
-      ...(input.poolIds.length > 0 ? { _id: { $in: input.poolIds } } : {}),
-    };
-    const candidates = await this.cliModel.find(filter).sort({ _id: 1 }).exec();
+    const candidates = await this.cliModel.find(cliCandidateFilter(input)).sort({ _id: 1 }).exec();
     if (candidates.length === 0) return null;
 
     let pool = candidates;
@@ -170,6 +168,9 @@ export class CliService {
   }
 
   async addNumber(tenantId: string, input: { number: string; geoRegion?: string; countryPackCode: string }) {
+    if (!isValidCliNumber(input.number)) {
+      throw new BadRequestException('Enter the full number with its country code, for example +61285316375.');
+    }
     return this.cliModel.create({ tenantId: new Types.ObjectId(tenantId), ...input });
   }
 

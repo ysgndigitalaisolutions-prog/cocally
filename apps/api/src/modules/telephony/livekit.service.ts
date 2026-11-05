@@ -177,7 +177,8 @@ export class LivekitService {
     const au = Boolean(config.livekit.sipTrunkIdAu) && phoneNumber.startsWith('+61');
     const trunkId = au ? config.livekit.sipTrunkIdAu! : config.livekit.sipTrunkId;
     const prefix = au ? config.livekit.sipDialPrefixAu : config.livekit.sipDialPrefix;
-    const fromNumber = au && options?.from && !options.from.startsWith('+61') ? undefined : options?.from;
+    const auFrom = options?.from?.startsWith('+61') ? options.from.slice(1) : undefined; // Telvoq asked for no plus
+    const fromNumber = au ? auFrom : options?.from;
     // Some carriers route on a tech prefix + country code + number with no
     // leading plus (e.g. 1701 61 2xxxxxxxx). Twilio takes E.164 unchanged.
     const dialTo = prefix ? `${prefix}${phoneNumber.replace(/^\+/, '')}` : phoneNumber;

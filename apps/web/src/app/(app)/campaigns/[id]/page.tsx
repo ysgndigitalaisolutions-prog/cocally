@@ -8,6 +8,7 @@ import { leadStateReason } from '@/lib/lead-state';
 import { DialerStatusCard } from '@/components/DialerStatus';
 import { PredictiveDialerStatusCard } from '@/components/PredictiveDialerStatus';
 import CampaignInsights from '@/components/CampaignInsights';
+import CampaignCallerIds from '@/components/CampaignCallerIds';
 import CampaignTeamAssignment from '@/components/CampaignTeamAssignment';
 
 interface TeamMember {
@@ -261,6 +262,8 @@ export default function CampaignDetailPage() {
       <CampaignInsights campaignId={String(params.id)} />
 
       <CampaignTeamAssignment campaignId={String(params.id)} onChanged={load} />
+
+      <CampaignCallerIds campaignId={String(params.id)} countryPackCode={campaign.countryPackCode} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <section className="card space-y-4 p-6">
