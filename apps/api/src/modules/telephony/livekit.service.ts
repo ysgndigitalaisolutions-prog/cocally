@@ -162,6 +162,18 @@ export class LivekitService {
    * ringing, answer and hangup all arrive as webhooks, which is what lets the
    * call state machine be driven by the carrier rather than guessed at.
    */
+  /** What each trunk shows as caller ID when a call has no number of its own. Cached: it rarely changes. */
+  async trunkCallerIds(): Promise<{ au: string | null; other: string | null }> {
+    if (this.trunkCallerIdCache && Date.now() - this.trunkCallerIdCache.at < 10 * 60_000) return this.trunkCallerIdCache.ids;
+    const trunks = await this.sipClient.listSipOutboundTrunk().catch(() => []);
+    const first = (id?: string) => trunks.find((t) => t.sipTrunkId === id)?.numbers?.[0] ?? null;
+    const ids = { au: first(config.livekit.sipTrunkIdAu), other: first(config.livekit.sipTrunkId) };
+    if (trunks.length) this.trunkCallerIdCache = { at: Date.now(), ids };
+    return ids;
+  }
+
+  private trunkCallerIdCache: { at: number; ids: { au: string | null; other: string | null } } | null = null;
+
   async dialOut(
     callId: string,
     phoneNumber: string,

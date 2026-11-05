@@ -170,11 +170,22 @@ export class CallsController {
     // Tenants see minutes only: no charge and no vendor cost leaves this API.
     const ids = calls.map((c) => c._id.toString());
     const usage = ids.length ? await this.usage.usage({ callIds: ids, groupBy: '_id' }) : new Map<string, TenantUsage>();
+    const [leadRows, trunkIds] = await Promise.all([
+      this.leadModel.find({ _id: { $in: calls.map((c) => c.leadId) } }).select('firstName lastName phone').lean().exec(),
+      this.livekit.trunkCallerIds(),
+    ]);
+    const leadById = new Map(leadRows.map((l) => [l._id.toString(), l]));
 
     return calls.map((call) => {
       const u = usage.get(call._id.toString());
+      const lead = leadById.get(call.leadId.toString());
       return {
         ...call,
+        leadName: [lead?.firstName, lead?.lastName].filter(Boolean).join(' ') || null,
+        leadPhone: lead?.phone ?? null,
+        // A call with no number of its own used its trunk's. That is today's
+        // trunk number: calls from before a trunk change used an older one.
+        callerId: call.cli ?? (lead?.phone?.startsWith('+61') ? trunkIds.au : trunkIds.other),
         agentName: call.agentId ? (agentById.get(call.agentId.toString()) ?? null) : null,
         ringSeconds: u?.ringSeconds ?? 0,
         aiSeconds: u?.aiSeconds ?? 0,

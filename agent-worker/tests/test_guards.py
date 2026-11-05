@@ -291,3 +291,48 @@ def test_dead_air_hang_up_survives_the_goodbye_cancelling_the_timer():
 
     asyncio.run(go())
     assert done == ["line dropped"]
+
+
+def test_connect_gate_digit_is_read_from_the_prompt():
+    for said, digit in [
+        ("To connect your call, press two.", "2"),
+        ("to connect your call press 5", "5"),
+        ("To connect your call, press zero.", "0"),
+    ]:
+        assert agent._gate_digit(said) == digit, said
+    for said in ["To connect your call", "To connect your call, press", "Press two for sales", "Hello?", "press two"]:
+        assert agent._gate_digit(said) is None, said
+
+
+def _gate_qualifier(monkey_ctx):
+    q = agent.Qualifier.__new__(agent.Qualifier)
+    q._call_id, q._ctx, q.session_ref = None, monkey_ctx, None
+    q._closing = q._transfer_triggered = q.awaiting_connect = q.heard_speech = False
+    q._amd_reported, q._amd_class = True, "HUMAN"
+    q.gate_presses, q._gate_timeout, q.audio_live_at = 0, None, 0.0
+    q.opening_line = "Hello, how are you doing today?"
+    return q
+
+
+def test_gate_press_sends_the_digit_and_waits_for_the_handset():
+    import asyncio
+    from types import SimpleNamespace
+
+    sent = []
+
+    async def dtmf(code, digit):
+        sent.append((code, digit))
+
+    ctx = SimpleNamespace(room=SimpleNamespace(local_participant=SimpleNamespace(publish_dtmf=dtmf)))
+
+    async def go():
+        q = _gate_qualifier(ctx)
+        await q.press_gate("2")
+        assert q.awaiting_connect and not q._amd_reported and q._amd_class is None
+        for _ in range(4):
+            await q.press_gate("7")  # the gate re-prompts: capped
+        q._gate_timeout.cancel()
+        return q
+
+    q = asyncio.run(go())
+    assert sent[0] == (2, "2") and len(sent) == agent.GATE_MAX_PRESSES and q.gate_presses == agent.GATE_MAX_PRESSES

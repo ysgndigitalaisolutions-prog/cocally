@@ -4,6 +4,8 @@ import type { AmdClass } from '@cocally/shared';
 const MACHINE_ONLY =
   /you'?ve reached|you have reached|(leave|record) (me )?(a|your) ((text|voice|short|brief|quick) )?(message|name)|after the (tone|beep)|at the (tone|beep)|please record|unable to take your call|can'?t take your call|message bank|(mobile|number|person|customer) you('?re|'?ve| are| have)? (called|calling|dialled|dialed|trying to reach) (is (not|un|switched|currently|busy)|isn'?t|has|cannot|can'?t)|switched off or not answering/i;
 
+const CONNECT_GATE = /to connect (your|the) call/i;
+
 /** After this long into the call, "leave a message" is more likely a person talking about one. */
 const MACHINE_WINDOW_S = 30;
 
@@ -22,6 +24,10 @@ export interface FinalClassInput {
  */
 export function finalAmdClass({ amdClass, bridged, customerLines }: FinalClassInput): AmdClass | undefined {
   if (bridged) return 'HUMAN';
+  // The carrier's "to connect your call, press two" is not the customer talking.
+  const gateHeard = customerLines.some((l) => CONNECT_GATE.test(l.text));
+  customerLines = customerLines.filter((l) => !CONNECT_GATE.test(l.text));
+  if (gateHeard && customerLines.every((l) => !l.text.trim())) return 'IVR';
   const spoke = customerLines.some((l) => l.text.trim());
   if (customerLines.some((l) => l.seconds <= MACHINE_WINDOW_S && MACHINE_ONLY.test(l.text))) return 'VOICEMAIL';
   if (amdClass === 'SILENCE' && spoke) return 'HUMAN';

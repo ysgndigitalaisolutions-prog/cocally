@@ -89,3 +89,11 @@ Also shipped: ElevenLabs Charlie as first voice backup, Deepgram second; `_hunt_
 - Dashboard tiles add up: Picked up, Voicemail, No answer, Failed (`usage-buckets.ts`). Old "No answer" was a remainder holding 6 SIP 503s.
 - `finalAmdClass` decides what answered at call end from the whole transcript; an unclassified silent call is no longer a person. Replay on 58 answered calls: no conversation became a mailbox.
 - 5 mailbox records corrected by hand to ANSWERED_VOICEMAIL. Still open: Telvoq 503s on 6 of 12 mobiles, first-reply delay seen once, retry limits off, no new tenant yet.
+
+## 5 Nov 2026: connect gate, Calls screen, real prices
+
+- AU calls now reach "To connect your call, press N". Nithin confirmed pressing it is the agreement with the vendor. Worker reads the digit from final transcripts, presses via DTMF (max 3), stays silent, greets when the handset speaks, hangs up after 45 s of nothing. Not yet proven on a real call.
+- Noise filter back on: with it off, a lone first "Hello" hit about 6 s STT delay twice; never with it on.
+- Calls page is full width with a popup, shows caller ID and plain results. Score, latency and compliance panels removed from it.
+- Rate card shows source and confidence. Billing checked in the browser: Google `cocally` project only, Oct INR 7,507.52; Gemini token rates confirmed. LiveKit, Cartesia, Deepgram, Atlas not yet read. Telvoq is not our cost.
+- 5 calls on 5 Nov were wrongly saved as answered by a person (4 gates, 1 business message); records not corrected yet. Google lists Gemini 2.5 Flash as retired 20 Oct 2026; one failure with fallback seen on 5 Nov, cause unchecked.

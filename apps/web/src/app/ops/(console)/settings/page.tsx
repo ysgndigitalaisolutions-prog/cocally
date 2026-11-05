@@ -5,18 +5,30 @@ import { useCallback, useEffect, useState } from 'react';
 import { fmtDateTime, LinkBox, Pill } from '@/components/ops/ui';
 import { OPS_OPERATOR_KEY, OPS_TOKEN_KEY, opsApi, opsError, type OperatorProfile } from '@/lib/ops-api';
 
-const RATE_FIELDS: Array<[string, string]> = [
-  ['livekitAgentPerMin', 'LiveKit AI agent, $/min'],
-  ['livekitSipPerMin', 'LiveKit phone line, $/min'],
-  ['livekitWebrtcPerMin', 'LiveKit agent browser, $/min'],
-  ['sttPerMin', 'Speech-to-text, $/AI min'],
-  ['llmPerMin', 'Language model, $/AI min'],
-  ['ttsPer1kChars', 'Voice, $/1,000 chars'],
-  ['recordingPerMin', 'Recording, $/min'],
-  ['telcoPerMin', 'Carrier, $/min (0 = client pays)'],
-  ['fixedMonthlyUsd', 'Fixed, $/month'],
-  ['inrPerUsd', '₹ per US$'],
+type Confidence = 'PUBLISHED' | 'ESTIMATE' | 'NOT_OURS';
+
+/** Measured on real AI calls, 5 Nov 2026 (15 calls, 15 AI minutes): a small sample. */
+const VOICE_CHARS_PER_AI_MIN = 638;
+const RING_SHARE_PER_AI_MIN = 0.3;
+
+const RATE_ROWS: Array<{ key: string; vendor: string; item: string; unit: string; confidence: Confidence; basis: string; perAiMin?: (v: number) => number }> = [
+  { key: 'sttPerMin', vendor: 'Deepgram', item: 'Speech-to-text (Nova-3)', unit: 'per AI min', confidence: 'PUBLISHED', basis: 'Pay-as-you-go streaming list price', perAiMin: (v) => v },
+  { key: 'llmPerMin', vendor: 'Google', item: 'Gemini 2.5 Flash', unit: 'per AI min', confidence: 'ESTIMATE', basis: '3.5 requests a minute × 1,824 tokens at $0.30 per 1M, plus a little output', perAiMin: (v) => v },
+  { key: 'ttsPer1kChars', vendor: 'Cartesia', item: 'Voice (Sonic)', unit: 'per 1,000 chars', confidence: 'ESTIMATE', basis: 'About 1 credit a character; $49 for 1.25M. Your plan may differ', perAiMin: (v) => (v * VOICE_CHARS_PER_AI_MIN) / 1000 },
+  { key: 'livekitAgentPerMin', vendor: 'LiveKit', item: 'Agent session', unit: 'per AI min', confidence: 'ESTIMATE', basis: '$0.01 is the Cloud agent rate. Our worker runs on our own server, so check the invoice', perAiMin: (v) => v },
+  { key: 'livekitSipPerMin', vendor: 'LiveKit', item: 'Phone line (SIP)', unit: 'per phone min', confidence: 'ESTIMATE', basis: 'From a forum reply, not a price list; ringing counts too. Check the invoice', perAiMin: (v) => v * (1 + RING_SHARE_PER_AI_MIN) },
+  { key: 'livekitWebrtcPerMin', vendor: 'LiveKit', item: 'Agent browser', unit: 'per human min', confidence: 'ESTIMATE', basis: 'Old value, not rechecked' },
+  { key: 'recordingPerMin', vendor: 'LiveKit', item: 'Recording', unit: 'per recorded min', confidence: 'ESTIMATE', basis: 'Old value, not rechecked', perAiMin: (v) => v },
+  { key: 'telcoPerMin', vendor: 'Telvoq', item: 'Phone carrier', unit: 'per connected min', confidence: 'NOT_OURS', basis: 'Not billed to us', perAiMin: (v) => v },
+  { key: 'fixedMonthlyUsd', vendor: 'All', item: 'Server, database, plans', unit: 'per month', confidence: 'ESTIMATE', basis: 'Old figure; add up the real invoices' },
+  { key: 'inrPerUsd', vendor: 'Exchange rate', item: 'Rupees per US dollar', unit: '₹ per $', confidence: 'ESTIMATE', basis: 'Old value, not rechecked' },
 ];
+
+const CONFIDENCE: Record<Confidence, { label: string; color: string }> = {
+  PUBLISHED: { label: 'Published price', color: 'var(--good)' },
+  ESTIMATE: { label: 'Estimate', color: 'var(--accent)' },
+  NOT_OURS: { label: 'Not our cost', color: 'var(--text-dim)' },
+};
 
 const SELLER_FIELDS: Array<[string, string, boolean?]> = [
   ['name', 'Company name'],
@@ -51,21 +63,64 @@ function RateCard() {
     void opsApi.get<Record<string, number>>('/rate-card').then((r) => setDraft(r.data));
   }, []);
   if (!draft) return null;
+  const perAiMin = RATE_ROWS.reduce((sum, r) => sum + (r.perAiMin?.(draft[r.key] ?? 0) ?? 0), 0);
+  const costInr = perAiMin * (draft.inrPerUsd ?? 0);
   return (
-    <section className="card space-y-3 p-5">
+    <section className="card space-y-4 p-5">
       <div>
-        <h2 className="font-semibold">Rate card — what each provider costs us</h2>
+        <h2 className="font-semibold">What each provider costs us</h2>
         <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-          US dollars. Drives every cost and margin figure. Check against the LiveKit, ElevenLabs, Deepgram, Cerebras, Google Cloud and Atlas invoices each month.
+          US dollars, checked 5 Nov 2026. These drive every cost and margin figure. The invoices are the final word.
         </p>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        {RATE_FIELDS.map(([k, label]) => (
-          <label key={k} className="block text-xs" style={{ color: 'var(--text-dim)' }}>
-            {label}
-            <input type="number" min={0} step={0.0005} className="input mt-1" value={draft[k] ?? 0} onChange={(e) => setDraft({ ...draft, [k]: Number(e.target.value) })} />
-          </label>
-        ))}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-lg p-3" style={{ background: 'var(--surface-2)' }}>
+          <p className="text-xs" style={{ color: 'var(--text-dim)' }}>Our cost per AI minute</p>
+          <p className="text-2xl font-bold tabular-nums">${perAiMin.toFixed(3)}</p>
+        </div>
+        <div className="rounded-lg p-3" style={{ background: 'var(--surface-2)' }}>
+          <p className="text-xs" style={{ color: 'var(--text-dim)' }}>In rupees</p>
+          <p className="text-2xl font-bold tabular-nums">₹{costInr.toFixed(2)}</p>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[860px] text-sm">
+          <thead>
+            <tr className="text-left text-xs" style={{ color: 'var(--text-dim)' }}>
+              <th className="pb-2 font-medium">Provider</th>
+              <th className="pb-2 font-medium">Rate</th>
+              <th className="pb-2 text-right font-medium">Per AI minute</th>
+              <th className="pb-2 pl-4 font-medium">How sure</th>
+              <th className="pb-2 font-medium">Based on</th>
+            </tr>
+          </thead>
+          <tbody>
+            {RATE_ROWS.map((r) => (
+              <tr key={r.key} className="border-t align-top" style={{ borderColor: 'var(--border)' }}>
+                <td className="py-2 pr-3">
+                  <p className="font-medium">{r.vendor}</p>
+                  <p className="text-xs" style={{ color: 'var(--text-dim)' }}>{r.item}</p>
+                </td>
+                <td className="py-2 pr-3">
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.0005}
+                    aria-label={`${r.vendor} ${r.item}`}
+                    className="input"
+                    style={{ width: '7rem' }}
+                    value={draft[r.key] ?? 0}
+                    onChange={(e) => setDraft({ ...draft, [r.key]: Number(e.target.value) })}
+                  />
+                  <p className="mt-0.5 text-xs" style={{ color: 'var(--text-dim)' }}>{r.unit}</p>
+                </td>
+                <td className="py-2 text-right tabular-nums">{r.perAiMin ? `$${r.perAiMin(draft[r.key] ?? 0).toFixed(4)}` : '—'}</td>
+                <td className="py-2 pl-4 text-xs font-semibold" style={{ color: CONFIDENCE[r.confidence].color }}>{CONFIDENCE[r.confidence].label}</td>
+                <td className="py-2 text-xs" style={{ color: 'var(--text-dim)' }}>{r.basis}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
       <div className="flex items-center gap-3">
         <button
@@ -77,7 +132,7 @@ function RateCard() {
               .catch((err) => setNote({ text: opsError(err, 'Could not save.'), bad: true }))
           }
         >
-          Save rate card
+          Save rates
         </button>
         <Note note={note} />
       </div>

@@ -17,7 +17,10 @@ interface CallRow {
   finalScore: number;
   summary: string;
   qaScore?: { total: number; notes: string };
-  cli?: string;
+  campaignId: string;
+  leadName?: string | null;
+  leadPhone?: string | null;
+  callerId?: string | null;
   ringSeconds?: number;
   aiSeconds?: number;
   humanSeconds?: number;
@@ -25,9 +28,6 @@ interface CallRow {
 
 interface CallDetail extends CallRow {
   transcript: Array<{ speaker: string; text: string; leg: string }>;
-  scoreHistory: Array<{ atMs: number; score: number; reason: string }>;
-  complianceEvents: Array<{ atMs: number; kind: string; detail: string }>;
-  timings?: { turnLatencies?: number[]; turns?: Array<{ eou: number; stt: number; llm: number; tts: number; total: number }>; transferDeadAirMs?: number };
 }
 
 interface Campaign {
@@ -100,8 +100,20 @@ export default function CallsPage() {
 
   async function openDetail(id: string) {
     const { data } = await api.get(`/calls/${id}`);
-    setDetail(data);
+    // The list row carries the customer and caller ID; the deep-dive route does not.
+    setDetail({ ...calls.find((c) => c._id === id), ...data });
   }
+
+  useEffect(() => {
+    if (!detail) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDetail(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [detail]);
+
+  const campaignName = (id?: string) => campaigns.find((c) => c._id === id)?.name;
 
   function set(key: keyof typeof EMPTY, value: string) {
     setFilters((f) => ({ ...f, [key]: value }));
@@ -197,74 +209,101 @@ export default function CallsPage() {
 
       <CallTotals calls={calls} />
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <div className="card overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left" style={{ color: 'var(--text-dim)' }}>
-                <th className="p-3">Started</th>
-                <th className="p-3">Agent</th>
-                <th className="p-3">AMD</th>
-                <th className="p-3">Outcome</th>
-                <th className="p-3">Disposition</th>
-                <th className="p-3">Score</th>
-                <th className="p-3">QA</th>
-                <th className="p-3">Caller ID</th>
-                <th className="p-3 text-right">Ring</th>
-                <th className="p-3 text-right">AI min</th>
-                <th className="p-3 text-right">Agent min</th>
+      <div className="card overflow-x-auto">
+        <table className="w-full min-w-[1040px] text-sm">
+          <thead>
+            <tr className="text-left text-xs" style={{ color: 'var(--text-dim)' }}>
+              <th className="p-3 font-medium">Started</th>
+              <th className="p-3 font-medium">Customer</th>
+              <th className="p-3 font-medium">Caller ID</th>
+              <th className="p-3 font-medium">Campaign</th>
+              <th className="p-3 font-medium">Result</th>
+              <th className="p-3 font-medium">Agent</th>
+              <th className="p-3 font-medium">Disposition</th>
+              <th className="p-3 text-right font-medium">Ring</th>
+              <th className="p-3 text-right font-medium">AI min</th>
+              <th className="p-3 text-right font-medium">Human min</th>
+            </tr>
+          </thead>
+          <tbody>
+            {calls.length === 0 && !loading && (
+              <tr>
+                <td className="p-4 text-center" colSpan={10} style={{ color: 'var(--text-dim)' }}>
+                  No calls match these filters.
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {calls.length === 0 && !loading && (
-                <tr>
-                  <td className="p-4 text-center" colSpan={11} style={{ color: 'var(--text-dim)' }}>
-                    No calls match these filters.
-                  </td>
-                </tr>
-              )}
-              {calls.map((call) => (
-                <tr
-                  key={call._id}
-                  onClick={() => openDetail(call._id)}
-                  className="cursor-pointer border-t"
-                  style={{
-                    borderColor: 'var(--border)',
-                    background: detail?._id === call._id ? 'var(--surface-2)' : undefined,
-                  }}
-                >
-                  <td className="p-3">{new Date(call.startedAt).toLocaleString()}</td>
-                  <td className="p-3">
-                    {call.agentName ?? <span style={{ color: 'var(--text-dim)' }}>AI only</span>}
-                  </td>
-                  <td className="p-3">{call.amdClass ?? '—'}</td>
-                  <td className="p-3">{call.outcome ?? call.state}</td>
-                  <td className="p-3">{call.disposition ?? '—'}</td>
-                  <td className="p-3 font-semibold">{call.finalScore}</td>
-                  <td className="p-3">{call.qaScore?.total ?? '—'}</td>
-                  <td className="p-3 font-mono text-xs">{call.cli ?? 'Default'}</td>
-                  <td className="p-3 text-right tabular-nums">{secs(call.ringSeconds)}</td>
-                  <td className="p-3 text-right tabular-nums">{minutes(call.aiSeconds ?? 0)}</td>
-                  <td className="p-3 text-right tabular-nums">{minutes(call.humanSeconds ?? 0)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            )}
+            {calls.map((call) => (
+              <tr
+                key={call._id}
+                tabIndex={0}
+                onClick={() => openDetail(call._id)}
+                onKeyDown={(e) => e.key === 'Enter' && openDetail(call._id)}
+                className="cursor-pointer border-t hover:bg-surface-2"
+                style={{ borderColor: 'var(--border)' }}
+              >
+                <td className="whitespace-nowrap p-3">{new Date(call.startedAt).toLocaleString()}</td>
+                <td className="p-3">
+                  {call.leadName && <p className="font-medium">{call.leadName}</p>}
+                  <p className="font-mono text-xs" style={{ color: 'var(--text-dim)' }}>{call.leadPhone ?? '—'}</p>
+                </td>
+                <td className="p-3 font-mono text-xs">{call.callerId ?? '—'}</td>
+                <td className="p-3">{campaignName(call.campaignId) ?? '—'}</td>
+                <td className="p-3 font-medium">{resultLabel(call)}</td>
+                <td className="p-3">{call.agentName ?? <span style={{ color: 'var(--text-dim)' }}>AI only</span>}</td>
+                <td className="p-3">{call.disposition ?? '—'}</td>
+                <td className="p-3 text-right tabular-nums">{secs(call.ringSeconds)}</td>
+                <td className="p-3 text-right tabular-nums">{minutes(call.aiSeconds ?? 0)}</td>
+                <td className="p-3 text-right tabular-nums">{minutes(call.humanSeconds ?? 0)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
-        <div className="card p-6">
-          {!detail ? (
-            <p className="text-sm" style={{ color: 'var(--text-dim)' }}>
-              Select a call for the deep-dive: transcript, score-over-time, compliance events (DASH-07).
-            </p>
-          ) : (
-            <div className="space-y-4 text-sm">
-              <div className="flex items-center justify-between">
-                <h2 className="font-semibold">Call deep-dive</h2>
-                <span className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                  {detail.agentName ? `Handled by ${detail.agentName}` : 'AI only — never bridged'}
-                </span>
+      {detail && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.6)' }}
+          onClick={() => setDetail(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Call details"
+            className="card flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b p-5" style={{ borderColor: 'var(--border)' }}>
+              <div>
+                <h2 className="text-lg font-bold">{detail.leadName || detail.leadPhone || 'Call'}</h2>
+                <p className="text-sm" style={{ color: 'var(--text-dim)' }}>
+                  {new Date(detail.startedAt).toLocaleString()} · {resultLabel(detail)} ·{' '}
+                  {detail.agentName ? `Handled by ${detail.agentName}` : 'AI only'}
+                </p>
               </div>
+              <button className="btn btn-ghost shrink-0 border text-sm" style={{ borderColor: 'var(--border)' }} onClick={() => setDetail(null)}>
+                ✕ Close
+              </button>
+            </div>
+            <div className="space-y-4 overflow-y-auto p-5 text-sm">
+              <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[
+                  ['Customer', detail.leadPhone ?? '—'],
+                  ['Caller ID', detail.callerId ?? '—'],
+                  ['Campaign', campaignName(detail.campaignId) ?? '—'],
+                  ['Disposition', detail.disposition ?? '—'],
+                  ['Ring', secs(detail.ringSeconds)],
+                  ['AI minutes', minutes(detail.aiSeconds ?? 0)],
+                  ['Human minutes', minutes(detail.humanSeconds ?? 0)],
+                  ['Score', String(detail.finalScore)],
+                ].map(([label, value]) => (
+                  <div key={label}>
+                    <dt className="text-xs" style={{ color: 'var(--text-dim)' }}>{label}</dt>
+                    <dd className="break-words font-medium">{value}</dd>
+                  </div>
+                ))}
+              </dl>
               {detail.summary && (
                 <p className="rounded-lg p-3" style={{ background: 'var(--surface-2)' }}>
                   {detail.summary}
@@ -273,55 +312,24 @@ export default function CallsPage() {
               {recordingUrl ? (
                 <audio controls preload="none" src={recordingUrl} className="w-full" aria-label="Call recording" />
               ) : (
-                <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                  {recordingNote}
-                </p>
+                <p className="text-xs" style={{ color: 'var(--text-dim)' }}>{recordingNote}</p>
               )}
-              <div className="max-h-64 space-y-1 overflow-y-auto">
-                {detail.transcript.map((line, i) => (
-                  <p key={i}>
-                    <span
-                      style={{
-                        color: line.speaker === 'ai' ? 'var(--accent)' : line.speaker === 'agent' ? 'var(--good)' : 'var(--text-dim)',
-                      }}
-                    >
-                      [{line.leg}] {line.speaker}:
-                    </span>{' '}
-                    {line.text}
-                  </p>
-                ))}
-              </div>
               <div>
-                <h3 className="mb-1 font-semibold">Score over time</h3>
-                {detail.scoreHistory.map((point, i) => (
-                  <p key={i} style={{ color: 'var(--text-dim)' }}>
-                    +{(point.atMs / 1000).toFixed(1)}s → <span style={{ color: 'var(--text)' }}>{point.score}</span> ({point.reason})
-                  </p>
-                ))}
-              </div>
-              {detail.timings?.turnLatencies && detail.timings.turnLatencies.length > 0 && (
-                <div>
-                  <h3 className="mb-1 font-semibold">AI response latency</h3>
-                  <p style={{ color: 'var(--text-dim)' }}>
-                    {(() => {
-                      const sorted = [...detail.timings!.turnLatencies!].sort((a, b) => a - b);
-                      const pct = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] ?? 0;
-                      const t = detail.timings!.turns ?? [];
-                      const avg = (k: 'eou' | 'llm' | 'tts') => (t.length ? Math.round(t.reduce((a, x) => a + x[k], 0) / t.length) : null);
-                      return `${sorted.length} turns · p50 ${pct(0.5)} ms · p95 ${pct(0.95)} ms · worst ${sorted[sorted.length - 1]} ms` +
-                        (t.length ? ` · avg end-of-turn ${avg('eou')} / LLM ${avg('llm')} / TTS ${avg('tts')} ms` : '');
-                    })()}
-                    {detail.timings.transferDeadAirMs != null && ` · transfer dead air ${detail.timings.transferDeadAirMs} ms`}
-                  </p>
+                <h3 className="mb-2 font-semibold">Transcript</h3>
+                {detail.transcript.length === 0 && <p style={{ color: 'var(--text-dim)' }}>No transcript for this call.</p>}
+                <div className="space-y-1.5">
+                  {detail.transcript.map((line, i) => (
+                    <p key={i}>
+                      <span
+                        className="font-medium"
+                        style={{ color: line.speaker === 'ai' ? 'var(--accent)' : line.speaker === 'agent' ? 'var(--good)' : 'var(--text)' }}
+                      >
+                        {line.speaker === 'ai' ? 'AI' : line.speaker === 'agent' ? 'Agent' : 'Customer'}:
+                      </span>{' '}
+                      {line.text}
+                    </p>
+                  ))}
                 </div>
-              )}
-              <div>
-                <h3 className="mb-1 font-semibold">Compliance events</h3>
-                {detail.complianceEvents.map((event, i) => (
-                  <p key={i} style={{ color: 'var(--text-dim)' }}>
-                    {event.kind}: {event.detail.slice(0, 80)}
-                  </p>
-                ))}
               </div>
               {detail.qaScore && (
                 <p>
@@ -329,11 +337,28 @@ export default function CallsPage() {
                 </p>
               )}
             </div>
-          )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
+}
+
+const RESULT_LABEL: Record<string, string> = {
+  ANSWERED_HUMAN: 'Picked up',
+  ANSWERED_VOICEMAIL: 'Voicemail',
+  ANSWERED_IVR: 'Phone menu',
+  NO_ANSWER: 'No answer',
+  BUSY: 'Busy',
+  DISCONNECTED: 'Number unreachable',
+  FAILED: 'Failed',
+  CALLBACK_REQUESTED: 'Callback requested',
+  OPT_OUT: 'Opted out',
+  ABANDONED: 'No agent free',
+};
+
+function resultLabel(call: { outcome?: string; state: string }): string {
+  return call.outcome ? (RESULT_LABEL[call.outcome] ?? call.outcome) : 'In progress';
 }
 
 /** Seconds as "45s" or "1m 05s"; a dash when nothing was measured. */

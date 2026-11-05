@@ -34,7 +34,7 @@ const VENDORS: Array<{ id: VendorId; name: string; usedFor: string; balance: str
   { id: 'google', name: 'Google Cloud', usedFor: 'Server, Gemini AI, recordings', balance: 'Our server has no billing access', account: 'ysgndigitalaisolutions@gmail.com', billingUrl: 'https://console.cloud.google.com/billing/01E15E-A27387-92236C' },
   { id: 'atlas', name: 'MongoDB Atlas', usedFor: 'Main database', balance: 'No key for its billing', account: null, billingUrl: 'https://cloud.mongodb.com' },
   { id: 'livekit', name: 'LiveKit', usedFor: 'Call rooms and phone connection', balance: 'No balance API', account: null, billingUrl: 'https://cloud.livekit.io' },
-  { id: 'telvoq', name: 'Telvoq', usedFor: 'Australian phone route', balance: 'No API; ask Telvoq', account: 'WhatsApp contact', billingUrl: null },
+  { id: 'telvoq', name: 'Telvoq', usedFor: 'Australian phone route', balance: 'Not billed to us', account: 'WhatsApp contact', billingUrl: null },
   { id: 'twilio', name: 'Twilio', usedFor: 'Indian test calls', balance: 'No Twilio key on our server', account: null, billingUrl: 'https://console.twilio.com' },
   { id: 'deepgram', name: 'Deepgram', usedFor: 'Speech-to-text, last-resort voice', balance: 'Our key has no billing permission', account: 'ysgndigitalaisolutions@gmail.com', billingUrl: 'https://console.deepgram.com' },
   { id: 'cartesia', name: 'Cartesia', usedFor: 'Main voice (Arlo)', balance: 'No balance API', account: null, billingUrl: 'https://play.cartesia.ai' },

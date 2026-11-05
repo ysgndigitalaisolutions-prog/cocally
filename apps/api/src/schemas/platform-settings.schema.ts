@@ -30,13 +30,14 @@ export interface RateCard {
   inrPerUsd: number;
 }
 
+/** Checked 5 Nov 2026; sources and how far to trust each rate are on the ops Settings page. */
 export const DEFAULT_RATE_CARD: RateCard = {
   livekitAgentPerMin: 0.01,
-  livekitSipPerMin: 0.004,
+  livekitSipPerMin: 0.02,
   livekitWebrtcPerMin: 0.0005,
-  sttPerMin: 0.006,
-  llmPerMin: 0.005,
-  ttsPer1kChars: 0.05,
+  sttPerMin: 0.0077,
+  llmPerMin: 0.002,
+  ttsPer1kChars: 0.039,
   recordingPerMin: 0.005,
   telcoPerMin: 0,
   fixedMonthlyUsd: 250,

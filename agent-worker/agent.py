@@ -377,6 +377,14 @@ _MACHINE_ONLY_PATTERNS = re.compile(
     r"|switched off or not answering",
     re.I,
 )
+# The carrier's gate in front of the handset, agreed with the vendor: "To connect
+# your call, press two." The digit changes on every prompt.
+_GATE_PROMPT = re.compile(r"to connect (your|the) call", re.I)
+_GATE_DIGIT = re.compile(r"to connect (?:your|the) call,? press (zero|one|two|three|four|five|six|seven|eight|nine|\d)\b", re.I)
+_GATE_WORDS = {w: str(i) for i, w in enumerate("zero one two three four five six seven eight nine".split())}
+GATE_MAX_PRESSES = 3
+# After pressing: no word from anyone in this long means nobody picked up.
+GATE_ANSWER_TIMEOUT_S = float(os.getenv("GATE_ANSWER_TIMEOUT_S", "45"))
 # How long after pick-up later words can still overturn a HUMAN verdict.
 AMD_REVISE_WINDOW_S = 20.0
 # Silence after the AI stops talking before it checks, then before it cuts the call.
@@ -436,6 +444,14 @@ class _DeadAirWatch:
         else:
             self._asked = True
             self._reprompt()
+
+
+def _gate_digit(text: str) -> str | None:
+    """The digit a connect gate asks for, or None if this is not a full prompt."""
+    m = _GATE_DIGIT.search(text)
+    if not m:
+        return None
+    return _GATE_WORDS.get(m.group(1).lower(), m.group(1))
 
 
 def _amd_revises_human(text: str, seconds_live: float | None) -> bool:
@@ -786,6 +802,11 @@ class Qualifier(Agent):
         # result only hangs up when this is still False: on 29 Sep a real
         # "Yeah" was never transcribed and SILENCE fired on a live person.
         self.heard_speech = False
+        # Connect gate: digit pressed, the handset has not spoken yet.
+        self.awaiting_connect = False
+        self.gate_presses = 0
+        self.opening_line: str | None = None
+        self._gate_timeout: asyncio.Task | None = None
         # The customer's latest finished turn (see on_user_turn_completed).
         self.last_user_text = ""
         # The text of the AI reply being generated now (see llm_node).
@@ -1040,8 +1061,56 @@ class Qualifier(Agent):
         logger.warning("schedule_callback(call=%s) failed: %s", self._call_id, detail)
         return f"Could not book that time ({detail}). Ask them for another day and time."
 
+    async def press_gate(self, digit: str) -> None:
+        """Press what the gate asked for, then stay silent until the handset
+        speaks: the greeting already went to the gate. What answers next gets a
+        fresh person-or-machine decision."""
+        if self._closing or self._transfer_triggered or self.gate_presses >= GATE_MAX_PRESSES:
+            return
+        self.gate_presses += 1
+        self.awaiting_connect = True
+        self.heard_speech = False
+        self._amd_reported = False
+        self._amd_class = None
+        self.audio_live_at = time.monotonic()
+        logger.info("connect gate: pressing %s, try %d (call=%s)", digit, self.gate_presses, self._call_id)
+        if self.session_ref is not None:
+            try:
+                self.session_ref.interrupt(force=True)
+            except Exception as e:  # noqa: BLE001 — the digit must still go out
+                logger.debug("interrupt before gate press failed: %s", e)
+        try:
+            await self._ctx.room.local_participant.publish_dtmf(code=int(digit), digit=digit)
+        except Exception as e:  # noqa: BLE001 — the timeout below still ends the call
+            logger.warning("connect gate press failed (call=%s): %s", self._call_id, e)
+        if self._call_id:
+            self.spawn(_post_event(self._call_id, "connect_gate", 0, f"pressed {digit}, try {self.gate_presses}"))
+        if self._gate_timeout is not None:
+            self._gate_timeout.cancel()
+        self._gate_timeout = asyncio.create_task(self._gate_no_answer())
+
+    async def _gate_no_answer(self) -> None:
+        await asyncio.sleep(GATE_ANSWER_TIMEOUT_S)
+        if not self.awaiting_connect or self._closing or self._transfer_triggered:
+            return
+        self._closing = True
+        self._transfer_triggered = True
+        logger.warning("connect gate: nobody spoke after the digit -> hanging up (call=%s)", self._call_id)
+        await _drop_customer_leg(self._ctx, self._call_id)
+        self._ctx.shutdown(reason="no answer after connect gate")
+
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:  # noqa: ANN001
         self.last_user_text = (getattr(new_message, "text_content", None) or "").strip()
+        if _GATE_PROMPT.search(self.last_user_text):
+            raise StopResponse()  # the gate, not a person: never a turn for the model
+        if self.awaiting_connect:
+            # The first words from the handset. They never heard our greeting.
+            self.awaiting_connect = False
+            if self._gate_timeout is not None:
+                self._gate_timeout.cancel()
+            if self.opening_line and self.session_ref is not None and not self._closing:
+                self.session_ref.say(self.opening_line)
+                raise StopResponse()
         if self.restore_endpointing is not None:
             restore, self.restore_endpointing = self.restore_endpointing, None
             restore()
@@ -2807,6 +2876,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     async def _stall_guard() -> None:
         await asyncio.sleep(STALL_GUARD_S)
+        if qualifier.awaiting_connect:
+            return  # after a gate digit, silence is the phone ringing
         if qualifier._transfer_triggered or qualifier._closing or not awaiting_reply or not _quiet():
             return
         logger.warning(
@@ -2843,7 +2914,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     dead_air = _DeadAirWatch(
         reprompt=lambda: session.say(DEAD_AIR_REPROMPT_LINE),
         hang_up=lambda: qualifier.hang_up_on_silence(),  # qualifier is created further down
-        stopped=lambda: qualifier.closing or qualifier._transfer_triggered,
+        stopped=lambda: qualifier.closing or qualifier._transfer_triggered or qualifier.awaiting_connect,
         reprompt_s=DEAD_AIR_REPROMPT_S,
         hang_up_s=DEAD_AIR_HANG_UP_S,
     )
@@ -3003,8 +3074,17 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         @session.on("user_input_transcribed")
         def _on_transcript(event) -> None:  # noqa: ANN001 — livekit-agents event type
             text = (getattr(event, "transcript", "") or "").strip()
-            if text:
-                qualifier.report_amd(text)
+            if not text:
+                return
+            if _GATE_PROMPT.search(text):
+                # Not a person and not a mailbox: says nothing about who answers next.
+                digit = _gate_digit(text) if getattr(event, "is_final", False) else None
+                if digit is not None:
+                    _cancel_stall()
+                    dead_air.cancel()
+                    qualifier.spawn(qualifier.press_gate(digit))
+                return
+            qualifier.report_amd(text)
 
         # ── DTMF ───────────────────────────────────────────────────────────
         # `sip_dtmf_received` is the rtc SDK's SIP keypad event (livekit 1.0.23,
@@ -3107,6 +3187,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         return
     # AMD's zero point: the instant the customer's audio is actually flowing.
     qualifier.audio_live_at = time.monotonic()
+    qualifier.opening_line = disclosure
     qualifier.spawn(_post_event(call_id, "answered", (qualifier.audio_live_at - job_t0) * 1000, "worker joined to SIP answer"))
     if call_id:
         qualifier.spawn(_probe_providers(call_id))
