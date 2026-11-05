@@ -180,16 +180,20 @@ export class LiveCallDriver implements OnModuleInit {
         campaignName: campaign.name,
       });
 
-      // Recording starts on answer (CallProgressService.markAnswered), not
-      // here: the AI only joins once the customer picks up, so there is
-      // nothing to capture while the phone rings, and a dial that is never
-      // answered no longer pays for an egress.
 
       call.state = 'RINGING';
       await call.save();
       // The INVITE is awaited until answered (or refused) in the background —
       // see LivekitService.dialOut. Answer/failure is reported through the
       // callbacks so CallProgressService owns the state machine either way.
+      // Before the INVITE: egress takes about 2 s to start, and started on answer
+      // it lost the greeting (5 Nov). Ring time costs about $0.005 a minute, and
+      // playback skips it. Null here is retried when the call is answered.
+      const recording = await this.livekit.startRecording(callId, tenantId);
+      if (recording) {
+        await this.callModel.updateOne({ _id: call._id }, { recordingEgressId: recording.egressId, recordingUri: recording.uri }).exec();
+      }
+
       void this.livekit
         .dialOut(callId, lead.phone, { from: cli })
         .then(async ({ sipCallId }) => {

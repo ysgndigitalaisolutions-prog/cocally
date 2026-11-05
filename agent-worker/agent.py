@@ -389,6 +389,15 @@ _MACHINE_ONLY_PATTERNS = re.compile(
     r"|not able to get to the phone",
     re.I,
 )
+# Someone only answering the phone ("Hello, Jason speaking"), who usually goes on
+# to answer "how are you". 5 Nov: the AI replied into that pause and stumbled.
+_GREETING_ONLY = re.compile(
+    r"^\W*(?:hello|hi|hey|hiya|g'?day)\b\W*(?:(?:it'?s|this is)\s+)?(?:[a-z']+)?\W*(?:(?:speaking|here)\b\W*)?(?:with you\W*)?$"
+    r"|^\W*[a-z']+\s+(?:speaking|here)\b(?:\s+with you)?\W*$",
+    re.I,
+)
+FIRST_GREETING_WAIT_S = float(os.getenv("FIRST_GREETING_WAIT_S", "0.6"))
+_ASKED_HOW_WE_ARE = re.compile(r"how (are|r) (you|ya)|how'?s it going|how about you|and you\b|yourself\b", re.I)
 # "I'm fine with my bills": the vendor wants a rebuttal, then a callback offer,
 # then a goodbye, in that order. Decided here because the model did not keep to
 # it (5 Nov eval: "No. My bill is fine" went straight to the goodbye). A plain
@@ -866,6 +875,7 @@ class Qualifier(Agent):
         # How far "I'm fine with my bills" has gone: 1 rebuttal, 2 callback offer.
         self._objection_stage = 0
         self._objection_pending = False
+        self._first_turn_done = False
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001, ANN201 — framework signature
         async for frame in Agent.default.tts_node(self, text, model_settings):
@@ -1149,6 +1159,19 @@ class Qualifier(Agent):
         await _drop_customer_leg(self._ctx, self._call_id)
         self._ctx.shutdown(reason="no answer after connect gate")
 
+    async def _customer_carried_on(self, text: str) -> bool:
+        """After a greeting-only first turn, hold the reply a moment. True if they
+        started talking again, so this turn gets no reply and the next one does."""
+        if not _GREETING_ONLY.match(text) or self.session_ref is None:
+            return False
+        deadline = time.monotonic() + FIRST_GREETING_WAIT_S
+        while time.monotonic() < deadline:
+            if getattr(self.session_ref, "user_state", None) == "speaking":
+                logger.info("customer carried on after a greeting (call=%s)", self._call_id)
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
     def next_objection_tag(self, text: str) -> str | None:
         """The scripted reply to a bill objection, or None to leave the turn to
         the model. After a line, a plain "no" counts as refusing it; agreeing or
@@ -1222,6 +1245,17 @@ class Qualifier(Agent):
         if objection_tag:
             self.spawn(self._say_objection_line(objection_tag, self.last_user_text))
             raise StopResponse()
+        if not self._first_turn_done:
+            self._first_turn_done = True
+            if await self._customer_carried_on(self.last_user_text):
+                self._first_turn_done = False  # their next words are still the first answer
+                raise StopResponse()
+            if not _ASKED_HOW_WE_ARE.search(self.last_user_text):
+                # 5 Nov: "Good, thank you" got "I'm doing well, thanks for asking!"
+                turn_ctx.add_message(
+                    role="system",
+                    content="They did not ask how you are, so do not say how you are. Go straight to the next scripted line.",
+                )
         # A time given right after the callback question: book it now. 28 Oct
         # eval: the model said "We've scheduled a callback" without calling
         # the tool, so a customer who hung up then had no callback.
@@ -3191,6 +3225,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             text = (getattr(event, "transcript", "") or "").strip()
             if not text:
                 return
+            # Gate prompts and mailbox greetings never become turns, so they miss
+            # the transcript. The end-of-call classification needs them.
+            if getattr(event, "is_final", False) and not qualifier.closing:
+                qualifier.spawn(_post_event(call_id, "heard", None, text))
             digit = None if qualifier.customer_spoke else _gate_digit(text)
             if digit is not None:
                 # Not a person and not a mailbox: says nothing about who answers next.

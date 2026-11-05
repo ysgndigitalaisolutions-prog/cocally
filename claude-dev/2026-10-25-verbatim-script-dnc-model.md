@@ -101,3 +101,12 @@ Also shipped: ElevenLabs Charlie as first voice backup, Deepgram second; `_hunt_
 ## 5 Nov 2026: gate tail, instant redial
 
 With the filter on only "press seven." reached STT on 8 gate calls, as partials, so the gate press never fired and the AI looped "Sorry, I didn't catch that". Gate detection now takes a short phrase ending "press <digit>", partials included, debounced. The 3-at-once test also rang 2 people twice within a minute: an answered call set no wait. Answered now waits 24 h and no retry is under 30 min. LiveKit billed 185 SIP minutes for October against 25.6 in our database: unexplained.
+
+## 5 Nov 2026: parallel calls, gate press, classification
+
+- 5 at once on 2 vCPUs: every call gets an AI now (capacity counts calls, 5 warm processes), but CPU saturates for about 35 s and the greeting breaks up. Operate at 3.
+- LiveKit moved to Ship: 2 concurrent recordings was the Build limit.
+- Gate press works: of 26 presses, 9 reached voicemail, 8 dropped at about 20 s, 9 at about 2 s. No press has reached a person yet. Telvoq asked about the 2 s drops and the 503s.
+- "My bill is fine": code forces rebuttal (Q4), callback offer (Q6), goodbye (E1).
+- Classification: `connect_gate` was refused by the API's event list, gate and mailbox words never reached the transcript, so 22 calls showed as Human with 1 real. Worker now posts `heard`; new Gate tile.
+- Recording starts before the dial (it lost the first 2.3 s when started on answer); playback skips the ring.

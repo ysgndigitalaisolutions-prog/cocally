@@ -4,6 +4,24 @@ import { finalAmdClass } from '../call-classify';
 const say = (text: string, seconds = 5) => ({ text, seconds });
 
 describe('final call classification', () => {
+  it('a pressed gate that nobody answered is a gate, not a person', () => {
+    expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, gatePressed: true, customerLines: [] })).toBe('IVR');
+    expect(finalAmdClass({ amdClass: 'SILENCE', bridged: false, gatePressed: true, customerLines: [say('To connect your call,'), say('press two.')] })).toBe('IVR');
+  });
+
+  it('a mailbox after the gate is a mailbox, and a person after it is a person', () => {
+    expect(
+      finalAmdClass({ amdClass: 'HUMAN', bridged: false, gatePressed: true, customerLines: [say('press nine.'), say('Your call has been forwarded to voicemail.', 18)] }),
+    ).toBe('VOICEMAIL');
+    expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, gatePressed: true, customerLines: [say('press one.'), say('Hello, who is this?', 12)] })).toBe('HUMAN');
+  });
+
+  it("catches the mailbox wording of 5 Nov", () => {
+    for (const greeting of ['Just leave your number, and I can ring you back.', "Hi. I'll leave you a message.", "Hello. I'm not able to get to the phone at the moment."]) {
+      expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, customerLines: [say(greeting)] })).toBe('VOICEMAIL');
+    }
+  });
+
   it('catches the mailboxes of 4 Nov, verbatim', () => {
     for (const greeting of [
       "Hello. You've reached zero four zero nine one two",

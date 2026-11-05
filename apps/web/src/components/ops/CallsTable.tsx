@@ -32,7 +32,7 @@ interface CallRow {
 const OUTCOMES = ['', 'ANSWERED_HUMAN', 'ANSWERED_VOICEMAIL', 'ANSWERED_IVR', 'NO_ANSWER', 'BUSY', 'FAILED', 'OPT_OUT', 'INVALID_NUMBER'];
 const AMD = ['', 'HUMAN', 'VOICEMAIL', 'IVR', 'SILENCE'];
 
-const pretty = (s: string | null) => (s ? s.toLowerCase().replace(/_/g, ' ') : '—');
+const pretty = (s: string | null) => (s === 'ANSWERED_IVR' || s === 'IVR' ? 'gate' : s ? s.toLowerCase().replace(/_/g, ' ') : '—');
 
 function outcomeTone(o: string | null): 'good' | 'bad' | 'warn' | 'dim' {
   if (o === 'ANSWERED_HUMAN') return 'good';

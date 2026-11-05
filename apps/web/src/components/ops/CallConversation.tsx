@@ -93,7 +93,7 @@ export default function CallConversation({ startedAt, transcript, redacted, onUn
       else loose.push({ kind: 'turn', at, turn });
     }
     const marks: Item[] = events
-      .filter((e) => e.kind !== 'net_provider' && e.kind !== 'net_media')
+      .filter((e) => e.kind !== 'net_provider' && e.kind !== 'net_media' && e.kind !== 'heard')
       .map((event) => ({ kind: 'event', at: Math.max(0, new Date(event.at).getTime() - started), event }));
     return [...lines, ...loose, ...marks].sort((a, b) => a.at - b.at);
   }, [transcript, turns, events, started]);

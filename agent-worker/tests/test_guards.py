@@ -450,3 +450,77 @@ def test_opt_out_wording_is_never_given_a_rebuttal():
     assert q.next_objection_tag("I'm not interested, don't call me again.") is None
     assert q.next_objection_tag("Not interested in any calls.") is None
     assert q._objection_stage == 0
+
+
+def test_objection_lines_are_spoken_and_the_goodbye_ends_the_call(monkeypatch=None):
+    import asyncio
+
+    said, dropped, ended = [], [], []
+
+    class _Session:
+        def say(self, line, **kw):
+            said.append(line)
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result(None)
+            return fut
+
+    async def drop(ctx, call_id):
+        dropped.append(call_id)
+
+    real_drop, real_sleep = agent._drop_customer_leg, asyncio.sleep
+
+    async def no_sleep(_):
+        return None
+
+    q = _objection_qualifier()
+    q._call_id, q.session_ref = None, _Session()
+    q._ctx = type("Ctx", (), {"shutdown": lambda self, reason="": ended.append(reason)})()
+    agent._drop_customer_leg, asyncio.sleep = drop, no_sleep
+    try:
+        asyncio.run(q._say_objection_line("Q4", "My bill is fine."))
+        assert said == ["I understand."] and not dropped and not q._closing
+        asyncio.run(q._say_objection_line("E1", "No."))
+    finally:
+        agent._drop_customer_leg, asyncio.sleep = real_drop, real_sleep
+    assert said[-1] == "No worries." and dropped == [None] and q._closing and ended
+
+
+def test_every_event_the_worker_posts_is_one_the_api_accepts():
+    # 5 Nov: connect_gate was refused with a 400, unseen, so a pressed gate left no
+    # trace and those calls were counted as people.
+    import os
+    import re
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    controller = open(os.path.join(here, "../../apps/api/src/modules/engine/engine.controller.ts")).read()
+    allowed = set(re.findall(r"'(\w+)'", re.search(r"CALL_EVENT_KINDS = \[(.*?)\]", controller).group(1)))
+    posted = set(re.findall(r'_post_event\(\s*[\w.]+,\s*"(\w+)"', open(agent.__file__).read()))
+    assert "connect_gate" in posted and "heard" in posted
+    assert posted <= allowed, posted - allowed
+
+
+def test_greeting_only_is_answering_the_phone_not_answering_us():
+    for said in ("Hello.", "Hi", "Hello. Jason's", "Jason speaking.", "Hello, it's Jason.", "Hello, this is Mary", "Jason speaking with you."):
+        assert agent._GREETING_ONLY.match(said), said
+    for said in ("Good, thank you.", "Good.", "Yes.", "Who is this?", "Hello, who is this?", "I'm busy right now.", "Hello, how are you?"):
+        assert not agent._GREETING_ONLY.match(said), said
+
+
+def test_reply_holds_only_while_a_greeting_is_followed_by_more():
+    import asyncio
+    from types import SimpleNamespace
+
+    q = agent.Qualifier.__new__(agent.Qualifier)
+    q._call_id = None
+    q.session_ref = SimpleNamespace(user_state="speaking")
+    assert asyncio.run(q._customer_carried_on("Hello, Jason speaking."))
+    assert not asyncio.run(q._customer_carried_on("Good, thank you."))
+    q.session_ref = SimpleNamespace(user_state="listening")
+    assert not asyncio.run(q._customer_carried_on("Hello."))
+
+
+def test_only_asking_how_we_are_earns_an_answer():
+    for said in ("Good, how are you?", "How's it going?", "Good thanks, and you?"):
+        assert agent._ASKED_HOW_WE_ARE.search(said), said
+    for said in ("Good, thank you.", "Hello, Jason speaking.", "Who are you?"):
+        assert not agent._ASKED_HOW_WE_ARE.search(said), said

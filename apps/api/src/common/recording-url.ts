@@ -42,3 +42,12 @@ export function signedRecordingUrl(uri: string, expiresSeconds = 15 * 60): strin
   }
   return null;
 }
+
+/**
+ * Recording starts before the dial, so the file opens with the ring. Start playback
+ * just before the answer: egress starts about 2 s after the dial, plus 1 s of margin.
+ */
+export function playFromAnswer(url: string, ringMs?: number | null): string {
+  const seconds = Math.floor((ringMs ?? 0) / 1000) - 3;
+  return seconds > 0 ? `${url}#t=${seconds}` : url;
+}

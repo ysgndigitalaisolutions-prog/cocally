@@ -347,7 +347,7 @@ export default function CallsPage() {
 const RESULT_LABEL: Record<string, string> = {
   ANSWERED_HUMAN: 'Picked up',
   ANSWERED_VOICEMAIL: 'Voicemail',
-  ANSWERED_IVR: 'Phone menu',
+  ANSWERED_IVR: 'Gate',
   NO_ANSWER: 'No answer',
   BUSY: 'Busy',
   DISCONNECTED: 'Number unreachable',

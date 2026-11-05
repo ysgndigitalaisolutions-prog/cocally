@@ -11,6 +11,7 @@ export interface TenantUsage {
   /** Reached a person. `answered` also counts a line the carrier picked up where nobody spoke. */
   pickedUp: number;
   voicemail: number;
+  gate: number;
   noAnswer: number;
   /** Never rang: the carrier refused the call (e.g. SIP 503) or the number is dead. */
   failed: number;
@@ -28,6 +29,7 @@ export const EMPTY_USAGE: TenantUsage = {
   answered: 0,
   pickedUp: 0,
   voicemail: 0,
+  gate: 0,
   noAnswer: 0,
   failed: 0,
   transfers: 0,
@@ -81,6 +83,7 @@ export class UsageService {
           answered: { $cond: [{ $ifNull: ['$answeredAt', false] }, 1, 0] },
           pickedUp: inBucket('pickedUp'),
           voicemail: inBucket('voicemail'),
+          gate: inBucket('gate'),
           noAnswer: inBucket('noAnswer'),
           failed: inBucket('failed'),
           recorded: { $cond: [{ $ifNull: ['$recordingUri', false] }, 1, 0] },
@@ -113,6 +116,7 @@ export class UsageService {
           answered: 1,
           pickedUp: 1,
           voicemail: 1,
+          gate: 1,
           noAnswer: 1,
           failed: 1,
           recorded: 1,
@@ -158,6 +162,7 @@ export class UsageService {
           answered: { $sum: '$answered' },
           pickedUp: { $sum: '$pickedUp' },
           voicemail: { $sum: '$voicemail' },
+          gate: { $sum: '$gate' },
           noAnswer: { $sum: '$noAnswer' },
           failed: { $sum: '$failed' },
           transfers: { $sum: '$transfer' },
@@ -177,6 +182,7 @@ export class UsageService {
         answered: number;
         pickedUp: number;
         voicemail: number;
+        gate: number;
         noAnswer: number;
         failed: number;
         transfers: number;
@@ -195,6 +201,7 @@ export class UsageService {
         answered: r.answered,
         pickedUp: r.pickedUp,
         voicemail: r.voicemail,
+        gate: r.gate,
         noAnswer: r.noAnswer,
         failed: r.failed,
         transfers: r.transfers,

@@ -9,6 +9,7 @@ interface Usage {
   dials: number;
   pickedUp: number;
   voicemail: number;
+  gate: number;
   noAnswer: number;
   failed: number;
   transfers: number;
@@ -169,11 +170,12 @@ export default function DashboardPage() {
             </div>
           </section>
 
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-7">
             <Figure label="Calls" value={num(t.dials)} />
             <Figure label="Picked up" value={num(t.pickedUp)} hint={`${pct(t.pickedUp, t.dials)} of calls`} />
             <Figure label="No answer" value={num(t.noAnswer)} hint="Rang, nobody picked up" />
-            <Figure label="Voicemail" value={num(t.voicemail)} hint="Mailbox or phone menu" />
+            <Figure label="Voicemail" value={num(t.voicemail)} hint="Mailbox" />
+            <Figure label="Gate" value={num(t.gate)} hint="Connect prompt or menu, nobody came" />
             <Figure label="Failed" value={num(t.failed)} hint="Never rang" />
             <Figure label="Transfers" value={num(t.transfers)} hint={`${pct(t.transfers, t.pickedUp)} of pick-ups`} />
           </div>

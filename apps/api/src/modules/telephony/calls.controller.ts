@@ -4,7 +4,7 @@ import { DISPOSITIONS, LIVE_CALL_STATES, redactPii, type Disposition } from '@co
 import { IsIn, IsNotEmpty, IsNumber, IsOptional, IsString } from 'class-validator';
 import { Model, Types } from 'mongoose';
 import { config } from '../../common/config';
-import { signedRecordingUrl } from '../../common/recording-url';
+import { playFromAnswer, signedRecordingUrl } from '../../common/recording-url';
 import { CurrentUser } from '../../common/auth/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/auth/jwt-auth.guard';
 import { Public } from '../../common/auth/public.decorator';
@@ -223,14 +223,14 @@ export class CallsController {
     if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
     const call = await this.callModel
       .findOne({ _id: new Types.ObjectId(id), tenantId: new Types.ObjectId(user.tenantId) })
-      .select('recordingUri recordingEgressId endedAt')
+      .select('recordingUri recordingEgressId endedAt ringMs')
       .lean()
       .exec();
     if (!call) throw new NotFoundException('Call not found');
     if (!call.recordingUri) throw new NotFoundException('No recording for this call');
     const url = signedRecordingUrl(call.recordingUri, 15 * 60);
     if (!url) throw new NotFoundException('Recording is stored outside the configured bucket');
-    return { url, expiresInSeconds: 15 * 60, contentType: 'audio/ogg', ready: Boolean(call.endedAt) };
+    return { url: playFromAnswer(url, call.ringMs), expiresInSeconds: 15 * 60, contentType: 'audio/ogg', ready: Boolean(call.endedAt) };
   }
 
   /**

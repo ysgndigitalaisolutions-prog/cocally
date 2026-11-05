@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InjectModel } from '@nestjs/mongoose';
 import { redactPii } from '@cocally/shared';
 import { Model, Types, type FilterQuery } from 'mongoose';
-import { signedRecordingUrl } from '../../common/recording-url';
+import { playFromAnswer, signedRecordingUrl } from '../../common/recording-url';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { Campaign, CampaignDocument } from '../../schemas/campaign.schema';
 import { Lead, LeadDocument } from '../../schemas/lead.schema';
@@ -439,12 +439,12 @@ export class OpsCallsService {
   /** Short-lived signed link to the call audio in the recordings bucket. */
   async recordingUrl(id: string): Promise<{ url: string; expiresInSeconds: number }> {
     if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Call not found');
-    const call = await this.callModel.findById(id).select('recordingUri').lean().exec();
+    const call = await this.callModel.findById(id).select('recordingUri ringMs').lean().exec();
     if (!call?.recordingUri) throw new NotFoundException('No recording for this call');
     const expiresInSeconds = 15 * 60;
     const url = signedRecordingUrl(call.recordingUri, expiresInSeconds);
     if (!url) throw new NotFoundException('Recording is stored outside the configured bucket');
-    return { url, expiresInSeconds };
+    return { url: playFromAnswer(url, call.ringMs), expiresInSeconds };
   }
 
 }

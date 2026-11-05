@@ -5,9 +5,10 @@ import type { CallOutcome } from '@cocally/shared';
  * Calls. Before this, "No answer" was whatever was left over: 6 calls the carrier
  * refused with a 503 (4 Nov), which never rang, showed as customers not answering.
  */
-export const OUTCOME_BUCKETS: Record<'pickedUp' | 'voicemail' | 'noAnswer' | 'failed', CallOutcome[]> = {
+export const OUTCOME_BUCKETS: Record<'pickedUp' | 'voicemail' | 'gate' | 'noAnswer' | 'failed', CallOutcome[]> = {
   pickedUp: ['ANSWERED_HUMAN', 'CALLBACK_REQUESTED', 'OPT_OUT', 'ABANDONED'],
-  voicemail: ['ANSWERED_VOICEMAIL', 'ANSWERED_IVR'],
+  voicemail: ['ANSWERED_VOICEMAIL'],
+  gate: ['ANSWERED_IVR'],
   noAnswer: ['NO_ANSWER', 'BUSY'],
   failed: ['FAILED', 'DISCONNECTED'],
 };

@@ -285,14 +285,24 @@ export class CallProgressService {
     // The worker's verdict is a live guess on partial words, and it has none if
     // it crashed, so the whole transcript gets the last word. 29 Sep: a SILENCE
     // guess hid a full conversation. 4 Nov: mailboxes recorded as people.
-    const answerOffsetMs = snapshot.answeredAt ? snapshot.answeredAt.getTime() - snapshot.startedAt.getTime() : 0;
+    const events = snapshot.timings?.events ?? [];
+    const gatePress = events.filter((e) => e.kind === 'connect_gate').pop();
+    // After the digit the line still has to connect and ring, so a mailbox's
+    // words are timed from the press, not from the gate picking up.
+    const zeroMs = gatePress?.at ? new Date(gatePress.at).getTime() : (snapshot.answeredAt?.getTime() ?? snapshot.startedAt.getTime());
     const amdClass = answered
       ? finalAmdClass({
           amdClass: snapshot.amdClass,
           bridged: Boolean(snapshot.bridgedAt),
-          customerLines: (snapshot.transcript ?? [])
-            .filter((t) => t.speaker === 'customer' && t.text)
-            .map((t) => ({ text: t.text, seconds: Math.max(0, (t.startMs - answerOffsetMs) / 1000) })),
+          gatePressed: Boolean(gatePress),
+          customerLines: [
+            ...(snapshot.transcript ?? [])
+              .filter((t) => t.speaker === 'customer' && t.text)
+              .map((t) => ({ text: t.text, seconds: Math.max(0, (snapshot.startedAt.getTime() + t.startMs - zeroMs) / 1000) })),
+            ...events
+              .filter((e) => e.kind === 'heard' && e.detail)
+              .map((e) => ({ text: e.detail as string, seconds: Math.max(0, (new Date(e.at).getTime() - zeroMs) / 1000) })),
+          ],
         })
       : snapshot.amdClass;
     const byAmd = answered ? this.outcomeForAmd(amdClass) : null;
@@ -308,6 +318,8 @@ export class CallProgressService {
           endReason,
           outcome,
           ...(amdClass ? { amdClass } : {}),
+          // Recording starts before the dial: nobody answered, nothing to play.
+          ...(answered ? {} : { $unset: { recordingUri: 1 } }),
           ...(input.sipStatus !== undefined ? { sipStatusCode: input.sipStatus } : {}),
         },
         { new: true },
