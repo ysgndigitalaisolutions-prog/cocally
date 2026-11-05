@@ -398,6 +398,8 @@ def test_voicemail_after_the_gate_is_timed_from_its_first_word():
 def test_more_machine_wording_overturns_human():
     assert agent._amd_revises_human("No message can be left on this service.", 2.0)
     assert agent._amd_revises_human("You have finished recording, you may hang up.", 2.0)
+    assert agent._amd_revises_human("Just leave your number, and I can ring you back.", 2.0)
+    assert agent._amd_revises_human("Hello. I'm not able to get to the phone at the moment.", 2.0)
 
 
 def test_worker_capacity_counts_calls_not_cpu():
@@ -407,3 +409,44 @@ def test_worker_capacity_counts_calls_not_cpu():
     assert agent._calls_load(five) < 1.0  # a fifth call in progress: still takes a sixth
     six = SimpleNamespace(active_jobs=[object()] * agent.WORKER_MAX_CALLS)
     assert agent._calls_load(six) >= 1.0
+
+
+def _objection_qualifier():
+    q = agent.Qualifier.__new__(agent.Qualifier)
+    q.script_lines = {"Q4": "I understand.", "Q6": "When can we call you back?", "E1": "No worries."}
+    q.blocked_tags = set()
+    q._closing = q._transfer_triggered = q._objection_pending = False
+    q._objection_stage = 0
+    return q
+
+
+def test_bill_objection_goes_rebuttal_callback_goodbye():
+    q = _objection_qualifier()
+    assert q.next_objection_tag("No. My electricity bill is fine.") == "Q4"
+    assert q.next_objection_tag("No, I'm fine.") == "Q6"
+    assert q.next_objection_tag("No, no need to call back.") == "E1"
+
+
+def test_fine_after_how_are_you_is_not_an_objection():
+    q = _objection_qualifier()
+    for said in ("I'm fine.", "Good thanks, how are you?", "No, that's my husband.", "Yes, that's me."):
+        assert q.next_objection_tag(said) is None
+    assert q._objection_stage == 0
+
+
+def test_agreeing_or_a_time_goes_to_the_model():
+    q = _objection_qualifier()
+    assert q.next_objection_tag("I'm happy with my current offer.") == "Q4"
+    assert q.next_objection_tag("Okay then, go on.") is None
+    q = _objection_qualifier()
+    q.next_objection_tag("Not interested.")
+    assert q.next_objection_tag("No, I'm fine.") == "Q6"
+    assert q.next_objection_tag("Tomorrow after 5 pm.") is None
+    assert q.next_objection_tag("Tomorrow is fine.") is None
+
+
+def test_opt_out_wording_is_never_given_a_rebuttal():
+    q = _objection_qualifier()
+    assert q.next_objection_tag("I'm not interested, don't call me again.") is None
+    assert q.next_objection_tag("Not interested in any calls.") is None
+    assert q._objection_stage == 0

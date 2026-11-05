@@ -383,7 +383,27 @@ _MACHINE_ONLY_PATTERNS = re.compile(
     r"|thank you for getting in touch"
     r"|forwarded to (the )?(voicemail|message)"
     r"|no message can be left"
-    r"|finished recording",
+    r"|finished recording"
+    r"|leave your number"
+    r"|leave you a message"
+    r"|not able to get to the phone",
+    re.I,
+)
+# "I'm fine with my bills": the vendor wants a rebuttal, then a callback offer,
+# then a goodbye, in that order. Decided here because the model did not keep to
+# it (5 Nov eval: "No. My bill is fine" went straight to the goodbye). A plain
+# "I'm fine" answers "how are you" and is not an objection.
+_BILL_OBJECTION = re.compile(
+    r"\b(fine|happy|good|satisfied) with (my|the|our|what)\b"
+    r"|\b(bills?|offer|plan|deal|provider|retailer|company)\b[^.?!]{0,20}\b(is|are|'s)\b[^.?!]{0,10}\b(fine|ok|okay|good|alright)\b"
+    r"|\bnot interested\b(?! in (any|being) call)"
+    r"|\brecently (changed|switched)\b",
+    re.I,
+)
+# Asking not to be called is an opt-out, never a rebuttal.
+_OPT_OUT_WORDS = re.compile(r"don'?t call|do not call|stop calling|remove me|take me off|\bDNC\b|register|complaint|not interested in (any|being) call", re.I)
+_OBJECTION_DECLINE = re.compile(
+    r"^\W*(no|nah|nope)\b|\b(i'?m|we'?re|it'?s) (fine|good|right|okay|ok)\b|not interested|no thanks|no thank you|no need|not now|don'?t (need|want)",
     re.I,
 )
 # The carrier's gate in front of the handset, agreed with the vendor: "To connect
@@ -843,6 +863,9 @@ class Qualifier(Agent):
         # Said once to a call-screening assistant (brief `screeningLine`).
         self.screening_line = ""
         self._screening_answered = False
+        # How far "I'm fine with my bills" has gone: 1 rebuttal, 2 callback offer.
+        self._objection_stage = 0
+        self._objection_pending = False
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001, ANN201 — framework signature
         async for frame in Agent.default.tts_node(self, text, model_settings):
@@ -1126,6 +1149,49 @@ class Qualifier(Agent):
         await _drop_customer_leg(self._ctx, self._call_id)
         self._ctx.shutdown(reason="no answer after connect gate")
 
+    def next_objection_tag(self, text: str) -> str | None:
+        """The scripted reply to a bill objection, or None to leave the turn to
+        the model. After a line, a plain "no" counts as refusing it; agreeing or
+        giving a time goes to the model, which carries on or books the callback."""
+        if not self.script_lines.get("Q4") or self._closing or self._transfer_triggered:
+            return None
+        pending, self._objection_pending = self._objection_pending, False
+        if _OPT_OUT_WORDS.search(text):
+            return None
+        if not (_BILL_OBJECTION.search(text) or (pending and _OBJECTION_DECLINE.search(text))):
+            return None
+        if self._objection_stage >= 1 and _TIME_WORDS.search(text):
+            return None
+        self._objection_stage += 1
+        tag = {1: "Q4", 2: "Q6"}.get(self._objection_stage, "E1")
+        if tag == "Q6" and (not self.script_lines.get("Q6") or "Q6" in self.blocked_tags):
+            tag = "E1"
+        if tag == "E1" and not self.script_lines.get("E1"):
+            return None
+        self._objection_pending = tag != "E1"
+        return tag
+
+    async def _say_objection_line(self, tag: str, said: str) -> None:
+        line = self.script_lines[tag]
+        logger.info("bill objection (call=%s): %r -> %s", self._call_id, said[:80], tag)
+        if self._call_id:
+            await _post_transcript(self._call_id, "customer", said)
+            await _post_transcript(self._call_id, "ai", line)
+        if tag != "E1":
+            if self.session_ref is not None:
+                self.session_ref.say(line, add_to_chat_ctx=True)
+            return
+        self._closing = True
+        self._transfer_triggered = True
+        if self.session_ref is not None:
+            try:
+                await asyncio.wait_for(self.session_ref.say(line, allow_interruptions=False), timeout=10.0)
+            except Exception as e:  # noqa: BLE001 — the hang-up must still happen
+                logger.warning("objection goodbye failed: %s", e)
+        await asyncio.sleep(0.5)
+        await _drop_customer_leg(self._ctx, self._call_id)
+        self._ctx.shutdown(reason="refused after rebuttal and callback offer")
+
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:  # noqa: ANN001
         self.last_user_text = (getattr(new_message, "text_content", None) or "").strip()
         if _GATE_PROMPT.search(self.last_user_text) or _gate_digit(self.last_user_text) is not None:
@@ -1151,6 +1217,10 @@ class Qualifier(Agent):
             if self._call_id:
                 self.spawn(_post_transcript(self._call_id, "customer", said))
             self.spawn(self._do_transfer("customer asked to speak to a person"))
+            raise StopResponse()
+        objection_tag = self.next_objection_tag(self.last_user_text)
+        if objection_tag:
+            self.spawn(self._say_objection_line(objection_tag, self.last_user_text))
             raise StopResponse()
         # A time given right after the callback question: book it now. 28 Oct
         # eval: the model said "We've scheduled a callback" without calling
