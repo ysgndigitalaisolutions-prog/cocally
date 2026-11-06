@@ -615,7 +615,7 @@ def test_greeting_waits_for_their_hello():
     import asyncio
     from types import SimpleNamespace
 
-    q = SimpleNamespace(closing=False, awaiting_connect=False, _transfer_triggered=False)
+    q = SimpleNamespace(closing=False, awaiting_connect=False, _transfer_triggered=False, gate_heard=False)
     old = (agent.GREET_WAIT_S, agent.HELLO_GAP_S, agent.GREET_MAX_WAIT_S)
     agent.GREET_WAIT_S, agent.HELLO_GAP_S, agent.GREET_MAX_WAIT_S = 0.3, 0.1, 1.0
     try:
@@ -638,3 +638,54 @@ def test_greeting_waits_for_their_hello():
         assert asyncio.run(agent._wait_for_their_hello(SimpleNamespace(user_state="speaking"), q)) == "skip"
     finally:
         agent.GREET_WAIT_S, agent.HELLO_GAP_S, agent.GREET_MAX_WAIT_S = old
+
+
+def test_a_line_is_spoken_once_per_reply():
+    import asyncio
+
+    lines = {"Q1": "I'm calling from Australian Deal, an energy broker.", "S1Q": "Are you the account holder?"}
+
+    async def go():
+        async def chunks():
+            yield "[Q1] [Q1] [S1Q]"
+        return "".join([c async for c in agent._expand_tag_stream(chunks(), lines)])
+
+    out = asyncio.run(go())
+    assert out.count("Australian Deal") == 1 and "account holder" in out, out
+
+
+def test_hostility_is_recognised_and_ordinary_answers_are_not():
+    for said in ("Fuck off, Daniel.", "F*** off", "Piss off mate", "Go away.", "Leave me alone!", "Get lost"):
+        assert agent._HOSTILE.search(said), said
+    for said in ("I'm fine with my bills.", "No, I'm not the account holder.", "Bloody expensive bills, yeah.", "Don't call me again.", "Hold on."):
+        assert not agent._HOSTILE.search(said), said
+
+
+def test_greeting_does_not_start_into_a_gate():
+    import asyncio
+    from types import SimpleNamespace
+
+    q = SimpleNamespace(closing=False, awaiting_connect=False, _transfer_triggered=False, gate_heard=True)
+    assert asyncio.run(agent._wait_for_their_hello(SimpleNamespace(user_state="listening"), q)) == "skip"
+
+
+def test_dont_need_it_gets_the_rebuttal():
+    q = _objection_qualifier()
+    assert q.next_objection_tag("No, mate. I don't need it.") == "Q4"
+    assert _objection_qualifier().next_objection_tag("No, that's my wife.") is None
+
+
+def test_voicemail_system_greeting_is_a_mailbox():
+    assert agent._amd_revises_human("Welcome to the voicemail system.", 3.0)
+
+
+def test_ai_call_screen_is_recognised():
+    for said in (
+        "I'm an AI assistant recording this call for the person you're trying to reach.",
+        "Please say who you are and why you're calling.",
+    ):
+        assert agent._SCREENING_PATTERNS.search(said), said
+    for said in ("Thank you.", "Please hold while I connect you.", "The person you're calling is busy now.", "I'll let them know you called."):
+        assert agent._SCREENING_FOLLOW_UP.search(said), said
+    for said in ("Yes, speaking.", "Who is this?", "Thanks, but I'm not interested."):
+        assert not agent._SCREENING_FOLLOW_UP.search(said), said

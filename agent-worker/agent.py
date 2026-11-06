@@ -193,7 +193,7 @@ async def _first_word_deadline(stream, deadline_s: float):  # noqa: ANN001, ANN2
 # BACKGROUND_AUDIO=office turns it on; off (default) leaves the line as today.
 BACKGROUND_AUDIO = (os.getenv("BACKGROUND_AUDIO") or "off").lower()
 BG_AMBIENT_VOLUME = float(os.getenv("BG_AMBIENT_VOLUME", "0.30"))
-BG_THINKING_VOLUME = float(os.getenv("BG_THINKING_VOLUME", "0.45"))
+BG_THINKING_VOLUME = float(os.getenv("BG_THINKING_VOLUME", "0.05"))  # 6 Nov: keyboard sound turned right down
 # "phone" (default): the clips in assets/, cut to the phone voice band
 # (300-3400 Hz) with the keyboard clicks rounded off, at the built-ins'
 # loudness. The built-in clips are full-band room recordings and the typing
@@ -386,7 +386,9 @@ _MACHINE_ONLY_PATTERNS = re.compile(
     r"|finished recording"
     r"|leave your number"
     r"|leave you a message"
-    r"|not able to get to the phone",
+    r"|not able to get to the phone"
+    r"|welcome to the voice ?mail"
+    r"|voice ?mail (system|service)",
     re.I,
 )
 # Someone only answering the phone ("Hello, Jason speaking"), who usually goes on
@@ -428,9 +430,9 @@ def _just_answering_the_phone(text: str) -> bool:
 # the AI greeted the instant the line opened, on top of that, on 3 of 4 real
 # answers. Now it listens first: once they stop for HELLO_GAP_S, or after
 # GREET_WAIT_S of silence, it greets. GREET_MAX_WAIT_S caps a long voicemail.
-GREET_WAIT_S = float(os.getenv("GREET_WAIT_S", "2.0"))
-HELLO_GAP_S = float(os.getenv("HELLO_GAP_S", "0.4"))
-GREET_MAX_WAIT_S = float(os.getenv("GREET_MAX_WAIT_S", "5.0"))
+GREET_WAIT_S = float(os.getenv("GREET_WAIT_S", "3.0"))
+HELLO_GAP_S = float(os.getenv("HELLO_GAP_S", "0.3"))
+GREET_MAX_WAIT_S = float(os.getenv("GREET_MAX_WAIT_S", "8.0"))
 
 
 async def _wait_for_their_hello(session, qualifier) -> str:  # noqa: ANN001
@@ -439,7 +441,9 @@ async def _wait_for_their_hello(session, qualifier) -> str:  # noqa: ANN001
     t0 = time.monotonic()
     heard, quiet_since = False, None
     while True:
-        if qualifier.closing or qualifier.awaiting_connect or qualifier._transfer_triggered:
+        if qualifier.closing or qualifier.awaiting_connect or qualifier._transfer_triggered or qualifier.gate_heard:
+            # A carrier's "To connect your call, press one" is not their hello. 6 Nov:
+            # the greeting started into the gate 70 ms before the digit went out.
             return "skip"
         now = time.monotonic()
         if getattr(session, "user_state", None) == "speaking":
@@ -457,6 +461,14 @@ async def _wait_for_their_hello(session, qualifier) -> str:  # noqa: ANN001
 
 FIRST_GREETING_WAIT_S = float(os.getenv("FIRST_GREETING_WAIT_S", "0.6"))
 _ASKED_HOW_WE_ARE = re.compile(r"how (are|r) (you|ya)|how'?s it going|how about you|and you\b|yourself\b", re.I)
+# Abuse or "go away": say sorry once and hang up. 6 Nov: "F*** off, Daniel."
+# Asking not to be called again is an opt-out, handled by the engine, not here.
+_HOSTILE = re.compile(
+    r"\bf+u+c*k+(ing|in)?\b|\bf\*{2,}|\bpiss off\b|\bbugger off\b|\bget lost\b|\bgo away\b|\bleave me alone\b"
+    r"|\bshut up\b|\bscam(mer)?s?\b.*\b(off|away)\b|\bp\*+ off\b",
+    re.I,
+)
+APOLOGY_LINE = "Sorry to have bothered you. Have a great day."
 # "I'm fine with my bills": the vendor wants a rebuttal, then a callback offer,
 # then a goodbye, in that order. Decided here because the model did not keep to
 # it (5 Nov eval: "No. My bill is fine" went straight to the goodbye). A plain
@@ -465,7 +477,9 @@ _BILL_OBJECTION = re.compile(
     r"\b(fine|happy|good|satisfied) with (my|the|our|what)\b"
     r"|\b(bills?|offer|plan|deal|provider|retailer|company)\b[^.?!]{0,20}\b(is|are|'s)\b[^.?!]{0,10}\b(fine|ok|okay|good|alright)\b"
     r"|\bnot interested\b(?! in (any|being) call)"
-    r"|\brecently (changed|switched)\b",
+    r"|\brecently (changed|switched)\b"
+    # 6 Nov: "No, mate. I don't need it." got the goodbye, not the rebuttal.
+    r"|\bdon'?t (really )?(need|want) (it|this|that|anything|any of (it|that)|attention)\b",
     re.I,
 )
 # Asking not to be called is an opt-out, never a rebuttal.
@@ -639,10 +653,15 @@ async def _expand_tag_stream(
     buf = ""
     last = ""  # last character yielded; "" = nothing spoken yet
     done = False
+    spoken: set[str] = set()
 
     def _line(tag: str) -> str:
         nonlocal done
         tag = (advance or {}).get(tag, tag)
+        if tag in spoken:
+            # 6 Nov: "[Q1] [Q1] [S1Q]" said "I'm calling from Australian Deal" twice.
+            return " "
+        spoken.add(tag)
         if tag.endswith("Q") and tag[:-1] in lines and tag[:-1] not in asked and tag[0] == "S":
             tag = tag[:-1]
         elif tag[0] == "S" and not tag.endswith("Q") and tag in asked and f"{tag}Q" in lines:
@@ -811,7 +830,20 @@ _SCREENING_PATTERNS = re.compile(
     r"|see if (this person|they|he|she)('s| is)? available"
     r"|screening (this|your) call"
     r"|call screen"
-    r"|(google|virtual|digital) assistant",
+    r"|(google|virtual|digital|ai|automated) assistant"
+    # 6 Nov, iPhone/Android screening: "I'm an AI assistant recording this call
+    # for the person you're trying to reach. Please say who you are and why you're calling."
+    r"|recording this call for"
+    r"|say who you are"
+    r"|why you('re| are) calling",
+    re.I,
+)
+# What a screening assistant says after we answered it, while it fetches the
+# person or falls through to voicemail. Never a turn for the model: 6 Nov the AI
+# answered "Please hold while I connect you" with the offer line.
+_SCREENING_FOLLOW_UP = re.compile(
+    r"^\W*(thank you|thanks)\W*$|please hold|connect(ing)? you|one moment|let (them|him|her) know|is busy|busy (right )?now"
+    r"|can'?t (come to|answer) the phone|start talking|hang up when",
     re.I,
 )
 
@@ -951,6 +983,7 @@ class Qualifier(Agent):
         # By end of speech, not by when the turn completes: endpointing can
         # finish that turn just after the greeting has started.
         self.greeting_started = False
+        self.gate_heard = False
         self.greeting_started_at: float | None = None
         self.last_speech_end: float | None = None
         self.dead_air: "_DeadAirWatch | None" = None
@@ -1294,6 +1327,21 @@ class Qualifier(Agent):
         self._objection_pending = tag != "E1"
         return tag
 
+    async def _apologise_and_end(self, said: str) -> None:
+        logger.info("hostile reply (call=%s): %r -> apology and hang-up", self._call_id, said[:80])
+        self._closing = True
+        self._transfer_triggered = True
+        if self._call_id:
+            await _post_transcript(self._call_id, "customer", said)
+        if self.session_ref is not None:
+            try:
+                await asyncio.wait_for(self.session_ref.say(APOLOGY_LINE, allow_interruptions=False), timeout=10.0)
+            except Exception as e:  # noqa: BLE001 — the hang-up must still happen
+                logger.warning("apology failed: %s", e)
+        await asyncio.sleep(0.5)
+        await _drop_customer_leg(self._ctx, self._call_id)
+        self._ctx.shutdown(reason="customer was hostile")
+
     async def _say_objection_line(self, tag: str, said: str) -> None:
         line = self.script_lines[tag]
         logger.info("bill objection (call=%s): %r -> %s", self._call_id, said[:80], tag)
@@ -1350,6 +1398,9 @@ class Qualifier(Agent):
                 self.spawn(_post_transcript(self._call_id, "customer", said))
             self.spawn(self._do_transfer("customer asked to speak to a person"))
             raise StopResponse()
+        if not self._closing and not self._transfer_triggered and _HOSTILE.search(self.last_user_text):
+            self.spawn(self._apologise_and_end(self.last_user_text))
+            raise StopResponse()
         objection_tag = self.next_objection_tag(self.last_user_text)
         if objection_tag:
             self.spawn(self._say_objection_line(objection_tag, self.last_user_text))
@@ -1393,16 +1444,22 @@ class Qualifier(Agent):
         # A call-screening assistant: tell it who is calling, once, and let
         # the person pick up. Never handed to the model, which would answer
         # the bot with step 1 of the script.
+        if self._screening_answered and not self._closing and (
+            _SCREENING_FOLLOW_UP.search(self.last_user_text) or _SCREENING_PATTERNS.search(self.last_user_text)
+        ):
+            logger.info("call screening still talking (call=%s): %r", self._call_id, self.last_user_text[:80])
+            if self._call_id:
+                self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+            raise StopResponse()  # wait for the person, or the mailbox that hangs up the call
         if self.screening_line and not self._screening_answered and not self._closing and _SCREENING_PATTERNS.search(self.last_user_text):
             self._screening_answered = True
             said = self.last_user_text
             logger.info("call screening detected (call=%s): %r", self._call_id, said[:80])
             if self._call_id:
-                async def _record_screen() -> None:
-                    await _post_transcript(self._call_id, "customer", said)
-                    await _post_transcript(self._call_id, "ai", self.screening_line)
-
-                self.spawn(_record_screen())
+                # The line itself reaches the transcript from the chat context.
+                self.spawn(_post_transcript(self._call_id, "customer", said))
+            if self.dead_air is not None:
+                self.dead_air.hold(HOLD_WAIT_S)  # the screen goes off to find the person
             if self.session_ref is not None:
                 self.session_ref.say(self.screening_line, add_to_chat_ctx=True)
             raise StopResponse()
@@ -1650,7 +1707,11 @@ class Qualifier(Agent):
                 self.audio_live_at = time.monotonic()
         if self._amd_reported:
             live_s = time.monotonic() - self.audio_live_at if self.audio_live_at else None
-            revise_human = self._amd_class == "HUMAN" and bool(text) and _amd_revises_human(text, live_s)
+            # After a call screen, mailbox words count whenever they come: the
+            # screen can take longer than the usual window to fall through.
+            revise_human = self._amd_class == "HUMAN" and bool(text) and (
+                _amd_revises_human(text, live_s) or (getattr(self, "_screening_answered", False) and bool(_MACHINE_ONLY_PATTERNS.search(text)))
+            )
             if not (revise_human or (self._amd_class == "SILENCE" and text)):
                 return
         was_human = self._amd_class == "HUMAN"
@@ -3362,6 +3423,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 qualifier.spawn(qualifier.press_gate(digit))
                 return
             if _GATE_PROMPT.search(text):
+                qualifier.gate_heard = True
                 return
             qualifier.report_amd(text)
 

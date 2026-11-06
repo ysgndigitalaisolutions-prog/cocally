@@ -18,6 +18,7 @@ import { TransfersService } from '../workspace/transfers.service';
 import { SchedulingService } from '../leads/scheduling.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 import { extractScriptLines, OPT_OUT_CLOSING_LINE, OPT_OUT_PATTERN } from './lines';
+import { usableFirstName } from './first-name';
 import { interpolate } from './runtime';
 
 /**
@@ -222,7 +223,18 @@ export class EngineController {
     // the hand-off line; both are spoken verbatim by the worker. Without them
     // the pack's generic disclosure and the worker's default hand-off apply.
     const graphNodes = (flowVersion?.graph?.nodes ?? []) as Array<{ type: string; mandatory?: boolean; config?: Record<string, unknown> }>;
-    const openingText = graphNodes.find((n) => n.mandatory && n.type === 'SPEAK' && typeof n.config?.text === 'string')?.config?.text as string | undefined;
+    const openingNode = graphNodes.find((n) => n.mandatory && n.type === 'SPEAK' && typeof n.config?.text === 'string');
+    // "Hi, is that {{firstName}}?" with no usable first name would say "Hi, is
+    // that ?" or "Hi, is that J?": blank, an initial, a title or digits get the
+    // no-name line. A list in capitals ("JOANNA") is spoken as "Joanna".
+    const namedOpening = openingNode?.config?.text as string | undefined;
+    const noNameOpening = openingNode?.config?.textNoName;
+    const spokenName = usableFirstName(vars.firstName);
+    const openingText =
+      namedOpening && /\{\{\s*firstName\s*\}\}/.test(namedOpening) && typeof noNameOpening === 'string' && !spokenName
+        ? noNameOpening
+        : namedOpening;
+    if (spokenName) vars.firstName = spokenName;
     const openingLine = openingText ? interpolate(openingText, vars).trim() : null;
     const announceText = graphNodes.find((n) => n.type === 'TRANSFER')?.config?.announceText;
     const transferLine = typeof announceText === 'string' && announceText.trim() ? interpolate(announceText, vars).trim() : null;

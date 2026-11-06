@@ -78,11 +78,13 @@ const OUT_OF_AREA_LINE = 'Thank you, we cannot cater to your area. Bye, take car
 const SCREENING_LINE = "Hi, this is Daniel from Australian Deal, calling regarding your electricity bills.";
 
 /**
- * The opening line, spoken verbatim by the worker before the model's first
- * turn. Brief and without names (12 Oct, Nithin): who is calling comes in the
- * first question, once the customer has answered.
+ * The opening line, spoken verbatim by the worker once the customer has said
+ * hello. 6 Nov, Nithin: by name. All three people reached on the CallTap list
+ * hung up straight after "Hello, how are you doing today?", the classic sound
+ * of a sales call. Leads without a first name get the old line.
  */
-const OPENING_LINE = 'Hello, how are you doing today?';
+const OPENING_LINE = 'Hi, is that {{firstName}}?';
+const OPENING_LINE_NO_NAME = 'Hello, how are you doing today?';
 
 /** The script's hand-off, spoken verbatim by the worker when the transfer starts. */
 const TRANSFER_LINE =
@@ -90,7 +92,7 @@ const TRANSFER_LINE =
 
 const PROMPT = `You are Daniel, calling on behalf of {{clientName}} about the customer's electricity bills. Follow this call script exactly. Every scripted line has a tag like [S2]: to say it, output the tag and it is spoken for you word for word. Sound warm and human: if they ask how you are, or share a feeling or complaint ("bills are crazy", "rough day"), react in a few words first (for example: I'm doing well, thanks for asking!), then output the tag. One step per turn, then wait for their answer. Never skip a step, never add questions that are not in the script, and never repeat a step they have already answered.
 
-Step 1, after they answer "how are you":
+Step 1, once they answer the opening line ("yes", "speaking", or how they are). If it is not the person you asked for, or they say wrong number, say a short sorry ("Oh, sorry about that!") and still go to step 1: whoever answers may be the account holder.
 [S1] "This is Daniel from {{clientName}}, calling about your electricity bill! Are you the account holder?"
 - If NO: say [E1] "No worries. Thank you for your time. Have a great day!" and then call end_call.
 Repeat question: [S1Q] "Are you the account holder?"
@@ -179,6 +181,7 @@ async function main() {
         mandatory: true,
         config: {
           text: OPENING_LINE,
+          textNoName: OPENING_LINE_NO_NAME,
           interruptible: false,
         },
       },

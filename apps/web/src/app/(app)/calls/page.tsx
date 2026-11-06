@@ -51,6 +51,21 @@ function isoDate(d: Date): string {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
 }
 
+type SortKey = 'started' | 'customer' | 'callerId' | 'campaign' | 'result' | 'agent' | 'disposition' | 'ring' | 'ai' | 'human';
+/** Click a heading to sort by it, again to reverse. Numbers and dates start biggest/newest first. */
+const COLUMNS: Array<{ key: SortKey; label: string; right?: boolean; firstDir: 1 | -1 }> = [
+  { key: 'started', label: 'Started', firstDir: -1 },
+  { key: 'customer', label: 'Customer', firstDir: 1 },
+  { key: 'callerId', label: 'Caller ID', firstDir: 1 },
+  { key: 'campaign', label: 'Campaign', firstDir: 1 },
+  { key: 'result', label: 'Result', firstDir: 1 },
+  { key: 'agent', label: 'Agent', firstDir: 1 },
+  { key: 'disposition', label: 'Disposition', firstDir: 1 },
+  { key: 'ring', label: 'Ring', right: true, firstDir: -1 },
+  { key: 'ai', label: 'AI min', right: true, firstDir: -1 },
+  { key: 'human', label: 'Human min', right: true, firstDir: -1 },
+];
+
 const EMPTY = { campaignId: '', agentId: '', outcome: '', disposition: '', amdClass: '', from: '', to: '' };
 
 export default function CallsPage() {
@@ -71,7 +86,8 @@ export default function CallsPage() {
   }, [detail?._id]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [agents, setAgents] = useState<Member[]>([]);
-  const [filters, setFilters] = useState({ ...EMPTY });
+  // Opens on today's calls; "Clear filters" still shows every call.
+  const [filters, setFilters] = useState(() => ({ ...EMPTY, from: isoDate(new Date()), to: isoDate(new Date()) }));
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -127,6 +143,27 @@ export default function CallsPage() {
   }
 
   const activeCount = Object.values(filters).filter(Boolean).length;
+
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'started', dir: -1 });
+  const sortValue = (c: CallRow, key: SortKey): string | number => {
+    switch (key) {
+      case 'started': return new Date(c.startedAt).getTime();
+      case 'customer': return (c.leadName || c.leadPhone || '').toLowerCase();
+      case 'callerId': return c.callerId ?? '';
+      case 'campaign': return (campaignName(c.campaignId) ?? '').toLowerCase();
+      case 'result': return resultLabel(c).toLowerCase();
+      case 'agent': return (c.agentName ?? '').toLowerCase();
+      case 'disposition': return (c.disposition ?? '').toLowerCase();
+      case 'ring': return c.ringSeconds ?? -1;
+      case 'ai': return c.aiSeconds ?? 0;
+      case 'human': return c.humanSeconds ?? 0;
+    }
+  };
+  const sorted = [...calls].sort((a, b) => {
+    const x = sortValue(a, sort.key);
+    const y = sortValue(b, sort.key);
+    return (x < y ? -1 : x > y ? 1 : 0) * sort.dir;
+  });
 
   return (
     <div className="space-y-6">
@@ -213,16 +250,22 @@ export default function CallsPage() {
         <table className="w-full min-w-[1040px] text-sm">
           <thead>
             <tr className="text-left text-xs" style={{ color: 'var(--text-dim)' }}>
-              <th className="p-3 font-medium">Started</th>
-              <th className="p-3 font-medium">Customer</th>
-              <th className="p-3 font-medium">Caller ID</th>
-              <th className="p-3 font-medium">Campaign</th>
-              <th className="p-3 font-medium">Result</th>
-              <th className="p-3 font-medium">Agent</th>
-              <th className="p-3 font-medium">Disposition</th>
-              <th className="p-3 text-right font-medium">Ring</th>
-              <th className="p-3 text-right font-medium">AI min</th>
-              <th className="p-3 text-right font-medium">Human min</th>
+              {COLUMNS.map((c) => (
+                <th
+                  key={c.key}
+                  className={`p-3 font-medium ${c.right ? 'text-right' : ''}`}
+                  aria-sort={sort.key === c.key ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none'}
+                >
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 hover:underline"
+                    onClick={() => setSort((s) => (s.key === c.key ? { key: c.key, dir: s.dir === 1 ? -1 : 1 } : { key: c.key, dir: c.firstDir }))}
+                  >
+                    {c.label}
+                    <span aria-hidden>{sort.key === c.key ? (sort.dir === 1 ? '▲' : '▼') : ''}</span>
+                  </button>
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -233,7 +276,7 @@ export default function CallsPage() {
                 </td>
               </tr>
             )}
-            {calls.map((call) => (
+            {sorted.map((call) => (
               <tr
                 key={call._id}
                 tabIndex={0}
