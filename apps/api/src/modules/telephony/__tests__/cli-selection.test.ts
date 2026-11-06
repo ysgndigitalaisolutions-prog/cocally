@@ -14,8 +14,8 @@ describe('caller ID selection', () => {
     expect(cliCandidateFilter({ tenantId, poolIds: [id], countryPackCode: 'AU' })).toMatchObject({ _id: { $in: [id] } });
   });
 
-  it('leaves the pool open when nothing is ticked', () => {
-    expect(cliCandidateFilter({ tenantId, poolIds: [], countryPackCode: 'AU' })).not.toHaveProperty('_id');
+  it("uses none when nothing is ticked, so the carrier's default number shows", () => {
+    expect(cliCandidateFilter({ tenantId, poolIds: [], countryPackCode: 'AU' })).toMatchObject({ _id: { $in: [] } });
   });
 });
 

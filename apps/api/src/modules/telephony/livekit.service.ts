@@ -162,6 +162,36 @@ export class LivekitService {
    * ringing, answer and hangup all arrive as webhooks, which is what lets the
    * call state machine be driven by the carrier rather than guessed at.
    */
+  /**
+   * One short call that presents `from` as caller ID, so a new number can be
+   * checked on a real phone before it goes into rotation. The room is not a
+   * `call-` room, so webhooks ignore it and nothing is recorded or billed;
+   * the phone rings, and on pickup the call ends after a few seconds.
+   */
+  async testCallerId(from: string, to: string): Promise<{ answered: boolean; sipStatus?: number; error?: string }> {
+    const au = Boolean(config.livekit.sipTrunkIdAu) && to.startsWith('+61');
+    const trunkId = au ? config.livekit.sipTrunkIdAu! : config.livekit.sipTrunkId;
+    if (!trunkId) throw new ServiceUnavailableException('No outbound SIP trunk is configured');
+    const prefix = au ? config.livekit.sipDialPrefixAu : config.livekit.sipDialPrefix;
+    const room = `clitest-${Date.now()}`;
+    this.logger.log(`caller ID test from ${from} via ${au ? 'AU trunk' : 'default trunk'}`);
+    try {
+      await this.sipClient.createSipParticipant(trunkId, prefix ? `${prefix}${to.replace(/^\+/, '')}` : to, room, {
+        participantIdentity: 'clitest',
+        participantName: 'Caller ID test',
+        fromNumber: au ? from.replace(/^\+/, '') : from,
+        waitUntilAnswered: true,
+        ringingTimeout: 30,
+      });
+      await new Promise((r) => setTimeout(r, 4000));
+      return { answered: true };
+    } catch (err) {
+      return { answered: false, sipStatus: LivekitService.sipStatusFromError(err), error: (err as Error).message };
+    } finally {
+      await this.roomClient.deleteRoom(room).catch(() => undefined);
+    }
+  }
+
   /** What each trunk shows as caller ID when a call has no number of its own. Cached: it rarely changes. */
   async trunkCallerIds(): Promise<{ au: string | null; other: string | null }> {
     if (this.trunkCallerIdCache && Date.now() - this.trunkCallerIdCache.at < 10 * 60_000) return this.trunkCallerIdCache.ids;

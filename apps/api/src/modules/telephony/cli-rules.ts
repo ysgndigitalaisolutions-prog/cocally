@@ -7,13 +7,15 @@ export function isValidCliNumber(number: string | undefined): boolean {
 
 /**
  * Numbers a dial may use: active, from the campaign's country (a +61 caller ID
- * fails on the Indian test route), and the ones ticked on the campaign if any.
+ * fails on the Indian test route), and ticked on the campaign. Nothing ticked
+ * matches nothing, so the call shows the carrier's default number: a number
+ * added to the pool is only used where someone ticks it.
  */
 export function cliCandidateFilter(input: { tenantId: string; poolIds: Types.ObjectId[]; countryPackCode?: string }) {
   return {
     tenantId: new Types.ObjectId(input.tenantId),
     status: 'ACTIVE' as const,
     ...(input.countryPackCode ? { countryPackCode: input.countryPackCode } : {}),
-    ...(input.poolIds.length > 0 ? { _id: { $in: input.poolIds } } : {}),
+    _id: { $in: input.poolIds },
   };
 }

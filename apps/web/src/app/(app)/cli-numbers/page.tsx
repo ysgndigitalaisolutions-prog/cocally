@@ -23,12 +23,93 @@ const STATUS_COLOR: Record<string, string> = {
   QUARANTINED: 'var(--bad)',
 };
 
+interface TestResult {
+  from: string;
+  to: string;
+  answered: boolean;
+  sipStatus?: number;
+  error?: string;
+}
+
+/**
+ * Ring a phone with a caller ID before it goes on any campaign. The carrier
+ * either lets the number through (the phone rings and is answered) or refuses
+ * it; whoever holds the phone checks which number showed on screen.
+ */
+function TestCallerIdDialog({ initialFrom, onClose }: { initialFrom: string; onClose: () => void }) {
+  const [from, setFrom] = useState(initialFrom);
+  const [to, setTo] = useState('');
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<TestResult | null>(null);
+  const [error, setError] = useState('');
+
+  async function run() {
+    setRunning(true);
+    setResult(null);
+    setError('');
+    try {
+      const { data } = await api.post<TestResult>('/cli/test', { from, to }, { timeout: 60_000 });
+      setResult(data);
+    } catch (err) {
+      const detail = (err as { response?: { data?: { message?: string } } }).response?.data;
+      setError(typeof detail?.message === 'string' ? detail.message : 'The test call could not be placed.');
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.5)' }} onClick={onClose}>
+      <div className="card w-full max-w-md space-y-4 p-6" onClick={(e) => e.stopPropagation()}>
+        <div>
+          <h2 className="text-lg font-semibold">Test a caller ID</h2>
+          <p className="mt-1 text-sm" style={{ color: 'var(--text-dim)' }}>
+            We ring the phone below showing this caller ID, and hang up a few seconds after it is answered. Nothing
+            is said on the call. Check which number appears on the phone's screen.
+          </p>
+        </div>
+        <label className="block text-xs" style={{ color: 'var(--text-dim)' }}>
+          Caller ID to test
+          <input className="input mt-1 font-mono" placeholder="+61312345678" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </label>
+        <label className="block text-xs" style={{ color: 'var(--text-dim)' }}>
+          Phone to ring (one you can see)
+          <input className="input mt-1 font-mono" placeholder="0412 345 678" value={to} onChange={(e) => setTo(e.target.value)} />
+        </label>
+
+        {running && <p className="text-sm">Ringing {to}… answer it and look at the number shown.</p>}
+        {error && <p className="text-sm" style={{ color: 'var(--bad)' }}>{error}</p>}
+        {result && result.answered && (
+          <p className="text-sm" style={{ color: 'var(--good)' }}>
+            Answered: the carrier accepted {result.from}. If the phone showed {result.from}, it is ready to add.
+            If it showed a different number, the carrier has not activated this one yet.
+          </p>
+        )}
+        {result && !result.answered && (
+          <p className="text-sm" style={{ color: 'var(--bad)' }}>
+            Not answered{result.sipStatus ? ` (carrier code ${result.sipStatus})` : ''}. If the phone never rang, the
+            carrier refused this caller ID; if it rang and nobody picked up, try again.
+          </p>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button className="btn btn-ghost text-sm" onClick={onClose}>Close</button>
+          <button className="btn btn-primary text-sm" disabled={running || !from.trim() || !to.trim()} onClick={() => void run()}>
+            {running ? 'Calling…' : 'Ring the phone'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function CliNumbersPage() {
   const [numbers, setNumbers] = useState<CliNumberRow[]>([]);
   const [message, setMessage] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [reasonDrafts, setReasonDrafts] = useState<Record<string, string>>({});
   const [newNumber, setNewNumber] = useState({ number: '', geoRegion: '', countryPackCode: 'AU' });
+  const [testing, setTesting] = useState<string | null>(null);
 
   async function load() {
     const { data } = await api.get<CliNumberRow[]>('/cli');
@@ -139,8 +220,14 @@ export default function CliNumbersPage() {
             onChange={(e) => setNewNumber({ ...newNumber, countryPackCode: e.target.value })}
           />
         </div>
+        <button className="btn btn-ghost text-sm" onClick={() => setTesting(newNumber.number)}>Test first</button>
         <button className="btn btn-primary text-sm" onClick={addNumber}>Add number</button>
       </div>
+      <p className="-mt-4 text-xs" style={{ color: 'var(--text-dim)' }}>
+        A new number is only used on campaigns where it is ticked. Campaigns with nothing ticked keep the carrier's default number.
+      </p>
+
+      {testing !== null && <TestCallerIdDialog initialFrom={testing} onClose={() => setTesting(null)} />}
 
       <div className="card overflow-x-auto">
         <table className="w-full text-sm">
@@ -177,6 +264,7 @@ export default function CliNumbersPage() {
                 </td>
                 <td className="p-3">
                   <div className="flex items-center gap-2">
+                    <button className="btn btn-ghost text-xs" onClick={() => setTesting(row.number)}>Test</button>
                     <input
                       className="input w-40 text-xs"
                       placeholder="reason…"

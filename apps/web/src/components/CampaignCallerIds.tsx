@@ -22,7 +22,8 @@ const STATUS_COLOR: Record<CliRow['status'], string> = {
 
 /**
  * Which caller IDs this campaign dials from, with each number's health. None
- * ticked means every active number from the campaign's country rotates.
+ * ticked means the carrier's default number, so a newly added number only goes
+ * out where someone ticks it.
  */
 export default function CampaignCallerIds({ campaignId, countryPackCode }: { campaignId: string; countryPackCode: string }) {
   const [rows, setRows] = useState<CliRow[] | null>(null);
@@ -30,12 +31,16 @@ export default function CampaignCallerIds({ campaignId, countryPackCode }: { cam
   const [saved, setSaved] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
+  const [carrierDefault, setCarrierDefault] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [numbers, campaign] = await Promise.all([
+    const [numbers, campaign, defaults] = await Promise.all([
       api.get<CliRow[]>('/cli'),
       api.get<{ cliPool?: string[] }>(`/campaigns/${campaignId}`),
+      api.get<{ au: string | null; other: string | null }>('/cli/default').catch(() => null),
     ]);
+    const d = defaults?.data;
+    setCarrierDefault((countryPackCode === 'AU' ? d?.au : d?.other) ?? null);
     const pool = new Set((campaign.data.cliPool ?? []).map(String));
     setRows(numbers.data.filter((n) => n.countryPackCode === countryPackCode));
     setSelected(pool);
@@ -81,9 +86,7 @@ export default function CampaignCallerIds({ campaignId, countryPackCode }: { cam
       <p className="mt-1 text-sm text-dim">
         {selected.size > 0
           ? `This campaign rotates through the ${selected.size === 1 ? 'number' : `${selected.size} numbers`} ticked below.`
-          : rows.length > 0
-            ? `None ticked: all active ${countryPackCode} numbers rotate.`
-            : `No ${countryPackCode} numbers added yet. Calls use the carrier's default caller ID.`}
+          : `None ticked: calls show the carrier's default number${carrierDefault ? ` (${carrierDefault})` : ''}.`}
       </p>
 
       {rows.length > 0 && (
