@@ -55,11 +55,11 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   async handleConnection(socket: Socket): Promise<void> {
     try {
       const token = (socket.handshake.auth as { token?: string }).token ?? '';
-      const payload = await this.jwtService.verifyAsync<{ sub: string; tenantId: string; roles: Role[]; tv?: number }>(token);
+      const payload = await this.jwtService.verifyAsync<{ sub: string; tenantId: string; roles: Role[]; tv?: number; sup?: string }>(token);
       // Same live checks as the HTTP guard: a deactivated user or one whose
       // sessions were signed out must not keep a socket streaming floor data.
       const state = await this.userState.load(payload.sub);
-      if (!state || !state.active || (payload.tv ?? 0) !== state.tokenVersion) {
+      if (!state || !state.active || (payload.tv ?? 0) !== state.tokenVersion || state.support !== Boolean(payload.sup)) {
         socket.disconnect(true);
         return;
       }

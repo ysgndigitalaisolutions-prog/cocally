@@ -118,7 +118,7 @@ export class UsersService {
 
   async list(tenantId: string): Promise<SafeUser[]> {
     const users = await this.userModel
-      .find({ tenantId: new Types.ObjectId(tenantId) })
+      .find({ tenantId: new Types.ObjectId(tenantId), support: { $ne: true } })
       .select('+passwordHash')
       .sort({ createdAt: 1 })
       .exec();

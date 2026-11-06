@@ -120,6 +120,14 @@ export class OpsController {
     return this.tenants.detail(id);
   }
 
+  /** Sign in to the tenant's workspace as CoCally support; recorded in both audit logs. */
+  @Post('tenants/:id/support-session')
+  async supportSession(@CurrentOperator() op: AuthenticatedOperator, @Param('id') id: string, @Req() req: Request) {
+    const session = await this.tenants.supportSession(id, op.email);
+    await this.audit.record(op, { action: 'support.open', tenantId: id, entityType: 'Tenant', entityId: id, ip: req.ip });
+    return session;
+  }
+
   @Patch('tenants/:id')
   async updateTenant(@CurrentOperator() op: AuthenticatedOperator, @Param('id') id: string, @Body() dto: UpdateTenantDto, @Req() req: Request) {
     const { before, after } = await this.tenants.update(id, dto);

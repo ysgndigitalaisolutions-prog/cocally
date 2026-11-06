@@ -19,6 +19,8 @@ export interface SessionUser {
   roles: string[];
   totpEnabled?: boolean;
   twoFactorSetupRequired?: boolean;
+  /** A support session opened from the ops console: who opened it, in which workspace. */
+  support?: { by: string; tenantName: string };
 }
 
 /**

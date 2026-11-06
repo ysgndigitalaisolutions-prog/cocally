@@ -12,6 +12,8 @@ export interface UserState {
   roles: Role[];
   email?: string;
   phone?: string;
+  /** CoCally support identity: only valid with a token minted from the ops console. */
+  support: boolean;
 }
 
 /**
@@ -40,7 +42,7 @@ export class UserStateService {
     if (!Types.ObjectId.isValid(userId)) return null;
     const user = await this.userModel
       .findById(new Types.ObjectId(userId))
-      .select('active tokenVersion totpEnabled roles email phone tenantId')
+      .select('active tokenVersion totpEnabled roles email phone tenantId support')
       .lean()
       .exec();
     if (!user) return null;
@@ -53,6 +55,7 @@ export class UserStateService {
       roles: user.roles,
       email: user.email,
       phone: user.phone,
+      support: user.support === true,
       at: Date.now(),
     };
     this.cache.set(userId, state);

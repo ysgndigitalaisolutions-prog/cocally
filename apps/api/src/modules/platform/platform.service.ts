@@ -142,7 +142,7 @@ export class PlatformService {
     if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Tenant not found');
     const tenant = await this.tenantModel.findById(id).lean().exec();
     if (!tenant) throw new NotFoundException('Tenant not found');
-    const users = await this.userModel.countDocuments({ tenantId: tenant._id, active: { $ne: false } }).exec();
+    const users = await this.userModel.countDocuments({ tenantId: tenant._id, active: { $ne: false }, support: { $ne: true } }).exec();
     return {
       tenantId: tenant._id.toString(),
       name: tenant.name,

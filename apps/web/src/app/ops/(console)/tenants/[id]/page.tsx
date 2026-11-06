@@ -9,6 +9,8 @@ import TenantLatency from '@/components/ops/TenantLatency';
 import { fmtDate, fmtDateTime, LinkBox, Pill, tenantStatus } from '@/components/ops/ui';
 import { inr, num } from '@/lib/billing';
 import { opsApi, opsError } from '@/lib/ops-api';
+import { homeFor } from '@/lib/roles';
+import type { SessionUser } from '@/lib/store';
 
 interface Voice {
   provider: 'elevenlabs' | 'cartesia' | 'deepgram';
@@ -69,6 +71,23 @@ export default function OpsTenantPage() {
     }
   }
 
+  /**
+   * Sign in to the tenant's app as CoCally support, in a new tab. The session
+   * replaces any app login in this browser (they share storage); the ops
+   * console stays signed in.
+   */
+  async function openWorkspace() {
+    try {
+      const { data } = await opsApi.post<{ token: string; user: SessionUser }>(`/tenants/${id}/support-session`);
+      localStorage.setItem('cocally.token', data.token);
+      localStorage.setItem('cocally.user', JSON.stringify(data.user));
+      window.open(homeFor(data.user), '_blank');
+      setNote({ text: `Opened ${tenant?.name} as CoCally support in a new tab (2 hours). Recorded in the audit log.` });
+    } catch (err) {
+      setNote({ text: opsError(err, 'Could not open the workspace.'), bad: true });
+    }
+  }
+
   if (!tenant) return <p style={{ color: note?.bad ? 'var(--bad)' : 'var(--text-dim)' }}>{note?.text ?? 'Loading…'}</p>;
 
   return (
@@ -84,6 +103,11 @@ export default function OpsTenantPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {tenant.active && (
+            <button className="btn btn-primary" onClick={() => void openWorkspace()}>
+              Open workspace
+            </button>
+          )}
           {tenant.active && (
             <button
               className="btn"

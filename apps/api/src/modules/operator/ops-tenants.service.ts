@@ -106,7 +106,7 @@ export class OpsTenantsService {
   async detail(id: string) {
     const t = await this.load(id);
     const [users, campaigns, clients] = await Promise.all([
-      this.userModel.countDocuments({ tenantId: t._id, active: true }).exec(),
+      this.userModel.countDocuments({ tenantId: t._id, active: true, support: { $ne: true } }).exec(),
       this.campaignModel.countDocuments({ tenantId: t._id }).exec(),
       this.clientModel.find({ tenantId: t._id }).select('name active').lean().exec(),
     ]);
@@ -208,10 +208,17 @@ export class OpsTenantsService {
 
   // ── Users ──────────────────────────────────────────────────────────────
 
+  /** Open the tenant's workspace as CoCally support (see AuthService.issueSupportSession). */
+  async supportSession(tenantId: string, operatorEmail: string) {
+    const tenant = await this.load(tenantId);
+    if (tenant.active === false) throw new BadRequestException('This tenant is deactivated; reactivate it first');
+    return this.auth.issueSupportSession(tenantId, operatorEmail, tenant.name);
+  }
+
   async users(tenantId: string) {
     await this.load(tenantId);
     const users = await this.userModel
-      .find({ tenantId: new Types.ObjectId(tenantId) })
+      .find({ tenantId: new Types.ObjectId(tenantId), support: { $ne: true } })
       .select('+passwordHash')
       .sort({ createdAt: 1 })
       .lean()

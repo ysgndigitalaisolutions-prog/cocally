@@ -25,6 +25,8 @@ export interface JwtPayload {
   roles: Role[];
   /** tokenVersion at mint time; see User.tokenVersion. */
   tv: number;
+  /** Set on support sessions opened from the ops console: the operator's email. */
+  sup?: string;
 }
 
 /** Roles that must have TOTP enrolled before they can use anything but the enrolment routes. */
@@ -70,6 +72,8 @@ export class JwtAuthGuard implements CanActivate {
     const state = await this.userState.load(payload.sub);
     if (!state || !state.active) throw new UnauthorizedException('Account is disabled');
     if ((payload.tv ?? 0) !== state.tokenVersion) throw new UnauthorizedException('Session has been signed out');
+    // The support identity has no login of its own; only an ops-minted token opens it.
+    if (state.support !== Boolean(payload.sup)) throw new UnauthorizedException('Invalid session');
 
     request.user = {
       userId: payload.sub,
@@ -79,7 +83,8 @@ export class JwtAuthGuard implements CanActivate {
       totpEnabled: state.totpEnabled,
     };
 
-    const needs2fa = state.roles.some((r) => TWO_FACTOR_REQUIRED_ROLES.includes(r)) && !state.totpEnabled;
+    // A support session's two-factor check was the operator's own, at the ops console.
+    const needs2fa = !payload.sup && state.roles.some((r) => TWO_FACTOR_REQUIRED_ROLES.includes(r)) && !state.totpEnabled;
     if (needs2fa) {
       const skip = this.reflector.getAllAndOverride<boolean>(SKIP_2FA_KEY, [context.getHandler(), context.getClass()]);
       if (!skip) {

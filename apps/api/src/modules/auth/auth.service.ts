@@ -29,6 +29,8 @@ export interface SessionProfile {
   totpEnabled: boolean;
   /** True when the role requires TOTP and it is not yet enrolled: the client must go to setup. */
   twoFactorSetupRequired: boolean;
+  /** Support session from the ops console: who opened it, and which workspace. */
+  support?: { by: string; tenantName: string };
 }
 
 export interface RequestContext {
@@ -316,6 +318,31 @@ export class AuthService {
     return this.userModel.findOne({ email: trimmed.toLowerCase() }).select(select).exec();
   }
 
+  /**
+   * A session in a tenant for a CoCally operator, opened from the ops console.
+   * It signs in as the tenant's support identity (created on first use, Admin
+   * role, no phone, email or password), so the tenant's own users and their
+   * logins are untouched. Short-lived: the operator opens it again when needed.
+   */
+  async issueSupportSession(tenantId: string, operatorEmail: string, tenantName: string): Promise<{ token: string; user: SessionProfile }> {
+    const tid = new Types.ObjectId(tenantId);
+    const user = await this.userModel
+      .findOneAndUpdate(
+        { tenantId: tid, support: true },
+        {
+          $setOnInsert: { tenantId: tid, support: true, name: 'CoCally support', roles: ['ADMIN'], skills: [], languages: ['en'] },
+          $set: { active: true },
+        },
+        { upsert: true, new: true },
+      )
+      .exec();
+    const token = await this.jwtService.signAsync(
+      { sub: user._id.toString(), tenantId, email: `CoCally support (${operatorEmail})`, roles: user.roles, tv: user.tokenVersion ?? 0, sup: operatorEmail },
+      { expiresIn: '2h' },
+    );
+    return { token, user: { ...this.toProfile(user), support: { by: operatorEmail, tenantName } } };
+  }
+
   private async issueToken(user: UserDocument): Promise<LoginResult> {
     const token = await this.jwtService.signAsync({
       sub: user._id.toString(),
@@ -327,8 +354,9 @@ export class AuthService {
     return { token, requires2fa: false, user: this.toProfile(user) };
   }
 
-  private toProfile(user: Pick<User, 'name' | 'email' | 'phone' | 'roles' | 'totpEnabled'> & { _id: Types.ObjectId }): SessionProfile {
-    const requires = user.roles.some((r) => TWO_FACTOR_REQUIRED_ROLES.includes(r));
+  private toProfile(user: Pick<User, 'name' | 'email' | 'phone' | 'roles' | 'totpEnabled' | 'support'> & { _id: Types.ObjectId }): SessionProfile {
+    // The support identity's two-factor check is the operator's, at the ops console.
+    const requires = !user.support && user.roles.some((r) => TWO_FACTOR_REQUIRED_ROLES.includes(r));
     return {
       id: user._id.toString(),
       name: user.name,

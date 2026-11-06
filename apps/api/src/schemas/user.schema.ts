@@ -15,6 +15,13 @@ export class User {
   @Prop({ trim: true })
   phone?: string;
 
+  /**
+   * CoCally's own support identity in this tenant: reached only from the ops
+   * console (no phone, email or password), hidden from the tenant's team list.
+   */
+  @Prop({ default: false })
+  support?: boolean;
+
   /** Contact address, also accepted as a login identifier for legacy accounts. */
   @Prop({ lowercase: true, trim: true })
   email?: string;

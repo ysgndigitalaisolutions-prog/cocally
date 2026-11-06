@@ -43,6 +43,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     return () => clearInterval(timer);
   }, [pathname]);
 
+  /** Leave a support session: back to the ops console, which stayed signed in. */
+  function endSupport() {
+    localStorage.removeItem('cocally.token');
+    localStorage.removeItem('cocally.user');
+    disconnectSocket();
+    router.replace('/ops/tenants');
+  }
+
   function logout() {
     localStorage.removeItem('cocally.token');
     localStorage.removeItem('cocally.user');
@@ -63,6 +71,19 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <aside className="w-56 shrink-0 border-r border-border bg-surface" aria-hidden />
       )}
       <main className="flex-1 overflow-x-hidden p-8" style={{ paddingBottom: activeCall ? '5rem' : undefined }}>
+        {user?.support && (
+          <div
+            className="-mx-8 -mt-8 mb-6 flex flex-wrap items-center justify-between gap-2 px-8 py-2 text-sm"
+            style={{ background: 'var(--accent)', color: '#0b1220' }}
+          >
+            <span>
+              You are in <b>{user.support.tenantName}</b> as CoCally support ({user.support.by}). Changes here are recorded in their audit log.
+            </span>
+            <button className="font-semibold underline" onClick={endSupport}>
+              Back to ops
+            </button>
+          </div>
+        )}
         {ready && children}
       </main>
       <GlobalCallBar />
