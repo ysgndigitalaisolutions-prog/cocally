@@ -410,7 +410,52 @@ HOLD_WAIT_S = float(os.getenv("HOLD_WAIT_S", "30"))
 # Step 2 (electricity only or gas) is not scored: asked once and repeated once at
 # most. 6 Nov: "electricity also" got the question four times.
 MAX_ASKS = {"S2": 2}
-FIRST_GREETING_WAIT_S = float(os.getenv("FIRST_GREETING_WAIT_S", "0.3"))
+# A lone name ("Amber.") is answering the phone too. 6 Nov: the AI spoke over
+# "Yeah, good" that came right after it. Words that answer "how are you" do not count.
+_ANSWER_WORDS = re.compile(
+    r"\b(good|fine|great|well|ok|okay|alright|bad|thanks|thank|yes|yeah|yep|no|nah|nope|who|what|why|busy|sorry|sure)\b", re.I
+)
+
+
+def _just_answering_the_phone(text: str) -> bool:
+    if _GREETING_ONLY.match(text):
+        return True
+    words = re.findall(r"[A-Za-z']+", text)
+    return 0 < len(words) <= 3 and "?" not in text and not _ANSWER_WORDS.search(text)
+
+
+# People answer the phone by speaking first ("Hello?", "Jason speaking"). 6 Nov:
+# the AI greeted the instant the line opened, on top of that, on 3 of 4 real
+# answers. Now it listens first: once they stop for HELLO_GAP_S, or after
+# GREET_WAIT_S of silence, it greets. GREET_MAX_WAIT_S caps a long voicemail.
+GREET_WAIT_S = float(os.getenv("GREET_WAIT_S", "2.0"))
+HELLO_GAP_S = float(os.getenv("HELLO_GAP_S", "0.4"))
+GREET_MAX_WAIT_S = float(os.getenv("GREET_MAX_WAIT_S", "5.0"))
+
+
+async def _wait_for_their_hello(session, qualifier) -> str:  # noqa: ANN001
+    """'spoke' once they said something and paused, 'silent' if they said nothing,
+    'skip' if the call is no longer ours to greet (a gate, a hang-up)."""
+    t0 = time.monotonic()
+    heard, quiet_since = False, None
+    while True:
+        if qualifier.closing or qualifier.awaiting_connect or qualifier._transfer_triggered:
+            return "skip"
+        now = time.monotonic()
+        if getattr(session, "user_state", None) == "speaking":
+            heard, quiet_since = True, None
+        elif heard:
+            quiet_since = quiet_since or now
+            if now - quiet_since >= HELLO_GAP_S:
+                return "spoke"
+        elif now - t0 >= GREET_WAIT_S:
+            return "silent"
+        if now - t0 >= GREET_MAX_WAIT_S:
+            return "spoke" if heard else "silent"
+        await asyncio.sleep(0.05)
+
+
+FIRST_GREETING_WAIT_S = float(os.getenv("FIRST_GREETING_WAIT_S", "0.6"))
 _ASKED_HOW_WE_ARE = re.compile(r"how (are|r) (you|ya)|how'?s it going|how about you|and you\b|yourself\b", re.I)
 # "I'm fine with my bills": the vendor wants a rebuttal, then a callback offer,
 # then a goodbye, in that order. Decided here because the model did not keep to
@@ -902,6 +947,12 @@ class Qualifier(Agent):
         self._objection_stage = 0
         self._objection_pending = False
         self._first_turn_done = False
+        # Their "Hello?" before the greeting is answered by the greeting itself.
+        # By end of speech, not by when the turn completes: endpointing can
+        # finish that turn just after the greeting has started.
+        self.greeting_started = False
+        self.greeting_started_at: float | None = None
+        self.last_speech_end: float | None = None
         self.dead_air: "_DeadAirWatch | None" = None
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001, ANN201 — framework signature
@@ -1211,7 +1262,7 @@ class Qualifier(Agent):
     async def _customer_carried_on(self, text: str) -> bool:
         """After a greeting-only first turn, hold the reply a moment. True if they
         started talking again, so this turn gets no reply and the next one does."""
-        if not _GREETING_ONLY.match(text) or self.session_ref is None:
+        if not _just_answering_the_phone(text) or self.session_ref is None:
             return False
         deadline = time.monotonic() + FIRST_GREETING_WAIT_S
         while time.monotonic() < deadline:
@@ -1277,6 +1328,15 @@ class Qualifier(Agent):
             if self.opening_line and self.session_ref is not None and not self._closing:
                 self.session_ref.say(self.opening_line)
                 raise StopResponse()
+        if self.opening_line and (
+            not self.greeting_started
+            or (
+                self.greeting_started_at is not None
+                and self.last_speech_end is not None
+                and self.last_speech_end <= self.greeting_started_at
+            )
+        ):
+            raise StopResponse()  # their "Hello?": the greeting is the reply
         if self.restore_endpointing is not None:
             restore, self.restore_endpointing = self.restore_endpointing, None
             restore()
@@ -3181,6 +3241,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 last_interim = ""
         elif old == "speaking" and new == "listening":
             speech_ended_at = time.monotonic()
+            qualifier.last_speech_end = speech_ended_at
             awaiting_reply = True
             _arm_stall()
             dead_air.arm()
@@ -3414,6 +3475,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # The disclosure is law, not style: speak it verbatim, uninterruptible,
     # and record a compliance event — instead of trusting the LLM's first turn.
     spoken = False
+    waited = await _wait_for_their_hello(session, qualifier) if disclosure else "silent"
+    logger.info("greeting after their hello: %s in %.2fs (call=%s)", waited, time.monotonic() - qualifier.audio_live_at, call_id)
+    if waited == "skip":
+        disclosure = None  # a gate: the greeting goes out when the handset speaks
+    qualifier.greeting_started = True
+    qualifier.greeting_started_at = time.monotonic()
     if disclosure:
         handle = None
         try:

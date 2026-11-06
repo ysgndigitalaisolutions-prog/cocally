@@ -602,3 +602,39 @@ def test_dead_air_waits_longer_once_after_a_hold():
         assert asked == [1, 1]  # back to the normal wait
 
     asyncio.run(go())
+
+
+def test_a_lone_name_is_answering_the_phone():
+    for said in ("Amber.", "Keith speaking.", "Hello, Jason speaking.", "Hello?"):
+        assert agent._just_answering_the_phone(said), said
+    for said in ("Yeah. Good.", "Good, thank you.", "Fine.", "Yes.", "Who is this?", "I'm busy right now.", "No. My electricity bill is fine."):
+        assert not agent._just_answering_the_phone(said), said
+
+
+def test_greeting_waits_for_their_hello():
+    import asyncio
+    from types import SimpleNamespace
+
+    q = SimpleNamespace(closing=False, awaiting_connect=False, _transfer_triggered=False)
+    old = (agent.GREET_WAIT_S, agent.HELLO_GAP_S, agent.GREET_MAX_WAIT_S)
+    agent.GREET_WAIT_S, agent.HELLO_GAP_S, agent.GREET_MAX_WAIT_S = 0.3, 0.1, 1.0
+    try:
+        async def speaks_then_stops():
+            s = SimpleNamespace(user_state="listening")
+            async def talk():
+                await asyncio.sleep(0.05)
+                s.user_state = "speaking"
+                await asyncio.sleep(0.4)  # longer than GREET_WAIT_S: still waits for them
+                s.user_state = "listening"
+            asyncio.create_task(talk())
+            t0 = asyncio.get_running_loop().time()
+            r = await agent._wait_for_their_hello(s, q)
+            return r, asyncio.get_running_loop().time() - t0
+
+        r, took = asyncio.run(speaks_then_stops())
+        assert r == "spoke" and 0.5 <= took < 0.8, (r, took)
+        assert asyncio.run(agent._wait_for_their_hello(SimpleNamespace(user_state="listening"), q)) == "silent"
+        q.awaiting_connect = True
+        assert asyncio.run(agent._wait_for_their_hello(SimpleNamespace(user_state="speaking"), q)) == "skip"
+    finally:
+        agent.GREET_WAIT_S, agent.HELLO_GAP_S, agent.GREET_MAX_WAIT_S = old
