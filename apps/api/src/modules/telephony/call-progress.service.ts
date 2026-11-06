@@ -229,7 +229,8 @@ export class CallProgressService {
     // the URI of the one this call is actually associated with.
     if (call.recordingEgressId && call.recordingEgressId !== egressId) return;
     call.recordingEgressId = egressId;
-    if (uri) call.recordingUri = uri;
+    // Recording starts before the dial: nobody answered, nothing to play.
+    if (uri && call.answeredAt) call.recordingUri = uri;
     await call.save();
   }
 

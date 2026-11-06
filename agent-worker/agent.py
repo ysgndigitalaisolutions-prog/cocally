@@ -396,7 +396,21 @@ _GREETING_ONLY = re.compile(
     r"|^\W*[a-z']+\s+(?:speaking|here)\b(?:\s+with you)?\W*$",
     re.I,
 )
-FIRST_GREETING_WAIT_S = float(os.getenv("FIRST_GREETING_WAIT_S", "0.6"))
+# "Just give me a minute, I'll check": 6 Nov, the AI echoed it back and asked
+# "are you still there?" 8 s later while the customer looked for their bill.
+_HOLD_REQUEST = re.compile(
+    r"\b(give me a (minute|moment|sec(ond)?)|hold on|hang on|one (sec|second|moment|minute)|just a (sec|second|moment|minute)"
+    r"|let me (check|have a look|look|find|get|see|grab))\b",
+    re.I,
+)
+# "Hang on, it's AGL" is an answer, not a request to wait.
+_HOLD_HAS_ANSWER = re.compile(r"\b(agl|origin|energy|power|electric\w*|gas|dollars?|bucks|\d+)\b", re.I)
+HOLD_LINE = "Sure, take your time."
+HOLD_WAIT_S = float(os.getenv("HOLD_WAIT_S", "30"))
+# Step 2 (electricity only or gas) is not scored: asked once and repeated once at
+# most. 6 Nov: "electricity also" got the question four times.
+MAX_ASKS = {"S2": 2}
+FIRST_GREETING_WAIT_S = float(os.getenv("FIRST_GREETING_WAIT_S", "0.3"))
 _ASKED_HOW_WE_ARE = re.compile(r"how (are|r) (you|ya)|how'?s it going|how about you|and you\b|yourself\b", re.I)
 # "I'm fine with my bills": the vendor wants a rebuttal, then a callback offer,
 # then a goodbye, in that order. Decided here because the model did not keep to
@@ -462,6 +476,11 @@ class _DeadAirWatch:
         self._asked = False
         self._task: asyncio.Task | None = None
         self._hanging_up: asyncio.Task | None = None
+        self._hold_s: float | None = None
+
+    def hold(self, seconds: float) -> None:
+        """The customer asked us to wait: the next check-in comes this much later."""
+        self._hold_s = seconds
 
     def arm(self) -> None:
         self.cancel()
@@ -478,7 +497,9 @@ class _DeadAirWatch:
         self.cancel()
 
     async def _wait(self) -> None:
-        await asyncio.sleep(self._hang_up_s if self._asked else self._reprompt_s)
+        wait = self._hang_up_s if self._asked else (self._hold_s or self._reprompt_s)
+        await asyncio.sleep(wait)
+        self._hold_s = None
         if self._stopped():
             return
         if self._asked:
@@ -548,7 +569,11 @@ def expand_script_tags(text: str, lines: dict[str, str]) -> str:
 
 
 async def _expand_tag_stream(
-    chunks, lines: dict[str, str], blocked: frozenset[str] = frozenset(), asked: frozenset[str] = frozenset()
+    chunks,
+    lines: dict[str, str],
+    blocked: frozenset[str] = frozenset(),
+    asked: frozenset[str] = frozenset(),
+    advance: dict[str, str] | None = None,
 ):  # noqa: ANN001, ANN201 — llm_node chunk stream
     """Stream form for `llm_node`: text passes straight through except a
     possible partial tag, which is held until it completes (or cannot).
@@ -572,6 +597,7 @@ async def _expand_tag_stream(
 
     def _line(tag: str) -> str:
         nonlocal done
+        tag = (advance or {}).get(tag, tag)
         if tag.endswith("Q") and tag[:-1] in lines and tag[:-1] not in asked and tag[0] == "S":
             tag = tag[:-1]
         elif tag[0] == "S" and not tag.endswith("Q") and tag in asked and f"{tag}Q" in lines:
@@ -876,6 +902,7 @@ class Qualifier(Agent):
         self._objection_stage = 0
         self._objection_pending = False
         self._first_turn_done = False
+        self.dead_air: "_DeadAirWatch | None" = None
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001, ANN201 — framework signature
         async for frame in Agent.default.tts_node(self, text, model_settings):
@@ -905,7 +932,9 @@ class Qualifier(Agent):
             # on the normal fallback chain.
             stream = _first_word_deadline(stream, LLM_FIRST_WORD_DEADLINE_S if attempt == 1 else 0)
             if self.script_lines:
-                stream = _expand_tag_stream(stream, self.script_lines, frozenset(self.blocked_tags), self._steps_asked())
+                stream = _expand_tag_stream(
+                    stream, self.script_lines, frozenset(self.blocked_tags), self._steps_asked(), self._steps_past_limit()
+                )
             produced = False
             try:
                 async for chunk in stream:
@@ -1025,13 +1054,33 @@ class Qualifier(Agent):
         if not steps:
             return None
         last = steps[-1]
-        probe = re.sub(r"\s+", " ", self.script_lines[last]).strip().lower()[-40:]
+        # The step's own ending, or its repeat question: 6 Nov, step 4 was cut off
+        # by "Per month", asked again as [S4Q], and the transfer was refused four times.
+        probes = [re.sub(r"\s+", " ", self.script_lines[t]).strip().lower()[-40:] for t in (last, f"{last}Q") if t in self.script_lines]
         for item in self.chat_ctx.items:
             if getattr(item, "role", None) == "assistant":
                 said = re.sub(r"\s+", " ", getattr(item, "text_content", "") or "").lower()
-                if probe in said:
+                if any(p in said for p in probes):
                     return None
         return last
+
+    def _steps_past_limit(self) -> dict[str, str]:
+        """Repeat tags to swap for the next step once a step was asked MAX_ASKS times."""
+        out: dict[str, str] = {}
+        said = [
+            re.sub(r"\s+", " ", getattr(i, "text_content", "") or "").lower()
+            for i in self.chat_ctx.items
+            if getattr(i, "role", None) == "assistant"
+        ]
+        for step, limit in MAX_ASKS.items():
+            q, nxt = self.script_lines.get(f"{step}Q"), f"S{int(step[1:]) + 1}"
+            if not q or nxt not in self.script_lines:
+                continue
+            probe = re.sub(r"\s+", " ", q).strip().lower()[-40:]
+            if sum(probe in s for s in said) >= limit:
+                out[f"{step}Q"] = nxt
+                out[step] = nxt
+        return out
 
     @function_tool
     async def end_call(self, context: RunContext) -> str | None:
@@ -1198,8 +1247,8 @@ class Qualifier(Agent):
         line = self.script_lines[tag]
         logger.info("bill objection (call=%s): %r -> %s", self._call_id, said[:80], tag)
         if self._call_id:
+            # The line itself reaches the transcript from the chat context, like any reply.
             await _post_transcript(self._call_id, "customer", said)
-            await _post_transcript(self._call_id, "ai", line)
         if tag != "E1":
             if self.session_ref is not None:
                 self.session_ref.say(line, add_to_chat_ctx=True)
@@ -1244,6 +1293,20 @@ class Qualifier(Agent):
         objection_tag = self.next_objection_tag(self.last_user_text)
         if objection_tag:
             self.spawn(self._say_objection_line(objection_tag, self.last_user_text))
+            raise StopResponse()
+        if (
+            self.dead_air is not None
+            and self.session_ref is not None
+            and _HOLD_REQUEST.search(self.last_user_text)
+            and len(self.last_user_text.split()) <= 12
+            and not _TIME_WORDS.search(self.last_user_text)
+            and not _HOLD_HAS_ANSWER.search(self.last_user_text)
+        ):
+            logger.info("customer asked us to hold (call=%s): %r", self._call_id, self.last_user_text[:80])
+            if self._call_id:
+                self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+            self.dead_air.hold(HOLD_WAIT_S)
+            self.session_ref.say(HOLD_LINE, add_to_chat_ctx=True)
             raise StopResponse()
         if not self._first_turn_done:
             self._first_turn_done = True
@@ -3182,6 +3245,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     qualifier.screening_line = str((brief or {}).get("screeningLine") or "")
     logger.info("script lines: %s", ", ".join(sorted(qualifier.script_lines)) or "none (model speaks freely)")
     qualifier.session_ref = session
+    qualifier.dead_air = dead_air
 
     # Prefetch hold music now, in the background, so the transfer hand-off never
     # waits on a download at the one moment latency is most audible. The room

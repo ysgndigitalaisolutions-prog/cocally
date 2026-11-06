@@ -524,3 +524,81 @@ def test_only_asking_how_we_are_earns_an_answer():
         assert agent._ASKED_HOW_WE_ARE.search(said), said
     for said in ("Good, thank you.", "Hello, Jason speaking.", "Who are you?"):
         assert not agent._ASKED_HOW_WE_ARE.search(said), said
+
+
+def _ctx_qualifier(lines, said):
+    from types import SimpleNamespace
+
+    q = agent.Qualifier.__new__(agent.Qualifier)
+    q.script_lines = lines
+    items = [SimpleNamespace(role="assistant", text_content=t) for t in said]
+    type(q).chat_ctx = property(lambda self: SimpleNamespace(items=items))
+    return q
+
+
+_LINES = {
+    "S2": "Energy prices have gone up a lot! Do you have electricity only, or gas as well?",
+    "S2Q": "Do you have electricity only, or gas as well?",
+    "S3": "No problem! Roughly how much is your electricity bill?",
+    "S4": "Thanks! There may be a better offer for you! Which energy company are you with now?",
+    "S4Q": "Which energy company are you with now?",
+}
+
+
+def test_last_step_counts_as_asked_when_only_its_repeat_was_said():
+    # 6 Nov: step 4 cut off by "Per month", asked again as [S4Q]; the transfer was refused four times.
+    q = _ctx_qualifier(_LINES, ["Thanks! There may be a better offer for you!", "Which energy company are you with now?"])
+    try:
+        assert q._last_step_missing() is None
+        q2 = _ctx_qualifier(_LINES, ["Thanks! There may be a better offer for you!"])
+        assert q2._last_step_missing() == "S4"
+    finally:
+        del type(q).chat_ctx
+
+
+def test_gas_question_moves_on_after_one_repeat():
+    import asyncio
+
+    q = _ctx_qualifier(_LINES, [_LINES["S2"], _LINES["S2Q"]])
+    try:
+        adv = q._steps_past_limit()
+        assert adv == {"S2Q": "S3", "S2": "S3"}
+        assert _ctx_qualifier(_LINES, [_LINES["S2"]])._steps_past_limit() == {}
+    finally:
+        del type(q).chat_ctx
+
+    async def go():
+        async def chunks():
+            yield "[S2Q]"
+        return "".join([c async for c in agent._expand_tag_stream(chunks(), _LINES, frozenset(), frozenset({"S2"}), adv)])
+
+    assert "Roughly how much" in asyncio.run(go())
+
+
+def test_hold_requests_are_recognised_but_answers_are_not():
+    for said in ("Just give me a minute. I'll just check and I'll let you know.", "One second. Hold on. I'll tell you", "Hang on, let me check."):
+        assert agent._HOLD_REQUEST.search(said) and not agent._HOLD_HAS_ANSWER.search(said), said
+    for said in ("Hang on, it's AGL.", "Hold on, about 300 dollars."):
+        assert agent._HOLD_HAS_ANSWER.search(said), said
+    assert not agent._HOLD_REQUEST.search("Simple energy.")
+
+
+def test_dead_air_waits_longer_once_after_a_hold():
+    import asyncio
+
+    asked = []
+
+    async def go():
+        w = agent._DeadAirWatch(lambda: asked.append(1), lambda: None, lambda: False, 0.05, 0.05)
+        w.hold(0.3)
+        w.arm()
+        await asyncio.sleep(0.15)
+        assert not asked  # still holding
+        await asyncio.sleep(0.25)
+        assert asked == [1]
+        w.customer_spoke()
+        w.arm()
+        await asyncio.sleep(0.1)
+        assert asked == [1, 1]  # back to the normal wait
+
+    asyncio.run(go())
