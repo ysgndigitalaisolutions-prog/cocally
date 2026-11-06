@@ -2666,6 +2666,7 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
         # Google Chirp 3 HD, en-AU (6 Nov: Nithin chose Leda, as "Emma"; Cartesia
         # voices all sounded robotic to him). Credentials are the VM's, as for Vertex.
         try:
+            from google.cloud import texttospeech
             from livekit.plugins import google
 
             return google.TTS(
@@ -2673,6 +2674,10 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
                 voice_name=TTS_VOICE or "en-AU-Chirp3-HD-Leda",
                 sample_rate=24000,
                 use_streaming=True,
+                # Chirp 3 HD refuses PCM outside streaming (the pre-rendered opening):
+                # "only supports LINEAR16, MP3, OGG_OPUS, MULAW, ALAW". 6 Nov the opening
+                # fell to the backup voice. Streaming still gets PCM: the plugin swaps it.
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("google TTS unavailable (%s) — using Deepgram", e)
