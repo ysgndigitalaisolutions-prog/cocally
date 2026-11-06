@@ -59,6 +59,10 @@ export class CallOrchestratorService {
   // duration of `placeCall`; a live call outlives it and is tracked by the
   // driver until the terminal webhook lands — counting only the local map
   // would report zero on a real trunk and let pacing dial without limit.
+  activeOnAuLine(): number {
+    return this.liveDriver.activeOnAuLine();
+  }
+
   activeCallCount(campaignId: string): number {
     return (
       [...this.activeCalls.values()].filter((c) => c.campaignId === campaignId).length +

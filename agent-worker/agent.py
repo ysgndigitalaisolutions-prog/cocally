@@ -437,8 +437,26 @@ def _just_answering_the_phone(text: str) -> bool:
 # answers. Now it listens first: once they stop for HELLO_GAP_S, or after
 # GREET_WAIT_S of silence, it greets. GREET_MAX_WAIT_S caps a long voicemail.
 GREET_WAIT_S = float(os.getenv("GREET_WAIT_S", "3.0"))
-HELLO_GAP_S = float(os.getenv("HELLO_GAP_S", "0.3"))
+HELLO_GAP_S = float(os.getenv("HELLO_GAP_S", "0.1"))
 GREET_MAX_WAIT_S = float(os.getenv("GREET_MAX_WAIT_S", "8.0"))
+
+
+async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
+    """The opening line as audio frames, or None (then it is synthesised live)."""
+    try:
+        t0 = time.monotonic()
+        frames = []
+        async with tts_engine.synthesize(text) as stream:
+            async for ev in stream:
+                frame = ev.frame
+                if TTS_GAIN_DB and isinstance(frame, rtc.AudioFrame):
+                    frame = _apply_gain(frame, TTS_GAIN_DB)  # as tts_node does for live speech
+                frames.append(frame)
+        logger.info("opening pre-rendered in %.2fs", time.monotonic() - t0)
+        return frames or None
+    except Exception as e:  # noqa: BLE001 — live synthesis is the fallback
+        logger.warning("opening pre-render failed (%s): speaking it live", e)
+        return None
 
 
 async def _wait_for_their_hello(session, qualifier) -> str:  # noqa: ANN001
@@ -990,6 +1008,7 @@ class Qualifier(Agent):
         # finish that turn just after the greeting has started.
         self.greeting_started = False
         self.gate_heard = False
+        self._opening_repeated = False
         self.greeting_started_at: float | None = None
         self.last_speech_end: float | None = None
         self.dead_air: "_DeadAirWatch | None" = None
@@ -1152,6 +1171,15 @@ class Qualifier(Agent):
                 if any(p in said for p in probes):
                     return None
         return last
+
+    def _only_opening_said(self) -> bool:
+        """True while the opening line is the only thing we have said."""
+        said = [
+            re.sub(r"\s+", " ", getattr(i, "text_content", "") or "").strip()
+            for i in self.chat_ctx.items
+            if getattr(i, "role", None) == "assistant" and (getattr(i, "text_content", "") or "").strip()
+        ]
+        return bool(said) and all(s == re.sub(r"\s+", " ", self.opening_line or "").strip() for s in said)
 
     def _answers_given(self) -> set[str]:
         """Playbook answers (Q tags) already said on this call."""
@@ -1413,7 +1441,9 @@ class Qualifier(Agent):
             if self._gate_timeout is not None:
                 self._gate_timeout.cancel()
             if self.opening_line and self.session_ref is not None and not self._closing:
-                self.session_ref.say(self.opening_line)
+                # Not interruptible: 6 Nov (Sarah) a second "Hello?" cut it off and
+                # the greeting never reached the transcript.
+                self.session_ref.say(self.opening_line, allow_interruptions=False)
                 raise StopResponse()
         if self.opening_line and (
             not self.greeting_started
@@ -1457,6 +1487,22 @@ class Qualifier(Agent):
                 self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
             self.dead_air.hold(HOLD_WAIT_S)
             self.session_ref.say(HOLD_LINE, add_to_chat_ctx=True)
+            raise StopResponse()
+        # A bare "Hello?" right after the opening question means they did not hear
+        # it (6 Nov, Philip: his second hello was taken as the answer and step 1
+        # ran over his "Yes, it is"). Ask it once more instead.
+        if (
+            self.opening_line
+            and not self._opening_repeated
+            and self.session_ref is not None
+            and _GREETING_ONLY.match(self.last_user_text)
+            and self._only_opening_said()
+        ):
+            self._opening_repeated = True
+            logger.info("hello after the opening (call=%s): asking it again", self._call_id)
+            if self._call_id:
+                self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+            self.session_ref.say(self.opening_line, add_to_chat_ctx=True)
             raise StopResponse()
         if not self._first_turn_done:
             self._first_turn_done = True
@@ -3600,6 +3646,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # The disclosure is law, not style: speak it verbatim, uninterruptible,
     # and record a compliance event — instead of trusting the LLM's first turn.
     spoken = False
+    # Render the opening while we wait for their hello: it is the same line on
+    # every call, and live synthesis put about 0.25 s more silence after their
+    # "Hello?" (6 Nov: Jennifer, Philip and Sarah all said it twice).
+    prerender = qualifier.spawn(_prerender(session.tts, disclosure)) if disclosure and session.tts is not None else None
     waited = await _wait_for_their_hello(session, qualifier) if disclosure else "silent"
     logger.info("greeting after their hello: %s in %.2fs (call=%s)", waited, time.monotonic() - qualifier.audio_live_at, call_id)
     if waited == "skip":
@@ -3610,14 +3660,23 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         handle = None
         try:
             t0 = time.monotonic()
-            # Live synthesis only. Replaying pre-rendered frames through
-            # `say(audio=...)` never resolved the handle on a real call (every
-            # call hit the 20 s timeout below), which pushed the silence
-            # watchdog out by 20 s and mislabelled live customers as SILENCE.
-            # ElevenLabs flash starts streaming in ~250 ms, so the pre-render
-            # bought almost nothing anyway.
-            handle = session.say(disclosure, allow_interruptions=False)
-            await asyncio.wait_for(handle, timeout=20.0)
+            frames = prerender.result() if prerender is not None and prerender.done() and not prerender.exception() else None
+            if frames:
+                # Pre-rendered. Before 6 Nov this hung: the handle never resolved
+                # and the 20 s wait pushed the silence watchdog out. So the wait
+                # is the line's own length plus a little, never 20 s.
+                seconds = sum(f.duration for f in frames)
+
+                async def _frames():  # noqa: ANN202
+                    for f in frames:
+                        yield f
+
+                handle = session.say(disclosure, audio=_frames(), allow_interruptions=False)
+                logger.info("opening from the pre-render (%.1fs of audio)", seconds)
+                await asyncio.wait_for(handle, timeout=seconds + 1.5)
+            else:
+                handle = session.say(disclosure, allow_interruptions=False)
+                await asyncio.wait_for(handle, timeout=20.0)
             spoken = True
             logger.info("disclosure spoken (live, %.2fs)", time.monotonic() - t0)
         except asyncio.TimeoutError:

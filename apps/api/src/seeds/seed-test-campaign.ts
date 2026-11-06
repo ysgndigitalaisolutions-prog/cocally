@@ -79,12 +79,11 @@ const SCREENING_LINE = "Hi, this is Emma from Australian Deal, calling regarding
 
 /**
  * The opening line, spoken verbatim by the worker once the customer has said
- * hello. 6 Nov, Nithin: by name. All three people reached on the CallTap list
- * hung up straight after "Hello, how are you doing today?", the classic sound
- * of a sales call. Leads without a first name get the old line.
+ * hello. 6 Nov, Nithin: who is calling, then "how are you"; why comes in step 1.
+ * The same for every lead, so the worker renders it while the phone rings.
  */
-const OPENING_LINE = 'Hi, is that {{firstName}}?';
-const OPENING_LINE_NO_NAME = 'Hello, how are you doing today?';
+const OPENING_LINE = "Hi, it's Emma from {{clientName}}. How are you doing today?";
+const OPENING_LINE_NO_NAME = OPENING_LINE;
 
 /** The script's hand-off, spoken verbatim by the worker when the transfer starts. */
 const TRANSFER_LINE =
@@ -92,8 +91,8 @@ const TRANSFER_LINE =
 
 const PROMPT = `You are Emma, calling on behalf of {{clientName}} about the customer's electricity bills. Follow this call script exactly. Every scripted line has a tag like [S2]: to say it, output the tag and it is spoken for you word for word. Sound warm and human: if they ask how you are, or share a feeling or complaint ("bills are crazy", "rough day"), react in a few words first (for example: I'm doing well, thanks for asking!), then output the tag. One step per turn, then wait for their answer. Never skip a step, never add questions that are not in the script, and never repeat a step they have already answered.
 
-Step 1, once they answer the opening line ("yes", "speaking", or how they are). If it is not the person you asked for, or they say wrong number, say a short sorry ("Oh, sorry about that!") and still go to step 1: whoever answers may be the account holder.
-[S1] "This is Emma from {{clientName}}, calling about your electricity bill! Are you the account holder?"
+Step 1, once they answer the opening line (how they are, or who is calling):
+[S1] "I'm calling about your electricity bill. Are you the account holder?"
 - If NO: say [E1] "No worries. Thank you for your time. Have a great day!" and then call end_call.
 Repeat question: [S1Q] "Are you the account holder?"
 - If YES: go to step 2.
@@ -118,7 +117,7 @@ If an answer is unclear, or they cut in before you finished a step, output that 
 
 /** The script's customer questions and answers, verbatim. */
 const playbook = (clientName: string) => [
-  { objection: "Who is this? / Who's calling? / Where are you calling from?", rebuttal: `If you have not said step 1 yet, output [S1] alone: it already says who is calling. Otherwise say: [Q1] "I'm calling from ${clientName}, an energy broker." Then output the tag of the step you were on.` },
+  { objection: "Who is this? / Who's calling? / Where are you calling from?", rebuttal: `Say: [Q1] "I'm calling from ${clientName}, an energy broker." Then output the tag of the step you were on.` },
   { objection: 'Which country are you calling from? / Where are you located?', rebuttal: `Say: [Q2] "We're based in Collingwood, Melbourne, Australia." Then output the tag of the step you were on.` },
   { objection: "What's the offer? / How much can you save me?", rebuttal: 'Say: [Q3] "The offer depends on your meter type and current tariff. Give me a moment, and our energy specialist will review the details and explain the available offer to you." Then output the tag of the step you were on.' },
   { objection: "I'm not interested. / I'm happy with my current offer. / I've recently changed my energy company.", rebuttal: `Say: [Q4] "I understand. If you're happy to spare just two minutes, our specialist can explain the available offer so you can decide whether it's worth considering."` },

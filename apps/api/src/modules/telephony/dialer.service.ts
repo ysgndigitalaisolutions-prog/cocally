@@ -24,6 +24,7 @@ export type DialBlockReason =
   | 'DAILY_BUDGET_REACHED'
   | 'TENANT_QUOTA_REACHED'
   | 'AT_CONCURRENCY_CAP'
+  | 'AT_LINE_CAP'
   | 'NO_AGENTS_AVAILABLE'
   | 'AT_PACING_CAP'
   | 'NO_DIALABLE_LEADS'
@@ -187,6 +188,14 @@ export class DialerService {
       return blocked('AT_CONCURRENCY_CAP', `At the channel cap (${active}/${campaign.maxConcurrentCalls} calls live).`);
     }
 
+    // The carrier line is shared by every tenant: Telvoq takes 3 calls at once
+    // (6 Nov). Above that the extra dials fail, whatever each campaign allows.
+    const au = (campaign.countryPackCode ?? 'AU') === 'AU';
+    const lineActive = au ? this.orchestrator.activeOnAuLine() : 0;
+    if (au && lineActive >= config.livekit.auLineMaxCalls) {
+      return blocked('AT_LINE_CAP', `The Australian line is full (${lineActive}/${config.livekit.auLineMaxCalls} calls, all accounts).`);
+    }
+
     const freeAgents = await this.presence.availableAgentCount(campaign.tenantId.toString(), campaign._id.toString());
     if (freeAgents === 0) {
       return blocked(
@@ -200,6 +209,7 @@ export class DialerService {
       campaign.maxConcurrentCalls - active,
       pacingCap - active,
       campaign.dailyDialBudget - dialsToday,
+      au ? config.livekit.auLineMaxCalls - lineActive : Infinity,
     );
     if (capacity <= 0) {
       return blocked(

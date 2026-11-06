@@ -89,6 +89,8 @@ const envSchema = z.object({
    */
   SIP_DIAL_PREFIX: optionalString(),
   SIP_DIAL_PREFIX_AU: optionalString(),
+  /** Calls at once the Australian carrier line (Telvoq) takes, across every tenant: 3 (Telvoq, 6 Nov). */
+  AU_LINE_MAX_CALLS: z.coerce.number().min(1).max(500).default(3),
   /** Twilio account backing the SIP trunk / numbers. */
   TWILIO_ACCOUNT_SID: optionalString(),
   TWILIO_AUTH_TOKEN: optionalString(),
@@ -200,6 +202,7 @@ export const config = {
     sipDialPrefix: parsed.SIP_DIAL_PREFIX?.trim() || undefined,
     sipTrunkIdAu: parsed.LIVEKIT_SIP_TRUNK_ID_AU?.trim() || undefined,
     sipDialPrefixAu: parsed.SIP_DIAL_PREFIX_AU?.trim() || undefined,
+    auLineMaxCalls: parsed.AU_LINE_MAX_CALLS,
     agentName: parsed.LIVEKIT_AGENT_NAME,
   },
   twilio: {

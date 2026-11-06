@@ -10,6 +10,7 @@ import { PredictiveDialerStatusCard } from '@/components/PredictiveDialerStatus'
 import CampaignInsights from '@/components/CampaignInsights';
 import CampaignCallerIds from '@/components/CampaignCallerIds';
 import CampaignTeamAssignment from '@/components/CampaignTeamAssignment';
+import LeadImport from '@/components/LeadImport';
 
 interface TeamMember {
   id: string;
@@ -71,6 +72,7 @@ export default function CampaignDetailPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [scripts, setScripts] = useState<{ id: string; label: string }[]>([]);
+  const [showImport, setShowImport] = useState(false);
 
   async function load() {
     const [campaignRes, leadsRes, teamRes, channelsRes] = await Promise.all([
@@ -204,11 +206,17 @@ export default function CampaignDetailPage() {
               Activate
             </button>
           )}
+          <button className="btn btn-ghost text-sm" onClick={() => setShowImport((v) => !v)}>
+            {showImport ? 'Close import' : '+ Import leads'}
+          </button>
           <Link href="/leads" className="btn btn-ghost text-sm">
             Manage leads →
           </Link>
         </div>
       </div>
+      {showImport && (
+        <LeadImport campaignId={String(params.id)} campaignName={campaign.name} onImported={() => void load()} />
+      )}
       {message && <p style={{ color: 'var(--good)' }}>{message}</p>}
       {error && <p style={{ color: 'var(--bad)' }}>{error}</p>}
 

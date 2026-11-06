@@ -42,6 +42,8 @@ interface LiveCallEntry {
   campaignId: string;
   tenantId: string;
   leadId: string;
+  /** Goes out on the Australian carrier line, which has its own limit across tenants. */
+  au: boolean;
 }
 
 /**
@@ -105,6 +107,8 @@ export class LiveCallDriver implements OnModuleInit {
         campaignId: c.campaignId.toString(),
         tenantId: c.tenantId.toString(),
         leadId: c.leadId.toString(),
+        // Pack unknown here: counting it against the Australian line errs on the safe side.
+        au: true,
       });
     }
     if (live.length > 0) this.logger.warn(`restored ${live.length} live call(s) into the pacing registry after restart`);
@@ -112,6 +116,11 @@ export class LiveCallDriver implements OnModuleInit {
 
   activeCount(campaignId: string): number {
     return [...this.liveCalls.values()].filter((c) => c.campaignId === campaignId).length;
+  }
+
+  /** Live calls on the Australian carrier line, all tenants together. */
+  activeOnAuLine(): number {
+    return [...this.liveCalls.values()].filter((c) => c.au).length;
   }
 
   totalActiveForTenant(tenantId: string): number {
@@ -166,7 +175,7 @@ export class LiveCallDriver implements OnModuleInit {
       startedAt: new Date(),
     });
     const callId = call._id.toString();
-    this.liveCalls.set(callId, { campaignId, tenantId, leadId: lead._id.toString() });
+    this.liveCalls.set(callId, { campaignId, tenantId, leadId: lead._id.toString(), au: (campaign.countryPackCode ?? 'AU') === 'AU' });
     options?.onCallCreated?.(callId);
 
     try {

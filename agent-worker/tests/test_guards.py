@@ -721,3 +721,48 @@ def test_a_playbook_answer_is_not_given_twice():
         assert q2._lines_for_reply()[1]["Q7"] == "E1"
     finally:
         del type(q2).chat_ctx
+
+
+def test_a_hello_after_the_opening_means_they_did_not_hear_it():
+    q = _ctx_qualifier({}, ["Hi, is that Philip?"])
+    q.opening_line = "Hi, is that Philip?"
+    try:
+        assert q._only_opening_said()
+        assert agent._GREETING_ONLY.match("Hello?")
+    finally:
+        del type(q).chat_ctx
+    q2 = _ctx_qualifier({}, ["Hi, is that Philip?", "This is Emma from Australian Deal."])
+    q2.opening_line = "Hi, is that Philip?"
+    try:
+        assert not q2._only_opening_said()
+    finally:
+        del type(q2).chat_ctx
+
+
+def test_opening_is_prerendered_or_falls_back_to_live():
+    import asyncio
+    from types import SimpleNamespace
+
+    class _Stream:
+        def __init__(self, frames):
+            self._frames = frames
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def __aiter__(self):
+            async def gen():
+                for f in self._frames:
+                    yield SimpleNamespace(frame=f)
+            return gen()
+
+    ok = SimpleNamespace(synthesize=lambda text: _Stream(["f1", "f2"]))
+    assert asyncio.run(agent._prerender(ok, "Hi, it's Emma.")) == ["f1", "f2"]
+
+    def boom(text):
+        raise RuntimeError("tts down")
+
+    assert asyncio.run(agent._prerender(SimpleNamespace(synthesize=boom), "Hi")) is None
