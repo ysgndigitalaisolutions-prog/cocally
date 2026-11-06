@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import LeadImport from '@/components/LeadImport';
 import { useCallback, useEffect, useState } from 'react';
 import { LeadDrawer } from '@/components/LeadDrawer';
 import { api } from '@/lib/api';
@@ -61,14 +62,6 @@ const LEAD_STATES = [
   'DNC',
 ];
 
-interface ImportReport {
-  total: number;
-  accepted: number;
-  duplicates: number;
-  rejected: number;
-  rejects: Array<{ row: number; reason: string }>;
-}
-
 const STATE_COLORS: Record<string, string> = {
   BOOKED: 'var(--good)',
   QUALIFIED: 'var(--good)',
@@ -82,9 +75,6 @@ export default function LeadsPage() {
   const [campaignId, setCampaignId] = useState('');
   const [leads, setLeads] = useState<Lead[]>([]);
   const [showImport, setShowImport] = useState(false);
-  const [csv, setCsv] = useState('');
-  const [report, setReport] = useState<ImportReport | null>(null);
-  const [importing, setImporting] = useState(false);
   const [stateFilter, setStateFilter] = useState('');
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
@@ -184,25 +174,6 @@ export default function LeadsPage() {
 
   const campaign = campaigns.find((c) => c._id === campaignId);
 
-  async function runImport(e: React.FormEvent) {
-    e.preventDefault();
-    setImporting(true);
-    setReport(null);
-    try {
-      const { data } = await api.post('/leads/import', {
-        campaignId,
-        filename: 'ui-upload.csv',
-        csvContent: csv,
-        mapping: { phone: 'phone', firstName: 'firstName', lastName: 'lastName', suburb: 'suburb', state: 'state', postcode: 'postcode' },
-      });
-      setReport(data);
-      setCsv('');
-      await loadLeads();
-    } finally {
-      setImporting(false);
-    }
-  }
-
   return (
     <div className="space-y-5">
       {/* Header: one clear context — which campaign's leads am I looking at */}
@@ -220,7 +191,7 @@ export default function LeadsPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <select className="input w-64" value={campaignId} onChange={(e) => { setCampaignId(e.target.value); setReport(null); }}>
+          <select className="input w-64" value={campaignId} onChange={(e) => { setCampaignId(e.target.value); }}>
             {campaigns.map((c) => (
               <option key={c._id} value={c._id}>
                 {c.name}
@@ -234,37 +205,8 @@ export default function LeadsPage() {
       </div>
 
       {/* Import: collapsed by default, always into THIS campaign */}
-      {showImport && (
-        <form onSubmit={runImport} className="card space-y-3 p-5" style={{ border: '1px solid var(--accent-dim)' }}>
-          <p className="text-sm">
-            Importing into <b>{campaign?.name}</b> — the campaign's lead list is managed automatically. CSV headers:
-            <code className="ml-1 text-xs" style={{ color: 'var(--text-dim)' }}>phone, firstName, lastName, suburb, state, postcode</code>
-          </p>
-          <textarea
-            className="input h-32 font-mono text-xs"
-            value={csv}
-            onChange={(e) => setCsv(e.target.value)}
-            placeholder={'phone,firstName,lastName,suburb,state\n0412 345 678,Kim,Lee,Fitzroy,VIC'}
-            required
-          />
-          <button className="btn btn-primary" disabled={importing}>
-            {importing ? 'Importing…' : `Import into ${campaign?.name ?? 'campaign'}`}
-          </button>
-          {report && (
-            <div className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
-              <p>
-                Total {report.total} · accepted <span style={{ color: 'var(--good)' }}>{report.accepted}</span> ·
-                duplicates {report.duplicates} · rejected{' '}
-                <span style={{ color: report.rejected > 0 ? 'var(--bad)' : undefined }}>{report.rejected}</span>
-              </p>
-              {report.rejects.slice(0, 5).map((reject) => (
-                <p key={reject.row} className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                  row {reject.row}: {reject.reason}
-                </p>
-              ))}
-            </div>
-          )}
-        </form>
+      {showImport && campaignId && (
+        <LeadImport campaignId={campaignId} campaignName={campaign?.name} onImported={() => void loadLeads()} />
       )}
 
       {flash && <p className="text-sm" style={{ color: 'var(--accent)' }}>{flash}</p>}

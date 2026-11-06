@@ -22,6 +22,8 @@ export interface ColumnMapping {
   suburb?: string;
   state?: string;
   postcode?: string;
+  /** A vendor's Do Not Call column ("Dncr_Mobile_Status"): "Y" rows are not imported. */
+  dncrStatus?: string;
 }
 
 /** Rows per dedup-lookup + insert round-trip during CSV import. */
@@ -178,6 +180,10 @@ export class LeadsService {
 
     for (let i = 0; i < rows.length; i += 1) {
       const raw = rows[i]!;
+      if (input.mapping.dncrStatus && /^\s*(y|yes|true|1|registered)\s*$/i.test(raw[input.mapping.dncrStatus] ?? '')) {
+        rejects.push({ row: i + 1, reason: 'on the Do Not Call Register (list says Y)', raw });
+        continue;
+      }
       const phoneRaw = raw[input.mapping.phone] ?? '';
       const normalized = normalizePhone(phoneRaw, pack.phoneRegion);
       if (!normalized.ok) {

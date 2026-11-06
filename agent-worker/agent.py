@@ -408,6 +408,12 @@ _HOLD_REQUEST = re.compile(
 # "Hang on, it's AGL" is an answer, not a request to wait.
 _HOLD_HAS_ANSWER = re.compile(r"\b(agl|origin|energy|power|electric\w*|gas|dollars?|bucks|\d+)\b", re.I)
 HOLD_LINE = "Sure, take your time."
+# A playbook answer is given once per call. 6 Nov: "You sound like a robot." twice
+# got "Good question. Our specialist can explain that in detail." twice. The second
+# time a person is offered instead, as a callback (the Q6 question, so a time they
+# give is booked); once that was offered too, the goodbye.
+OFFER_PERSON_PREFIX = "I can have one of our specialists call you instead."
+REPEAT_TAG = "QR"
 HOLD_WAIT_S = float(os.getenv("HOLD_WAIT_S", "30"))
 # Step 2 (electricity only or gas) is not scored: asked once and repeated once at
 # most. 6 Nov: "electricity also" got the question four times.
@@ -1016,9 +1022,8 @@ class Qualifier(Agent):
             # on the normal fallback chain.
             stream = _first_word_deadline(stream, LLM_FIRST_WORD_DEADLINE_S if attempt == 1 else 0)
             if self.script_lines:
-                stream = _expand_tag_stream(
-                    stream, self.script_lines, frozenset(self.blocked_tags), self._steps_asked(), self._steps_past_limit()
-                )
+                lines, advance = self._lines_for_reply()
+                stream = _expand_tag_stream(stream, lines, frozenset(self.blocked_tags), self._steps_asked(), advance)
             produced = False
             try:
                 async for chunk in stream:
@@ -1147,6 +1152,40 @@ class Qualifier(Agent):
                 if any(p in said for p in probes):
                     return None
         return last
+
+    def _answers_given(self) -> set[str]:
+        """Playbook answers (Q tags) already said on this call."""
+        said = " ".join(
+            re.sub(r"\s+", " ", getattr(i, "text_content", "") or "").lower()
+            for i in self.chat_ctx.items
+            if getattr(i, "role", None) == "assistant"
+        )
+        return {
+            t for t, line in self.script_lines.items()
+            if t.startswith("Q") and t[1:].isdigit() and re.sub(r"\s+", " ", line).strip().lower()[:40] in said
+        }
+
+    def _lines_for_reply(self) -> tuple[dict[str, str], dict[str, str]]:
+        """Script lines and tag swaps for the next reply: step limits, and a
+        playbook answer already given swapped for an offer of a person."""
+        advance = self._steps_past_limit()
+        given = self._answers_given()
+        if not given:
+            return self.script_lines, advance
+        lines = dict(self.script_lines)
+        q6 = self.script_lines.get("Q6")
+        if q6 and "Q6" not in given and "Q6" not in self.blocked_tags:
+            lines[REPEAT_TAG] = f"{OFFER_PERSON_PREFIX} {q6}"
+            swap = REPEAT_TAG
+        else:
+            swap = "E1" if "E1" in lines else REPEAT_TAG
+            lines.setdefault(REPEAT_TAG, "No worries. Thank you for your time. Have a great day!")
+        for tag in given:
+            # Q4 and Q6 have their own order (rebuttal, callback, goodbye) in code;
+            # who and where we are (Q1, Q2) can fairly be asked again.
+            if tag not in ("Q1", "Q2", "Q4", "Q6"):
+                advance.setdefault(tag, swap)
+        return lines, advance
 
     def _steps_past_limit(self) -> dict[str, str]:
         """Repeat tags to swap for the next step once a step was asked MAX_ASKS times."""
@@ -1997,6 +2036,8 @@ def _provider_probes() -> list[tuple[str, str, str, dict[str, str]]]:
         out.append(("llm", "api.cerebras.ai", "https://api.cerebras.ai/v1/models", {"Authorization": f"Bearer {os.environ.get('CEREBRAS_API_KEY', '')}"}))
     if TTS_PROVIDER == "elevenlabs":
         out.append(("tts", "api.elevenlabs.io", "https://api.elevenlabs.io/v1/models", {"xi-api-key": os.environ.get("ELEVENLABS_API_KEY", "")}))
+    elif TTS_PROVIDER == "google":
+        out.append(("tts", "texttospeech.googleapis.com", "https://texttospeech.googleapis.com/", {}))
     elif TTS_PROVIDER == "cartesia":
         out.append(("tts", "api.cartesia.ai", "https://api.cartesia.ai/voices?limit=1", {"X-API-Key": os.environ.get("CARTESIA_API_KEY", ""), "Cartesia-Version": "2025-04-16"}))
     else:
@@ -2530,6 +2571,14 @@ def _with_tts_fallback(primary):  # noqa: ANN001, ANN202
     if isinstance(primary, deepgram.TTS):
         return primary
     chain = [primary]
+    if TTS_PROVIDER == "google" and os.environ.get("CARTESIA_API_KEY"):
+        # Same voice gender as the primary: the persona is Emma.
+        try:
+            from livekit.plugins import cartesia
+
+            chain.append(cartesia.TTS(model="sonic-3.6", voice=os.getenv("TTS_BACKUP_VOICE", "391f4c0a-f1a8-4c21-9aa2-7a07f0a4b0dc")))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("cartesia backup unavailable (%s)", e)
     if primary.provider != "ElevenLabs" and os.environ.get("ELEVENLABS_API_KEY"):
         try:
             from livekit.plugins import elevenlabs
@@ -2567,6 +2616,20 @@ def _build_tts():  # noqa: ANN202 — plugin TTS types differ
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("elevenlabs TTS unavailable (%s) — using Deepgram", e)
+    if TTS_PROVIDER == "google":
+        # Google Chirp 3 HD, en-AU (6 Nov: Nithin chose Leda, as "Emma"; Cartesia
+        # voices all sounded robotic to him). Credentials are the VM's, as for Vertex.
+        try:
+            from livekit.plugins import google
+
+            return google.TTS(
+                language="en-AU",
+                voice_name=TTS_VOICE or "en-AU-Chirp3-HD-Leda",
+                sample_rate=24000,
+                use_streaming=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("google TTS unavailable (%s) — using Deepgram", e)
     if TTS_PROVIDER == "cartesia" and os.environ.get("CARTESIA_API_KEY"):
         try:
             from livekit.plugins import cartesia

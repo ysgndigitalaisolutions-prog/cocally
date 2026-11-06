@@ -689,3 +689,35 @@ def test_ai_call_screen_is_recognised():
         assert agent._SCREENING_FOLLOW_UP.search(said), said
     for said in ("Yes, speaking.", "Who is this?", "Thanks, but I'm not interested."):
         assert not agent._SCREENING_FOLLOW_UP.search(said), said
+
+
+def test_a_playbook_answer_is_not_given_twice():
+    import asyncio
+
+    lines = {
+        "Q7": "Good question. Our specialist can explain that in detail.",
+        "Q6": "No problem. What would be a convenient time for us to call you back?",
+        "E1": "No worries. Thank you for your time. Have a great day!",
+        "S1Q": "Are you the account holder?",
+    }
+    q = _ctx_qualifier(lines, ["Good question. Our specialist can explain that in detail. Are you the account holder?"])
+    q.blocked_tags = set()
+    try:
+        out_lines, adv = q._lines_for_reply()
+        assert adv["Q7"] == agent.REPEAT_TAG and out_lines[agent.REPEAT_TAG].startswith(agent.OFFER_PERSON_PREFIX)
+
+        async def go():
+            async def chunks():
+                yield "[Q7] [S1Q]"
+            return "".join([c async for c in agent._expand_tag_stream(chunks(), out_lines, frozenset(), frozenset(), adv)])
+
+        said = asyncio.run(go())
+        assert "Good question" not in said and "specialists call you instead" in said and "convenient time" in said, said
+    finally:
+        del type(q).chat_ctx
+    q2 = _ctx_qualifier(lines, [lines["Q7"], lines["Q6"]])
+    q2.blocked_tags = set()
+    try:
+        assert q2._lines_for_reply()[1]["Q7"] == "E1"
+    finally:
+        del type(q2).chat_ctx
