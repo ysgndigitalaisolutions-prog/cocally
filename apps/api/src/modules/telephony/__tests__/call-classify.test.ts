@@ -34,8 +34,25 @@ describe('final call classification', () => {
     }
   });
 
+  it('catches the mailboxes and carrier messages of 9 Nov, verbatim', () => {
+    for (const greeting of [
+      'Hi. You\'ve called West My Long Signs.',
+      "I'm out of service at the moment, so please text",
+      "Hi. It's Christina Dodo. I'm not available at the moment.",
+      "I can get back to you as soon as possible.",
+      'Just try sending a text. I\'ll get back to you as soon as I can. Thanks.',
+      "David, I've missed your call. I'll call you back as soon as I can.",
+      "I'm just on another call. I'll get right back to you.",
+      'To you as quickly as I can. Thank you.',
+      'Please try again later.',
+      'Leave a number, and I\'ll call back.',
+    ]) {
+      expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, customerLines: [say(greeting)] })).toBe('VOICEMAIL');
+    }
+  });
+
   it('keeps real people as people', () => {
-    for (const said of ['Hello?', 'Yes, I am.', "He's not available.", 'I am with AGL.', 'Sorry I missed your call earlier', "Who's the person you're calling?"]) {
+    for (const said of ['Hello?', 'Yes, I am.', "You've called the wrong number.", "You've called me three times.", 'Good. Thanks. How are you?', 'Are you an AI?', "He's not available.", 'I am with AGL.', 'Sorry I missed your call earlier', "Who's the person you're calling?"]) {
       expect(finalAmdClass({ amdClass: 'HUMAN', bridged: false, customerLines: [say(said)] })).toBe('HUMAN');
     }
   });

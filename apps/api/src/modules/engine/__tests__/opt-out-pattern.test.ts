@@ -14,6 +14,13 @@ describe('OPT_OUT_PATTERN', () => {
     'stop calling me',
     "I'm going to report you to the ACMA",
     'remove my number please',
+    // 9 Nov, verbatim.
+    "Good. But I don't want you ringing me up.",
+    "I don't want anyone to call me",
+    'Do not want you calling here',
+    'Stop bothering me.',
+    'Just leave me alone',
+    'lose my number',
   ])('opts out on %j', (text) => {
     expect(OPT_OUT_PATTERN.test(text)).toBe(true);
   });

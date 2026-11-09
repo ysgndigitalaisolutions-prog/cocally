@@ -63,7 +63,7 @@ class TurnMetricsDto {
   @IsOptional() @IsInt() @Min(0) heardMs?: number;
 }
 
-export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback', 'net_provider', 'net_media', 'worker_log', 'out_of_area', 'connect_gate', 'heard'] as const;
+export const CALL_EVENT_KINDS = ['answered', 'greeting', 'stall_guard', 'transfer', 'llm_fallback', 'net_provider', 'net_media', 'worker_log', 'out_of_area', 'connect_gate', 'heard', 'blocked_line'] as const;
 
 class CallEventDto {
   @IsIn(CALL_EVENT_KINDS) kind: (typeof CALL_EVENT_KINDS)[number];

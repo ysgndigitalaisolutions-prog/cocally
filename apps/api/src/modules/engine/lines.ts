@@ -7,7 +7,8 @@ export const OPT_OUT_CLOSING_LINE =
 
 /**
  * What "take me off your list" sounds like, for every opt-out rail (live
- * worker transcripts and the simulation path). One pattern so the two cannot
+ * worker transcripts and the simulation path). `_OPT_OUT_REQUEST` in
+ * agent-worker/agent.py has the same wording: keep in step. One pattern so the two cannot
  * drift: until 25 Oct the simulation copy had six phrases and the live one
  * missed the script's own Q&A ("My number is on the DNC Register", "I'll make
  * a complaint"), which ended the call without writing the suppression.
@@ -21,7 +22,12 @@ export const OPT_OUT_PATTERN = new RegExp(
   [
     String.raw`don'?t (call|ring|contact|phone)( me)?( again| back)?`,
     String.raw`do not (call|ring|contact|phone)`,
-    String.raw`stop (calling|ringing|phoning)`,
+    // 9 Nov: "I don't want you ringing me up" got the next script line.
+    String.raw`(don'?t|do not) want (you |anyone |any ?body |people |them )?(to )?(call|ring|contact|phon|bother)\w*`,
+    String.raw`stop (calling|ringing|phoning|bothering)`,
+    String.raw`quit (calling|ringing|phoning)`,
+    String.raw`leave me alone`,
+    String.raw`lose my number`,
     String.raw`never (call|ring) (me|here|this number)`,
     String.raw`remove (me|my (number|details))`,
     String.raw`take (me|my (number|details)) off`,

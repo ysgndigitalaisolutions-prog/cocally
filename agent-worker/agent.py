@@ -137,6 +137,12 @@ LLM_FIRST_WORD_DEADLINE_S = float(os.getenv("LLM_FIRST_WORD_DEADLINE_S", "1.2"))
 # Voice loudness in dB (Nithin chose +4 on 3 Nov; Aura-2 has no volume control
 # of its own). Applied to spoken lines only, not to hold music or background.
 TTS_GAIN_DB = float(os.getenv("TTS_GAIN_DB", "4"))
+# Phone clarity (9 Nov call recordings): half of the voice's energy sat under 300 Hz,
+# which a handset barely plays, and 1-3.4 kHz, where words are understood, was weak.
+TTS_CLARITY = os.getenv("TTS_CLARITY", "1") != "0"
+CLARITY_HIGH_PASS_HZ = 200.0
+CLARITY_PRESENCE_HZ = 2200.0
+CLARITY_PRESENCE_DB = float(os.getenv("CLARITY_PRESENCE_DB", "5"))
 # Cartesia sonic-3 delivery, e.g. "excited". Empty = the voice's natural read.
 TTS_EMOTION = os.getenv("TTS_EMOTION", "")
 # Takes over if the chosen voice vendor fails, so a customer never hears silence.
@@ -161,6 +167,62 @@ def _apply_gain(frame: rtc.AudioFrame, gain_db: float) -> rtc.AudioFrame:
         num_channels=frame.num_channels,
         samples_per_channel=frame.samples_per_channel,
     )
+
+
+_CLARITY_FILTERS: dict[int, object] = {}
+
+
+def _clarity_filter(sample_rate: int):  # noqa: ANN202 — numpy array
+    """Linear-phase filter: cuts the rumble under CLARITY_HIGH_PASS_HZ and lifts the
+    speech band around CLARITY_PRESENCE_HZ. About 10 ms long, so it adds no audible delay."""
+    h = _CLARITY_FILTERS.get(sample_rate)
+    if h is None:
+        import numpy as np
+
+        size = max(64, int(sample_rate * 0.0213) & ~1)
+        f = np.fft.rfftfreq(size, 1 / sample_rate)
+        high_pass = f**2 / np.sqrt(f**4 + CLARITY_HIGH_PASS_HZ**4)
+        with np.errstate(divide="ignore"):
+            octaves = np.where(f > 0, np.log2(f / CLARITY_PRESENCE_HZ), -99.0)
+        presence = 10 ** (CLARITY_PRESENCE_DB * np.exp(-0.5 * (octaves / 0.8) ** 2) / 20)
+        h = np.roll(np.fft.irfft(high_pass * presence, size), size // 2) * np.hanning(size)
+        _CLARITY_FILTERS[sample_rate] = h
+    return h
+
+
+class _VoiceShaper:
+    """Clarity filter, then loudness, for one spoken line. It keeps the filter's
+    memory between frames, so a frame edge makes no click."""
+
+    def __init__(self) -> None:
+        self._tail = None
+        self._rate = 0
+
+    def _clear(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
+        import numpy as np
+
+        h = _clarity_filter(frame.sample_rate)
+        if self._rate != frame.sample_rate or self._tail is None:
+            self._rate, self._tail = frame.sample_rate, np.zeros(len(h) - 1, dtype=np.float32)
+        x = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32)
+        buf = np.concatenate([self._tail, x])
+        self._tail = buf[-(len(h) - 1):]
+        y = np.convolve(buf, h, mode="valid")
+        return rtc.AudioFrame(
+            data=np.clip(y, -32768, 32767).astype(np.int16).tobytes(),
+            sample_rate=frame.sample_rate,
+            num_channels=frame.num_channels,
+            samples_per_channel=frame.samples_per_channel,
+        )
+
+    def shape(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
+        try:
+            if TTS_CLARITY and frame.num_channels == 1 and frame.samples_per_channel:
+                frame = self._clear(frame)
+            return _apply_gain(frame, TTS_GAIN_DB) if TTS_GAIN_DB else frame
+        except Exception as e:  # noqa: BLE001 — a plain line beats no line
+            logger.warning("voice shaping failed: %s", e)
+            return frame
 
 
 class _FirstWordTimeout(Exception):
@@ -388,7 +450,26 @@ _MACHINE_ONLY_PATTERNS = re.compile(
     r"|leave you a message"
     r"|not able to get to the phone"
     r"|welcome to the voice ?mail"
-    r"|voice ?mail (system|service)",
+    r"|voice ?mail (system|service)"
+    # 9 Nov: mailboxes and carrier messages recorded as people.
+    r"|you'?ve called (?!(the |a )?wrong|me\b)"
+    r"|i'?m not available (at the|to take)"
+    r"|(get|call|ring)( right)? back to you as (soon|quickly)"
+    r"|get right back to"
+    r"|to you as quickly as"
+    r"|try sending a text"
+    r"|please text (me|your|us)"
+    r"|i'?m out of service"
+    r"|i'?ve missed your call"
+    r"|leave a number"
+    r"|please leave a\b"
+    r"|(has been|is) disconnected"
+    r"|not (currently )?connected"
+    r"|(is|been) (switched|turned) off"
+    r"|out of range"
+    r"|please try (again|your call) later"
+    r"|cannot be (connected|completed)"
+    r"|check the number",
     re.I,
 )
 # Someone only answering the phone ("Hello, Jason speaking"), who usually goes on
@@ -446,11 +527,12 @@ async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
     try:
         t0 = time.monotonic()
         frames = []
+        shaper = _VoiceShaper()
         async with tts_engine.synthesize(text) as stream:
             async for ev in stream:
                 frame = ev.frame
-                if TTS_GAIN_DB and isinstance(frame, rtc.AudioFrame):
-                    frame = _apply_gain(frame, TTS_GAIN_DB)  # as tts_node does for live speech
+                if isinstance(frame, rtc.AudioFrame):
+                    frame = shaper.shape(frame)  # as tts_node does for live speech
                 frames.append(frame)
         logger.info("opening pre-rendered in %.2fs", time.monotonic() - t0)
         return frames or None
@@ -493,6 +575,65 @@ _HOSTILE = re.compile(
     re.I,
 )
 APOLOGY_LINE = "Sorry to have bothered you. Have a great day."
+# Same wording as OPT_OUT_PATTERN in apps/api/src/modules/engine/lines.ts: keep in
+# step. 9 Nov: "I don't want you ringing me up" matched nothing and got the next
+# script line. Decided before the model gets the turn; it never talks through one.
+_OPT_OUT_REQUEST = re.compile(
+    r"\b(?:don'?t (call|ring|contact|phone)( me)?( again| back)?"
+    r"|do not (call|ring|contact|phone)"
+    r"|(don'?t|do not) want (you |anyone |any ?body |people |them )?(to )?(call|ring|contact|phon|bother)\w*"
+    r"|stop (calling|ringing|phoning|bothering)"
+    r"|quit (calling|ringing|phoning)"
+    r"|leave me alone"
+    r"|never (call|ring) (me|here|this number)"
+    r"|remove (me|my (number|details))"
+    r"|take (me|my (number|details)) off"
+    r"|lose my number"
+    r"|unsubscribe"
+    r"|no more calls"
+    r"|delete my (number|details)"
+    r"|d\.? ?n\.? ?c\b"
+    r"|do[ -]not[ -]call"
+    r"|not interested in (any|being) call"
+    r"|(make|lodge|file|put in|raise|making|lodging) a complaint"
+    r"|(i'?ll|i will|i'?m going to|gonna|going to) (complain|report)"
+    r"|report (you|this|your company)"
+    r"|\bacma\b"
+    r"|ombudsman)",
+    re.I,
+)
+# Asked whether they are talking to an AI: always answered truthfully, by code.
+_AI_WORDS = r"(a\.? ?i\.?|bot|robot|chat ?bot|machine|computer|recording|automated( \w+)?|human|real( person| human)?|person)"
+_AI_QUESTION = re.compile(
+    rf"\b(are|r) (you|u) (an? |really |actually |even |just |some )*{_AI_WORDS}(?! (who|that|from|with|of)\b)\b"
+    r"|\b(is|was) (this|that|it) (an? |really |actually |just |some )*(a\.? ?i\.?|bot|robot|chat ?bot|machine|computer|recording|automated( \w+)?|human|real person|person)\b"
+    r"|\bam i (talking|speaking) (to|with) (an? |a real |some |real )*(a\.? ?i\.?|bot|robot|chat ?bot|machine|computer|recording|human|person)\b"
+    r"|\byou (sound|sounds) like (an? )(a\.? ?i\.?|bot|robot|machine|computer|recording)\b",
+    re.I,
+)
+_NOT_AN_AI = re.compile(
+    r"\b(don'?t|do not) (want to|wanna) (talk|speak) (to|with) (an? |some )?(a\.? ?i\.?|bot|robot|machine|computer)\b",
+    re.I,
+)
+AI_ANSWER_LINE = "Yes, I'm an AI assistant calling for {client}. I can connect you with one of our specialists."
+AI_ANSWER_LINE_NO_CLIENT = "Yes, I'm an AI assistant. I can connect you with one of our specialists."
+PERSON_LINE = "No problem, I'll connect you with a specialist now."
+# They said goodbye. 9 Nov: "Goodbye." let the model try to hang up, the guard
+# refused because the AI had not said goodbye, and the model made up a reply.
+_CUSTOMER_GOODBYE = re.compile(
+    r"^\W*(?:(?:ok(?:ay)?|right|alright|thanks?|thank you|no thanks?|no thank you|cheers|yeah|nah)\W+)*"
+    r"(?:good ?bye|bye(?:\W+bye)*|see ya|see you)(?:\W+(?:now|then|mate|for now|thanks?|thank you))*\W*$",
+    re.I,
+)
+# Words the model may not put in front of a script line: 9 Nov, "You just ended the
+# call on me, I didn't say goodbye." Promises and numbers are never its to make.
+_BAD_REACTION = re.compile(
+    r"\b(you (just|did|said|ended|hung|never|didn'?t)|i didn'?t|i did not|what do you|hung up|end(ed)? the call"
+    r"|goodbye|bye|saves?|saving|savings|discount|cheap\w*|guarantee\w*|free|percent|dollars?|cents?|\d+)\b|\$",
+    re.I,
+)
+# Words from the model that are not a script line, in a row, before the call is closed.
+MAX_BLOCKED_LINES = 3
 # "I'm fine with my bills": the vendor wants a rebuttal, then a callback offer,
 # then a goodbye, in that order. Decided here because the model did not keep to
 # it (5 Nov eval: "No. My bill is fine" went straight to the goodbye). A plain
@@ -520,6 +661,13 @@ _OBJECTION_DECLINE = re.compile(
 _GATE_PROMPT = re.compile(r"to connect (your|the) call", re.I)
 _GATE_DIGIT = re.compile(r"\bpress (zero|one|two|three|four|five|six|seven|eight|nine|\d)[.!?]?\s*$", re.I)
 GATE_PROMPT_MAX_WORDS = 9
+# After the digit, the carrier's own words while it connects. 9 Nov (Stuart): "Thanks,
+# Emma. Please stay on the line." took the greeting, and the person who then said
+# "Hello?" only got "Are you the account holder?" with no idea who was calling.
+_GATE_CONNECTING = re.compile(
+    r"\bstay on the line\b|\bplease (hold|wait)\b|\bconnecting (you|your call)\b|\bputting you through\b|^\W*thanks?\b[^.?!]{0,12}\W*$",
+    re.I,
+)
 # The gate re-prompts about every 9 s. A partial and its final are one prompt.
 GATE_REPRESS_S = 4.0
 _GATE_WORDS = {w: str(i) for i, w in enumerate("zero one two three four five six seven eight nine".split())}
@@ -657,6 +805,7 @@ async def _expand_tag_stream(
     blocked: frozenset[str] = frozenset(),
     asked: frozenset[str] = frozenset(),
     advance: dict[str, str] | None = None,
+    own_words=None,  # noqa: ANN001 — words matching no script line -> what to say instead
 ):  # noqa: ANN001, ANN201 — llm_node chunk stream
     """Stream form for `llm_node`: text passes straight through except a
     possible partial tag, which is held until it completes (or cannot).
@@ -737,8 +886,8 @@ async def _expand_tag_stream(
                 flat = min(hits, key=len)
                 flat = full_for.get(flat, flat)
                 head = " ".join(words[:i])
-                return f"{head} {flat}".strip() if i > 4 else flat
-        return text
+                return f"{head} {flat}".strip() if i > 4 and not _BAD_REACTION.search(head) else flat
+        return own_words(text) if own_words is not None and text else text
 
     def _reaction(head: str, tag: str) -> str:
         """The model's own words in front of a script line: a short warm
@@ -749,7 +898,7 @@ async def _expand_tag_stream(
         would double up."""
         if not head.strip():
             return head
-        if len(head.split()) > 12:
+        if len(head.split()) > 12 or _BAD_REACTION.search(head):
             return " "
         if tag.endswith("Q") and tag[:-1] in lines and tag[:-1] not in asked and tag[0] == "S":
             tag = tag[:-1]
@@ -998,6 +1147,8 @@ class Qualifier(Agent):
         self.out_of_area_line = ""
         # Said once to a call-screening assistant (brief `screeningLine`).
         self.screening_line = ""
+        self.client_name = ""
+        self._blocked_lines = 0
         self._screening_answered = False
         # How far "I'm fine with my bills" has gone: 1 rebuttal, 2 callback offer.
         self._objection_stage = 0
@@ -1014,12 +1165,10 @@ class Qualifier(Agent):
         self.dead_air: "_DeadAirWatch | None" = None
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001, ANN201 — framework signature
+        shaper = _VoiceShaper()
         async for frame in Agent.default.tts_node(self, text, model_settings):
-            if TTS_GAIN_DB and isinstance(frame, rtc.AudioFrame):
-                try:
-                    frame = _apply_gain(frame, TTS_GAIN_DB)
-                except Exception as e:  # noqa: BLE001 — a line at normal volume beats no line
-                    logger.warning("voice gain failed: %s", e)
+            if isinstance(frame, rtc.AudioFrame):
+                frame = shaper.shape(frame)
             yield frame
 
     async def llm_node(self, chat_ctx, tools, model_settings):  # noqa: ANN001, ANN201 — framework signature
@@ -1042,7 +1191,7 @@ class Qualifier(Agent):
             stream = _first_word_deadline(stream, LLM_FIRST_WORD_DEADLINE_S if attempt == 1 else 0)
             if self.script_lines:
                 lines, advance = self._lines_for_reply()
-                stream = _expand_tag_stream(stream, lines, frozenset(self.blocked_tags), self._steps_asked(), advance)
+                stream = _expand_tag_stream(stream, lines, frozenset(self.blocked_tags), self._steps_asked(), advance, self._guard_own_words)
             produced = False
             try:
                 async for chunk in stream:
@@ -1171,6 +1320,44 @@ class Qualifier(Agent):
                 if any(p in said for p in probes):
                     return None
         return last
+
+    def _step_question(self) -> str:
+        """The question the customer should be answering now: the latest step
+        said, repeated short, or the first one."""
+        asked = sorted((t for t in self._steps_asked() if t[1:].isdigit()), key=lambda t: int(t[1:]))
+        tag = asked[-1] if asked else "S1"
+        return self.script_lines.get(f"{tag}Q") or self.script_lines.get(tag) or ""
+
+    def _guard_own_words(self, text: str) -> str:
+        """The model's words matched no script line. They are never spoken: the
+        script is the client's, and this is how a made-up line reaches a customer.
+        The one exception is confirming a booked callback, which has no script line."""
+        if "Q6" in self.blocked_tags:
+            return text
+        self._blocked_lines += 1
+        logger.warning("made-up line blocked (call=%s, %d): %r", self._call_id, self._blocked_lines, text[:160])
+        if self._call_id:
+            self.spawn(_post_event(self._call_id, "blocked_line", None, text[:300]))
+        if self._blocked_lines >= MAX_BLOCKED_LINES and self.script_lines.get("E1"):
+            return self.script_lines["E1"]
+        q7 = self.script_lines.get("Q7", "")
+        answer = q7 if q7 and "?" in self.last_user_text and "Q7" not in self._answers_given() else ""
+        return f"{answer} {self._step_question()}".strip() or text
+
+    async def _opt_out_now(self, said: str) -> None:
+        """They asked not to be called: suppressed by the server, approved closing
+        line, hang up. The model gets no turn."""
+        logger.warning("opt-out request (call=%s): %r", self._call_id, said[:120])
+        body = None
+        if self._call_id:
+            body = await _post_transcript(self._call_id, "customer", said)
+            if not (body and body.get("optOut")):
+                body = await _post_opt_out(self._call_id, said)
+        await self.close_for_opt_out((body or {}).get("closingLine"))
+
+    def _ai_answer(self) -> str:
+        line = AI_ANSWER_LINE.format(client=self.client_name) if self.client_name else AI_ANSWER_LINE_NO_CLIENT
+        return f"{line} {self._step_question()}".strip()
 
     def _only_opening_said(self) -> bool:
         """True while the opening line is the only thing we have said."""
@@ -1434,7 +1621,17 @@ class Qualifier(Agent):
         self.last_user_text = (getattr(new_message, "text_content", None) or "").strip()
         if _GATE_PROMPT.search(self.last_user_text) or _gate_digit(self.last_user_text) is not None:
             raise StopResponse()  # the gate, not a person: never a turn for the model
+        if self.awaiting_connect and self.gate_presses and _GATE_CONNECTING.search(self.last_user_text):
+            # Still the carrier: the person has not picked up, so keep the greeting for them.
+            logger.info("connect gate still connecting (call=%s): %r", self._call_id, self.last_user_text[:80])
+            if self._gate_timeout is not None:
+                self._gate_timeout.cancel()
+            self._gate_timeout = asyncio.create_task(self._gate_no_answer())
+            raise StopResponse()
         self.customer_spoke = True
+        if not self._closing and _OPT_OUT_REQUEST.search(self.last_user_text):
+            self.spawn(self._opt_out_now(self.last_user_text))
+            raise StopResponse()
         if self.awaiting_connect:
             # The first words from the handset. They never heard our greeting.
             self.awaiting_connect = False
@@ -1460,15 +1657,26 @@ class Qualifier(Agent):
         # The customer asks for a person: hand over now, mid-script if need
         # be. 2 Nov eval: the model said nothing, or the catch-all line and
         # step 4, and the last-step transfer guard would refuse it anyway.
-        if not self._closing and not self._transfer_triggered and _HUMAN_REQUEST.search(self.last_user_text):
+        if not self._closing and not self._transfer_triggered and (_HUMAN_REQUEST.search(self.last_user_text) or _NOT_AN_AI.search(self.last_user_text)):
             said = self.last_user_text
             logger.info("customer asked for a person (call=%s): %r", self._call_id, said[:80])
             if self._call_id:
                 self.spawn(_post_transcript(self._call_id, "customer", said))
-            self.spawn(self._do_transfer("customer asked to speak to a person"))
+            self.spawn(self._do_transfer("customer asked to speak to a person", PERSON_LINE))
             raise StopResponse()
         if not self._closing and not self._transfer_triggered and _HOSTILE.search(self.last_user_text):
             self.spawn(self._apologise_and_end(self.last_user_text))
+            raise StopResponse()
+        if not self._closing and not self._transfer_triggered and self.session_ref is not None and _AI_QUESTION.search(self.last_user_text):
+            line = self._ai_answer()
+            logger.info("asked if AI (call=%s): %r", self._call_id, self.last_user_text[:80])
+            if self._call_id:
+                self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+                self.spawn(_post_compliance(self._call_id, "AI_IDENTIFICATION", line))
+            self.session_ref.say(line, add_to_chat_ctx=True)
+            raise StopResponse()
+        if not self._closing and not self._transfer_triggered and self.script_lines.get("E1") and _CUSTOMER_GOODBYE.match(self.last_user_text):
+            self.spawn(self._say_objection_line("E1", self.last_user_text))
             raise StopResponse()
         objection_tag = self.next_objection_tag(self.last_user_text)
         if objection_tag:
@@ -1496,7 +1704,9 @@ class Qualifier(Agent):
             and not self._opening_repeated
             and self.session_ref is not None
             and _GREETING_ONLY.match(self.last_user_text)
-            and self._only_opening_said()
+            # After a gate the person may have picked up during step 1 and heard
+            # nothing of who is calling, so they get the introduction too.
+            and (self._only_opening_said() or (self.gate_presses and not (self._steps_asked() - {"S1"})))
         ):
             self._opening_repeated = True
             logger.info("hello after the opening (call=%s): asking it again", self._call_id)
@@ -1614,7 +1824,7 @@ class Qualifier(Agent):
         if text and self.session_ref is not None:
             await self.session_ref.say(text)
 
-    async def _do_transfer(self, reason: str) -> str | None:
+    async def _do_transfer(self, reason: str, line: str | None = None) -> str | None:
         """Run the hand-off. Returns None when the worker has spoken the lines
         itself (every real-call path), or a line for the caller to speak (the
         no-phone playground only)."""
@@ -1645,7 +1855,7 @@ class Qualifier(Agent):
                 # the first real call this await sat behind the AI's previous
                 # utterance, timed out at 15 s, skipped the comfort audio and
                 # delayed the transfer request by the same 15 s.
-                session.say(self.transfer_line or DEFAULT_TRANSFER_LINE, allow_interruptions=False)
+                session.say(line or self.transfer_line or DEFAULT_TRANSFER_LINE, allow_interruptions=False)
                 handle = session.say(
                     "",
                     audio=_comfort_audio(stop, self.output_sample_rate, self.hold_music_pcm),
@@ -3479,6 +3689,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     if qualifier.out_of_area_re is not None:
         logger.info("out-of-area retailers: %s", qualifier.out_of_area_re.pattern)
     qualifier.screening_line = str((brief or {}).get("screeningLine") or "")
+    qualifier.client_name = str((brief or {}).get("clientName") or "")
     logger.info("script lines: %s", ", ".join(sorted(qualifier.script_lines)) or "none (model speaks freely)")
     qualifier.session_ref = session
     qualifier.dead_air = dead_air
@@ -3539,6 +3750,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             if _GATE_PROMPT.search(text):
                 qualifier.gate_heard = True
                 return
+            if qualifier.awaiting_connect and _GATE_CONNECTING.search(text):
+                return  # the carrier connecting: says nothing about who answers next
             qualifier.report_amd(text)
 
         # ── DTMF ───────────────────────────────────────────────────────────

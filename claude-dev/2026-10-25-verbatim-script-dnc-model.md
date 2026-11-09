@@ -110,3 +110,32 @@ With the filter on only "press seven." reached STT on 8 gate calls, as partials,
 - "My bill is fine": code forces rebuttal (Q4), callback offer (Q6), goodbye (E1).
 - Classification: `connect_gate` was refused by the API's event list, gate and mailbox words never reached the transcript, so 22 calls showed as Human with 1 real. Worker now posts `heard`; new Gate tile.
 - Recording starts before the dial (it lost the first 2.3 s when started on answer); playback skips the ring.
+
+## 6 Nov 2026: Call Tap onboarding, CallTap list, voice and opening
+
+- Call Tap tenant onboarded (owner Shubham signed in); client Australian Deal; paused campaign copied, 3 dials per agent. DNCR bypass kept on by Nithin's decision.
+- Server resized to e2-standard-4 (3 parallel saturated 2 vCPUs). Nightly scale-down approved in principle, needs the IAM grant.
+- Telvoq: max 3 calls at once. API now caps the Australian line at 3 across all tenants (AU_LINE_MAX_CALLS).
+- CallTap 10K list (all NSW, all DNCR N): 115 calls over 4 runs. Real people mostly hang up in the first 5 s.
+  Causes found in turn: talk-over (wait for hello), "how are you" without who (name opening), robotic voice
+  (Cartesia Arlo -> Google Chirp 3 HD en-AU Leda as "Emma"), and a ~1 s gap after their hello (pre-rendered
+  opening, 0.1 s pause: 0.43 s measured on a test call).
+- Opening now: "Hi, it's Emma from Australian Deal. How are you doing today?"; S1 "I'm calling about your
+  electricity bill. Are you the account holder?"
+- Also: Excel/CSV lead import with column matching (Leads page and campaign page), AI call-screen handling,
+  objection ladder for "don't need it", abuse -> apology + hang-up, no playbook answer given twice, sortable Calls.
+- First gate press that reached a person: Sarah Freig, 6 Nov 08:01 UTC.
+
+## 9 Nov: fixes from the 200 test calls
+
+200 dials today (campaign limit is 200 a day, so the second run stopped at 100 of 200): about 22 real people, 0 transfers.
+
+- **Opt-out:** "I don't want you ringing me up" matched nothing and got the next script line. The wording is wider, in `lines.ts` and `_OPT_OUT_REQUEST` in the worker (keep in step). The worker now decides before the model gets the turn. "Leave me alone" now suppresses the number instead of only apologising.
+- **Their goodbye:** gets E1 and a hang-up. Before, `end_call` was refused and the model made up a rude reply.
+- **Made-up lines:** model words matching no script line are replaced by the current step's question (Q7 first if they asked something) and logged as a `blocked_line` event. The third in a call gets E1. Confirming a booked callback is the one exception. Reactions in front of a tag can't accuse, promise or quote numbers.
+- **"Are you an AI?":** answered yes in code, then the specialist offer and the question they were on, logged as AI_IDENTIFICATION. Not wanting an AI, or asking for a person, goes to the transfer with "No problem, I'll connect you with a specialist now." With no agent free they then hear the existing busy line and a callback is booked.
+- **After a gate:** the carrier's "please stay on the line" no longer takes the greeting, and a hello from the person gets the introduction.
+- **Labels:** 9 Nov mailbox and carrier wording added to both classifiers. Against 77 recent human-labelled calls it relabels 7, all machines. Past calls keep their labels.
+- **Clarity:** `_VoiceShaper` runs a 21 ms linear-phase filter (high-pass 200 Hz, +5 dB around 2.2 kHz) before the gain. On an own-number recording, the 1-3.4 kHz share went from -14.8 to -10.5 dB. Costs 0.25 ms per 100 ms of speech. `TTS_CLARITY=0` turns it off. VM gain stays at 1 dB until heard on a call.
+
+Tests: `agent-worker/tests/test_call_rails.py`. `test_guards.py`'s own main stops early and misses later tests, so run them all through an import.
