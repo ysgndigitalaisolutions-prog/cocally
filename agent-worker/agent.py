@@ -498,7 +498,10 @@ REPEAT_TAG = "QR"
 HOLD_WAIT_S = float(os.getenv("HOLD_WAIT_S", "30"))
 # Step 2 (electricity only or gas) is not scored: asked once and repeated once at
 # most. 6 Nov: "electricity also" got the question four times.
-MAX_ASKS = {"S2": 2}
+# 9 Nov: asked once only. "Electricity only" came out of the STT as "Alex, did you
+# want me?" (same syllables), in every Deepgram language and with keyterms, and
+# the repeat was the whole effect. The specialist confirms the fuel on the transfer.
+MAX_ASKS = {"S2": 1}
 # A lone name ("Amber.") is answering the phone too. 6 Nov: the AI spoke over
 # "Yeah, good" that came right after it. Words that answer "how are you" do not count.
 _ANSWER_WORDS = re.compile(

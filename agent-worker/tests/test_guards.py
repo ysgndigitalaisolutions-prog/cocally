@@ -556,14 +556,14 @@ def test_last_step_counts_as_asked_when_only_its_repeat_was_said():
         del type(q).chat_ctx
 
 
-def test_gas_question_moves_on_after_one_repeat():
+def test_gas_question_is_asked_once_then_moves_on():
     import asyncio
 
-    q = _ctx_qualifier(_LINES, [_LINES["S2"], _LINES["S2Q"]])
+    q = _ctx_qualifier(_LINES, [_LINES["S2"]])
     try:
         adv = q._steps_past_limit()
         assert adv == {"S2Q": "S3", "S2": "S3"}
-        assert _ctx_qualifier(_LINES, [_LINES["S2"]])._steps_past_limit() == {}
+        assert _ctx_qualifier(_LINES, ["Hi, it's Emma."])._steps_past_limit() == {}
     finally:
         del type(q).chat_ctx
 
