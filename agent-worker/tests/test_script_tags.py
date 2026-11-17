@@ -161,3 +161,26 @@ def test_tool_call_chunk_passes_through():
 
 def test_whole_string_helper():
     assert agent.expand_script_tags("[Q1] [S3]", LINES) == f"{LINES['Q1']} {LINES['S3']}"
+
+
+def test_a_tag_split_across_chunks_does_not_double_the_line():
+    # 17 Nov (Trevor, Emilia): "[S" then "1Q]" said "I'm calling from Australian Deal" twice.
+    lines = {"S1": "I'm calling about your electricity bill. Are you the account holder?", "S1Q": "Are you the account holder?",
+             "Q1": "I'm calling from Australian Deal, an energy broker."}
+
+    async def run(chunks):
+        async def gen():
+            for c in chunks:
+                yield c
+        out = ""
+        async for c in agent._expand_tag_stream(gen(), lines, frozenset(), frozenset({"S1"}), {}):
+            out += c if isinstance(c, str) else ""
+        return " ".join(out.split())
+
+    want = "I'm calling from Australian Deal, an energy broker. Are you the account holder?"
+    for chunks in (["[Q", "1] I'm calling from Australian", " Deal, an energy broker. [S", "1Q]"],
+                   ["[Q1] I'm calling from Australian Deal, an energy broker. [", "S1Q]"],
+                   ["[Q1]", " Sure. [S", "1Q]"]):
+        got = asyncio.run(run(chunks))
+        assert got.count("Australian Deal") == 1 and got.endswith("Are you the account holder?"), (chunks, got)
+    assert asyncio.run(run(["[Q1]", " [S", "1Q]"])) == want

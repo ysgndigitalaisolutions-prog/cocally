@@ -959,6 +959,13 @@ async def _expand_tag_stream(
                 break
             # A tag follows: the words before it are the model's own reaction.
             m_next = _BRACKET_RE.match(buf[i:])
+            rest = buf[i:]
+            if not m_next and not final and len(rest) < _BRACKET_MAX and "]" not in rest and "\n" not in rest:
+                # 17 Nov (Trevor, Emilia): "[S" arrived before "1Q]", the words in
+                # front went out unchecked and Q1 was said twice. Hold them until
+                # the tag is whole, so they get the same check as any reaction.
+                pend, buf = pend + text, rest
+                break
             head = _reaction(pend + text, m_next.group(0)[1:-1]) if m_next else pend + text
             out, pend, buf = out + head, "", buf[i:]
             m = _BRACKET_RE.match(buf)
