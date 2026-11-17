@@ -1040,7 +1040,13 @@ _SCREENING_PATTERNS = re.compile(
     # for the person you're trying to reach. Please say who you are and why you're calling."
     r"|recording this call for"
     r"|say who you are"
-    r"|why you('re| are) calling",
+    r"|why you('re| are) calling"
+    # 17 Nov (Sonia), Google Call Assist: "Before I try to connect you, can I ask
+    # what you're calling about?" / "...a quick description of why you're calling?"
+    r"|call assist"
+    r"|before I try to connect you"
+    r"|what you('re| are) calling about"
+    r"|(more|description) (about|of) why",
     re.I,
 )
 # What a screening assistant says after we answered it, while it fetches the
@@ -1048,7 +1054,8 @@ _SCREENING_PATTERNS = re.compile(
 # answered "Please hold while I connect you" with the offer line.
 _SCREENING_FOLLOW_UP = re.compile(
     r"^\W*(thank you|thanks)\W*$|please hold|connect(ing)? you|one moment|let (them|him|her) know|is busy|busy (right )?now"
-    r"|can'?t (come to|answer) the phone|start talking|hang up when",
+    r"|can'?t (come to|answer) the phone|start talking|hang up when"
+    r"|get (the person|them|him|her) on the line|the person you('re| are) trying to reach",
     re.I,
 )
 
@@ -1195,6 +1202,10 @@ class Qualifier(Agent):
         self.gate_heard = False
         self._opening_repeated = False
         self._filler_wait: asyncio.Task | None = None
+        # Set when a turn is deliberately left without a reply (a screener still
+        # talking, a thinking noise): the stall guard must not fill the gap.
+        self.quiet_on_purpose = False
+        self._screening_said = 0
         self.greeting_started_at: float | None = None
         self.last_speech_end: float | None = None
         self.dead_air: "_DeadAirWatch | None" = None
@@ -1729,6 +1740,7 @@ class Qualifier(Agent):
         if self._filler_wait is not None:
             self._filler_wait.cancel()  # they carried on: their words get the reply
             self._filler_wait = None
+        self.quiet_on_purpose = False
         if _GATE_PROMPT.search(self.last_user_text) or _gate_digit(self.last_user_text) is not None:
             raise StopResponse()  # the gate, not a person: never a turn for the model
         if self.awaiting_connect and self.gate_presses and _GATE_CONNECTING.search(self.last_user_text):
@@ -1737,6 +1749,7 @@ class Qualifier(Agent):
             if self._gate_timeout is not None:
                 self._gate_timeout.cancel()
             self._gate_timeout = asyncio.create_task(self._gate_no_answer())
+            self.quiet_on_purpose = True
             raise StopResponse()
         self.customer_spoke = True
         if not self._closing and _OPT_OUT_REQUEST.search(self.last_user_text):
@@ -1834,6 +1847,7 @@ class Qualifier(Agent):
             logger.info("thinking noise, waiting for the answer (call=%s): %r", self._call_id, self.last_user_text[:40])
             if self._call_id:
                 self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+            self.quiet_on_purpose = True
             self._filler_wait = asyncio.create_task(self._reask_after_filler())
             raise StopResponse()
         if not self._first_turn_done:
@@ -1867,6 +1881,18 @@ class Qualifier(Agent):
             logger.info("call screening still talking (call=%s): %r", self._call_id, self.last_user_text[:80])
             if self._call_id:
                 self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+            if (
+                self.screening_line
+                and self.session_ref is not None
+                and self._screening_said < 2
+                and _SCREENING_PATTERNS.search(self.last_user_text)
+                and ("?" in self.last_user_text or re.search(r"\b(can I ask|could you|can you|please (say|tell|give))\b", self.last_user_text, re.I))
+            ):
+                # It asked again: our line was cut off by its next prompt (17 Nov, Sonia).
+                self._screening_said += 1
+                self.session_ref.say(self.screening_line, add_to_chat_ctx=True, allow_interruptions=False)
+                raise StopResponse()
+            self.quiet_on_purpose = True
             raise StopResponse()  # wait for the person, or the mailbox that hangs up the call
         if self.screening_line and not self._screening_answered and not self._closing and _SCREENING_PATTERNS.search(self.last_user_text):
             self._screening_answered = True
@@ -1878,7 +1904,8 @@ class Qualifier(Agent):
             if self.dead_air is not None:
                 self.dead_air.hold(HOLD_WAIT_S)  # the screen goes off to find the person
             if self.session_ref is not None:
-                self.session_ref.say(self.screening_line, add_to_chat_ctx=True)
+                self._screening_said += 1
+                self.session_ref.say(self.screening_line, add_to_chat_ctx=True, allow_interruptions=False)
             raise StopResponse()
         # Out of area: decided here, in code, before the model or the
         # qualification score can transfer the call (the score reaches the
@@ -3657,6 +3684,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         await asyncio.sleep(STALL_GUARD_S)
         if qualifier.awaiting_connect:
             return  # after a gate digit, silence is the phone ringing
+        if qualifier.quiet_on_purpose:
+            return  # 17 Nov: a screener still talking, or a thinking noise being waited out
         if qualifier._transfer_triggered or qualifier._closing or not awaiting_reply or not _quiet():
             return
         logger.warning(
@@ -3672,7 +3701,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         # empty commit produces no reply. Rather than leave the line silent,
         # ask for a repeat with a fixed line (no LLM round trip).
         await asyncio.sleep(2.0)
-        if qualifier._transfer_triggered or qualifier._closing or not awaiting_reply or not _quiet():
+        if qualifier._transfer_triggered or qualifier._closing or qualifier.quiet_on_purpose or not awaiting_reply or not _quiet():
             return
         logger.warning("turn stall guard: still no reply — asking the customer to repeat (call=%s)", call_id)
         qualifier.spawn(_post_event(call_id, "stall_guard", (STALL_GUARD_S + 2.0) * 1000, "nothing transcribed; asked to repeat"))

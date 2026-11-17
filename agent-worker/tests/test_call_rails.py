@@ -399,3 +399,35 @@ def test_after_three_asks_the_callback_question_then_goodbye():
     q, _ = _make(S1_SAID + (LINES["S1Q"], reworded, LINES["Q6"]))
     lines, _ = q._lines_for_reply()
     assert lines["S1Q"] == LINES["E1"], lines["S1Q"]
+
+
+SCREEN = "Hi, this is Emma from Australian Deal, calling regarding your electricity bills."
+
+
+def test_google_call_assist_gets_our_line_and_again_when_it_asks_again():
+    # 17 Nov (Sonia): our line was cut off by the screener's next prompt, and every
+    # later prompt got "Sorry, I didn't quite catch that" from the stall guard.
+    async def go():
+        q, _ = _make()
+        q.screening_line = SCREEN
+        assert await _turn(q, "Hi. Call Assist by Google recording this call for the person you're trying to reach.")
+        assert q.session_ref.said == [SCREEN]
+        assert await _turn(q, "Before I try to connect you, can I ask what you're calling about?")
+        assert q.session_ref.said == [SCREEN, SCREEN], q.session_ref.said
+        assert await _turn(q, "Before I try to connect you, could you please give me a quick description of why you're calling?")
+        assert q.session_ref.said == [SCREEN, SCREEN], "twice at most, then wait"
+        assert q.quiet_on_purpose, "the stall guard must not fill the wait"
+        assert await _turn(q, "Okay. Let me try to get the person you are trying to reach on the line.")
+        assert q.quiet_on_purpose and q.session_ref.said == [SCREEN, SCREEN]
+    asyncio.run(go())
+
+
+def test_a_thinking_noise_keeps_the_stall_guard_quiet_and_their_next_words_clear_it():
+    async def go():
+        agent.FILLER_WAIT_S = 5
+        q, _ = _make(S1_SAID)
+        assert await _turn(q, "Um,")
+        assert q.quiet_on_purpose
+        await _turn(q, "Yes, that's me.")
+        assert not q.quiet_on_purpose
+    asyncio.run(go())
