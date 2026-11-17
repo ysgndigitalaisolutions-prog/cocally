@@ -588,6 +588,7 @@ _OPT_OUT_REQUEST = re.compile(
     r"|stop (calling|ringing|phoning|bothering)"
     r"|quit (calling|ringing|phoning)"
     r"|leave me alone"
+    r"|you (can'?t|cannot|can not|shouldn'?t|should not|are not allowed to|aren'?t allowed to) (call|ring|phone|contact)\w* (me|this number|here)"
     r"|never (call|ring) (me|here|this number)"
     r"|remove (me|my (number|details))"
     r"|take (me|my (number|details)) off"
@@ -611,7 +612,11 @@ _AI_QUESTION = re.compile(
     rf"\b(are|r) (you|u) (an? |really |actually |even |just |some )*{_AI_WORDS}(?! (who|that|from|with|of)\b)\b"
     r"|\b(is|was) (this|that|it) (an? |really |actually |just |some )*(a\.? ?i\.?|bot|robot|chat ?bot|machine|computer|recording|automated( \w+)?|human|real person|person)\b"
     r"|\bam i (talking|speaking) (to|with) (an? |a real |some |real )*(a\.? ?i\.?|bot|robot|chat ?bot|machine|computer|recording|human|person)\b"
-    r"|\byou (sound|sounds) like (an? )(a\.? ?i\.?|bot|robot|machine|computer|recording)\b",
+    r"|\byou (sound|sounds) like (an? )(a\.? ?i\.?|bot|robot|machine|computer|recording)\b"
+    # 10 Nov: "You're AI. You're not a real person." got "Good..." and a cut-off line.
+    r"|\byou'?re (an? |just |only |obviously |clearly )*(a\.? ?i\.?|bot|robot|chat ?bot|machine|computer|recording)\b"
+    r"|\byou('?re| are) not (a |an )?(real|human|person|real person)\b"
+    r"|\b(this|that|it)('s| is) (an? |just |only )*(a\.? ?i\.?|robot|bot|chat ?bot|machine|computer|recording|automated)\b",
     re.I,
 )
 _NOT_AN_AI = re.compile(
@@ -903,6 +908,11 @@ async def _expand_tag_stream(
             return head
         if len(head.split()) > 12 or _BAD_REACTION.search(head):
             return " "
+        bare = re.sub(r"\s+", " ", head).strip().lower().rstrip(".!,? ")
+        if len(bare) >= 15 and any(bare in flat.lower() for flat in flat_of.values()):
+            # 10 Nov: "[Q1] I'm calling from Australian Deal, an energy broker. [S1Q]"
+            # said the playbook answer twice. Script words belong to their tag.
+            return " "
         if tag.endswith("Q") and tag[:-1] in lines and tag[:-1] not in asked and tag[0] == "S":
             tag = tag[:-1]
         line = lines.get(tag, "").strip().lower()
@@ -1085,7 +1095,9 @@ _WHO = r"(real |actual |energy )?(person|human|someone|somebody|manager|supervis
 _HUMAN_REQUEST = re.compile(
     rf"\b((speak|talk) (to|with) (a |an |some |the |your )?{_WHO}"
     rf"|(put|transfer|connect|pass) (me |us )?(through |straight )?(to|with) (a |an |some |the |your )?{_WHO}"
-    rf"|(i want|i'd like|i need|give me|get me) (a |an |some |the |your )?{_WHO}\b)",
+    rf"|(i want|i'd like|i need|give me|get me) (a |an |some |the |your )?{_WHO}\b"
+    # 10 Nov: "Ask your supervisor."
+    rf"|(ask|get|fetch|call|bring) (a |an |some |the |your )?(manager|supervisor|boss)\b)",
     re.I,
 )
 
@@ -1380,8 +1392,21 @@ class Qualifier(Agent):
         )
         return {
             t for t, line in self.script_lines.items()
-            if t.startswith("Q") and t[1:].isdigit() and re.sub(r"\s+", " ", line).strip().lower()[:40] in said
+            if t.startswith("Q") and t[1:].isdigit() and self._line_probe(t) in said
         }
+
+    def _line_probe(self, tag: str) -> str:
+        """The shortest opening of a script line (12 to 40 characters) that no
+        other line starts with. 10 Nov: "Good question. Our specialist can" was
+        cut off 15 times by the customer, never counted as said, so it was
+        never swapped for the callback offer and the goodbye."""
+        flat = {t: re.sub(r"\s+", " ", l).strip().lower() for t, l in self.script_lines.items()}
+        line = flat[tag]
+        for n in range(12, 41):
+            head = line[:n]
+            if not any(o.startswith(head) for t, o in flat.items() if t != tag and not t.startswith(tag) and not tag.startswith(t)):
+                return head
+        return line[:40]
 
     def _lines_for_reply(self) -> tuple[dict[str, str], dict[str, str]]:
         """Script lines and tag swaps for the next reply: step limits, and a

@@ -21,6 +21,8 @@ describe('OPT_OUT_PATTERN', () => {
     'Stop bothering me.',
     'Just leave me alone',
     'lose my number',
+    // 10 Nov, verbatim.
+    "You can't call me.",
   ])('opts out on %j', (text) => {
     expect(OPT_OUT_PATTERN.test(text)).toBe(true);
   });

@@ -27,6 +27,8 @@ export const OPT_OUT_PATTERN = new RegExp(
     String.raw`stop (calling|ringing|phoning|bothering)`,
     String.raw`quit (calling|ringing|phoning)`,
     String.raw`leave me alone`,
+    // 10 Nov: "You can't call me" was only caught by the model's opt_out tool.
+    String.raw`you (can'?t|cannot|can not|shouldn'?t|should not|are not allowed to|aren'?t allowed to) (call|ring|phone|contact)\w* (me|this number|here)`,
     String.raw`lose my number`,
     String.raw`never (call|ring) (me|here|this number)`,
     String.raw`remove (me|my (number|details))`,

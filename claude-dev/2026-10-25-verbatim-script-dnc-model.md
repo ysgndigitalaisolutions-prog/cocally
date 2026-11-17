@@ -139,3 +139,20 @@ With the filter on only "press seven." reached STT on 8 gate calls, as partials,
 - **Clarity:** `_VoiceShaper` runs a 21 ms linear-phase filter (high-pass 200 Hz, +5 dB around 2.2 kHz) before the gain. On an own-number recording, the 1-3.4 kHz share went from -14.8 to -10.5 dB. Costs 0.25 ms per 100 ms of speech. `TTS_CLARITY=0` turns it off. VM gain stays at 1 dB until heard on a call.
 
 Tests: `agent-worker/tests/test_call_rails.py`. `test_guards.py`'s own main stops early and misses later tests, so run them all through an import.
+
+## 10 Nov: 500 calls on the 9 Nov fixes (fb16490)
+
+From 2:41 to 4:32pm Sydney. Batches of 3 at first (~140/hr), then the lines kept full (~340-380/hr).
+- 250 voicemail, 93 failed (54 × 503, 39 × 604), 69 no answer, 6 busy, 82 people (16.4%, same as 9 Nov's 16.0%).
+- People: 57 left at the opening (49 without a word, median about 2 s after it), 21 at "account holder", 3 reached step 2 or 3, 1 transfer (a prank caller), 0 qualified.
+- Opt-out: Farzana's "You can't call me" was caught by the model's opt_out tool, not by our wording. 5 made-up lines blocked, 4 of them on voicemails. No incidents.
+- No connect gates today (51 of 200 calls on 9 Nov), and the tenant's caller-ID pool is empty on both days. Cause unknown: ask Telvoq, along with the rise in 503s (about 2% on 9 Nov, 11-16% once the lines were kept full).
+- A 4 s wait after each call ended didn't reduce the 503s.
+- Built but not deployed: AI said as a statement, "ask your supervisor", a cut-off playbook answer counts as said, a written-out playbook answer said once.
+
+## 17 Nov 2026: Victoria campaign set up (not dialling)
+
+- New campaign "AI Energy Campaign (Victoria, 17 Nov 2026)" (6afbc7d1717f8f1f7eb50ee1), cloned from the CallTap list test campaign (same flow, script, Q&A, retry matrix, budget 520/day, 3 lines). Status PAUSED.
+- 8,310 leads from "CallTap 20-Vic.xlsx" (all VIC; 7,987 mobiles, 323 landlines), batch tag `vic17`, timezone Australia/Melbourne. None were already in the tenant and none are on the opt-out list. 458 have only an initial as a first name; `usableFirstName` already keeps those out of the opening.
+- Caller IDs: until now every call showed the Telvoq trunk default 02 8531 6375 (the tenant pool was empty). Added to the pool and ticked on this campaign, round-robin: 03 4830 7776 (VIC), 0485 049 494 (mobile), 02 8531 6375. Nithin confirmed all three work with Telvoq; none had been used on a call before today. The per-number answer counters on the CLI page will show which one people pick up.
+- The 5 call fixes from 10 Nov are still not deployed.

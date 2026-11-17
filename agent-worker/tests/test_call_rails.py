@@ -103,9 +103,9 @@ def test_tar_yu_is_opted_out_not_read_the_next_line():
 
 def test_every_way_of_saying_stop():
     for said in ["Don't call me again.", "Stop calling me", "I don't want anyone to call me", "take me off your list", "Stop bothering me.",
-                 "Just leave me alone", "lose my number", "My number is on the DNC register", "I'll make a complaint"]:
+                 "Just leave me alone", "lose my number", "You can't call me.", "You cannot ring this number", "My number is on the DNC register", "I'll make a complaint"]:
         assert agent._OPT_OUT_REQUEST.search(said), said
-    for said in ["I'm not interested.", "Call me back later.", "Yes, that is me.", "Sorry, who is this?", "I don't want it.", "About 300 a quarter"]:
+    for said in ["I'm not interested.", "Call me back later.", "Yes, that is me.", "Sorry, who is this?", "I don't want it.", "About 300 a quarter", "You can call me back at five.", "I can't talk right now"]:
         assert not agent._OPT_OUT_REQUEST.search(said), said
 
 
@@ -131,6 +131,39 @@ def test_are_you_an_ai_gets_the_truth():
         assert agent._AI_QUESTION.search(said), said
     for said in ["Are you the person who called?", "Is this the hotel?", "Who is this?", "Are you with AGL?", "Is this real?", "Yes, I'm the person who pays it.", "How are you?", "Are you from Melbourne?"]:
         assert not agent._AI_QUESTION.search(said), said
+
+
+def test_ai_said_as_a_statement_is_answered_too():
+    for said in ["You're AI. You're not a real person.", "you're a robot", "You are not a real person", "This is a recording", "It's just a bot"]:
+        assert agent._AI_QUESTION.search(said), said
+    for said in ["You're right.", "You're not from here?", "This is Colin.", "It's a bit much.", "You're a broker?"]:
+        assert not agent._AI_QUESTION.search(said), said
+
+
+def test_ask_your_supervisor_is_a_request_for_a_person():
+    for said in ["Ask your supervisor.", "Get your manager", "Can you get your boss"]:
+        assert agent._HUMAN_REQUEST.search(said), said
+    assert not agent._HUMAN_REQUEST.search("Ask me later")
+
+
+def test_a_cut_off_playbook_answer_still_counts_as_given():
+    q, _ = _make((OPENING, "Good question. Our specialist can"))
+    assert "Q7" in q._answers_given()
+    lines, advance = q._lines_for_reply()
+    assert advance.get("Q7") in ("QR", "E1"), advance
+    q2, _ = _make((OPENING, "Good"))
+    assert "Q7" not in q2._answers_given()
+    q3, _ = _make((OPENING, LINES["S1"]))
+    assert q3._answers_given() == set()
+
+
+def test_a_written_out_playbook_answer_is_not_said_twice():
+    async def go():
+        q, _ = _make((OPENING, LINES["S1"]))
+        return await _say_reply(q, ["[Q1] I'm calling from Australian Deal, an energy broker. ", "[S1Q]"])
+
+    out = asyncio.run(go())
+    assert out == f"{LINES['Q1']} {LINES['S1Q']}", out
 
 
 def test_wanting_a_person_is_handed_over():
