@@ -334,3 +334,56 @@ if __name__ == "__main__":
                 failed += 1
                 print("FAIL", n, repr(e)[:400])
     sys.exit(1 if failed else 0)
+
+
+# 17 Nov: John (Marong) said "Oh," twice while thinking and heard the question three times.
+S1_SAID = (OPENING, LINES["S1"])
+
+
+def test_a_thinking_noise_waits_then_asks_again_once():
+    async def go():
+        agent.FILLER_WAIT_S = 0.05
+        q, _ = _make(S1_SAID)
+        assert await _turn(q, "Oh,"), "a filler is not a turn for the model"
+        assert q.session_ref.said == [], "nothing said straight away"
+        await asyncio.sleep(0.15)
+        assert q.session_ref.said == ["Are you the account holder?"], q.session_ref.said
+    asyncio.run(go())
+
+
+def test_their_answer_after_a_thinking_noise_cancels_the_reask():
+    async def go():
+        agent.FILLER_WAIT_S = 0.05
+        q, _ = _make(S1_SAID)
+        assert await _turn(q, "Um,")
+        handled = await _turn(q, "Yes, that's me.")
+        await asyncio.sleep(0.15)
+        assert not handled, "their answer goes to the model as usual"
+        assert q.session_ref.said == [], q.session_ref.said
+    asyncio.run(go())
+
+
+def test_third_ask_of_a_step_is_reworded():
+    async def go():
+        agent.FILLER_WAIT_S = 0.05
+        q, _ = _make(S1_SAID + (LINES["S1Q"],))
+        assert await _turn(q, "Oh,")
+        await asyncio.sleep(0.15)
+        assert q.session_ref.said == ["Sorry, just to check, are you the account holder?"], q.session_ref.said
+        lines, _ = q._lines_for_reply()
+        assert lines["S1Q"] == "Sorry, just to check, are you the account holder?"
+        assert lines["S1"] == LINES["S1"], "the script line itself is unchanged"
+    asyncio.run(go())
+
+
+def test_first_repeat_is_still_word_for_word():
+    q, _ = _make(S1_SAID)
+    lines, _ = q._lines_for_reply()
+    assert lines["S1Q"] == LINES["S1Q"]
+
+
+def test_what_counts_as_a_thinking_noise():
+    for said in ["Oh,", "Um", "Uh...", "Hmm.", "Oh, um", "Well,", "Let me think."]:
+        assert agent._FILLER_ONLY.match(said), said
+    for said in ["Mm-hmm.", "Uh-huh", "No.", "Oh, yes", "Oh no", "Yeah", "Um, yes I am", "Hello?"]:
+        assert not agent._FILLER_ONLY.match(said), said

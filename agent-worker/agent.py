@@ -502,6 +502,14 @@ HOLD_WAIT_S = float(os.getenv("HOLD_WAIT_S", "30"))
 # want me?" (same syllables), in every Deepgram language and with keyterms, and
 # the repeat was the whole effect. The specialist confirms the fuel on the transfer.
 MAX_ASKS = {"S2": 1}
+# 17 Nov (John, Marong): "Oh," twice while he thought got "Are you the account
+# holder?" three times, word for word. A thinking noise is not an answer: wait
+# for the rest, and ask again only if nothing follows.
+_FILLER_ONLY = re.compile(r"^\W*(?:(?:oh+|um+|uh+|erm*|ah+|hmm+|hm+|well|so|let me (?:think|see))\W*){1,3}$", re.I)
+FILLER_WAIT_S = float(os.getenv("FILLER_WAIT_S", "4"))
+# A step question asked twice already is asked a third time with this in front,
+# not word for word again. The script line itself is unchanged.
+REASK_PREFIX = "Sorry, just to check, "
 # A lone name ("Amber.") is answering the phone too. 6 Nov: the AI spoke over
 # "Yeah, good" that came right after it. Words that answer "how are you" do not count.
 _ANSWER_WORDS = re.compile(
@@ -1175,6 +1183,7 @@ class Qualifier(Agent):
         self.greeting_started = False
         self.gate_heard = False
         self._opening_repeated = False
+        self._filler_wait: asyncio.Task | None = None
         self.greeting_started_at: float | None = None
         self.last_speech_end: float | None = None
         self.dead_air: "_DeadAirWatch | None" = None
@@ -1336,6 +1345,44 @@ class Qualifier(Agent):
                     return None
         return last
 
+    def _last_ai_text(self) -> str:
+        return next(
+            (getattr(i, "text_content", "") or "" for i in reversed(self.chat_ctx.items) if getattr(i, "role", None) == "assistant"),
+            "",
+        )
+
+    def _said_count(self, line: str) -> int:
+        """How many of our turns so far ended with (or contained) this line."""
+        probe = re.sub(r"\s+", " ", line).strip().lower()[-40:]
+        return sum(
+            probe in re.sub(r"\s+", " ", getattr(i, "text_content", "") or "").lower()
+            for i in self.chat_ctx.items
+            if getattr(i, "role", None) == "assistant"
+        )
+
+    @staticmethod
+    def _reworded(line: str) -> str:
+        line = line.strip()
+        return REASK_PREFIX + line[:1].lower() + line[1:]
+
+    def _reask_line(self) -> str:
+        """The current step question, with the lead-in once it was asked twice."""
+        q = self._step_question()
+        return self._reworded(q) if q and self._said_count(q) >= 2 else q
+
+    async def _reask_after_filler(self) -> None:
+        """Nothing came after their "Oh," / "Um": ask the question again."""
+        await asyncio.sleep(FILLER_WAIT_S)
+        deadline = time.monotonic() + 6
+        while getattr(self.session_ref, "user_state", None) == "speaking" and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)  # their turn, when it completes, cancels this
+        if self._closing or self._transfer_triggered or self.session_ref is None:
+            return
+        line = self._reask_line()
+        if line:
+            logger.info("no answer after a thinking noise, asking again (call=%s)", self._call_id)
+            self.session_ref.say(line, add_to_chat_ctx=True)
+
     def _step_question(self) -> str:
         """The question the customer should be answering now: the latest step
         said, repeated short, or the first one."""
@@ -1413,9 +1460,12 @@ class Qualifier(Agent):
         playbook answer already given swapped for an offer of a person."""
         advance = self._steps_past_limit()
         given = self._answers_given()
-        if not given:
-            return self.script_lines, advance
         lines = dict(self.script_lines)
+        for tag, q in self.script_lines.items():
+            if re.fullmatch(r"S\d+Q", tag) and self._said_count(q) >= 2:
+                lines[tag] = self._reworded(q)
+        if not given:
+            return lines, advance
         q6 = self.script_lines.get("Q6")
         if q6 and "Q6" not in given and "Q6" not in self.blocked_tags:
             lines[REPEAT_TAG] = f"{OFFER_PERSON_PREFIX} {q6}"
@@ -1647,6 +1697,9 @@ class Qualifier(Agent):
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:  # noqa: ANN001
         self.last_user_text = (getattr(new_message, "text_content", None) or "").strip()
+        if self._filler_wait is not None:
+            self._filler_wait.cancel()  # they carried on: their words get the reply
+            self._filler_wait = None
         if _GATE_PROMPT.search(self.last_user_text) or _gate_digit(self.last_user_text) is not None:
             raise StopResponse()  # the gate, not a person: never a turn for the model
         if self.awaiting_connect and self.gate_presses and _GATE_CONNECTING.search(self.last_user_text):
@@ -1741,6 +1794,18 @@ class Qualifier(Agent):
             if self._call_id:
                 self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
             self.session_ref.say(self.opening_line, add_to_chat_ctx=True)
+            raise StopResponse()
+        if (
+            not self._closing
+            and not self._transfer_triggered
+            and self.session_ref is not None
+            and _FILLER_ONLY.match(self.last_user_text)
+            and self._last_ai_text().rstrip().endswith("?")
+        ):
+            logger.info("thinking noise, waiting for the answer (call=%s): %r", self._call_id, self.last_user_text[:40])
+            if self._call_id:
+                self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+            self._filler_wait = asyncio.create_task(self._reask_after_filler())
             raise StopResponse()
         if not self._first_turn_done:
             self._first_turn_done = True
