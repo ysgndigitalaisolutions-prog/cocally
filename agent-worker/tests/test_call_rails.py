@@ -387,3 +387,15 @@ def test_what_counts_as_a_thinking_noise():
         assert agent._FILLER_ONLY.match(said), said
     for said in ["Mm-hmm.", "Uh-huh", "No.", "Oh, yes", "Oh no", "Yeah", "Um, yes I am", "Hello?"]:
         assert not agent._FILLER_ONLY.match(said), said
+
+
+def test_after_three_asks_the_callback_question_then_goodbye():
+    # 17 Nov (Rajni, Tarneit): "Are you the account holder?" ten times.
+    reworded = "Sorry, just to check, are you the account holder?"
+    q, _ = _make(S1_SAID + (LINES["S1Q"], reworded))
+    lines, _ = q._lines_for_reply()
+    assert lines["S1Q"] == LINES["Q6"], lines["S1Q"]
+    assert q._reask_line() == LINES["Q6"]
+    q, _ = _make(S1_SAID + (LINES["S1Q"], reworded, LINES["Q6"]))
+    lines, _ = q._lines_for_reply()
+    assert lines["S1Q"] == LINES["E1"], lines["S1Q"]

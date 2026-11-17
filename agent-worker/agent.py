@@ -510,6 +510,10 @@ FILLER_WAIT_S = float(os.getenv("FILLER_WAIT_S", "4"))
 # A step question asked twice already is asked a third time with this in front,
 # not word for word again. The script line itself is unchanged.
 REASK_PREFIX = "Sorry, just to check, "
+# 17 Nov (Rajni, Tarneit): talking to someone else in the room, she got "Are you
+# the account holder?" ten times. After the reworded third ask, the callback
+# question; once that was asked, the goodbye.
+MAX_SAME_QUESTION = 3
 # A lone name ("Amber.") is answering the phone too. 6 Nov: the AI spoke over
 # "Yeah, good" that came right after it. Words that answer "how are you" do not count.
 _ANSWER_WORDS = re.compile(
@@ -1365,10 +1369,23 @@ class Qualifier(Agent):
         line = line.strip()
         return REASK_PREFIX + line[:1].lower() + line[1:]
 
+    def _instead_of_asking_again(self) -> str | None:
+        """What to say instead of a step question asked MAX_SAME_QUESTION times."""
+        q6 = self.script_lines.get("Q6")
+        if q6 and "Q6" not in self.blocked_tags and not self._said_count(q6):
+            return q6
+        return self.script_lines.get("E1")
+
     def _reask_line(self) -> str:
-        """The current step question, with the lead-in once it was asked twice."""
+        """The current step question, with the lead-in once it was asked twice,
+        and the callback question or goodbye instead once it was asked enough."""
         q = self._step_question()
-        return self._reworded(q) if q and self._said_count(q) >= 2 else q
+        if not q:
+            return q
+        n = self._said_count(q)
+        if n >= MAX_SAME_QUESTION:
+            return self._instead_of_asking_again() or self._reworded(q)
+        return self._reworded(q) if n >= 2 else q
 
     async def _reask_after_filler(self) -> None:
         """Nothing came after their "Oh," / "Um": ask the question again."""
@@ -1462,7 +1479,12 @@ class Qualifier(Agent):
         given = self._answers_given()
         lines = dict(self.script_lines)
         for tag, q in self.script_lines.items():
-            if re.fullmatch(r"S\d+Q", tag) and self._said_count(q) >= 2:
+            if not re.fullmatch(r"S\d+Q", tag):
+                continue
+            n = self._said_count(q)
+            if n >= MAX_SAME_QUESTION and (instead := self._instead_of_asking_again()):
+                lines[tag] = instead
+            elif n >= 2:
                 lines[tag] = self._reworded(q)
         if not given:
             return lines, advance
