@@ -621,7 +621,13 @@ async def _wait_for_their_hello(session, qualifier) -> str:  # noqa: ANN001
 
 
 FIRST_GREETING_WAIT_S = float(os.getenv("FIRST_GREETING_WAIT_S", "0.6"))
-_ASKED_HOW_WE_ARE = re.compile(r"how (are|r) (you|ya)|how'?s it going|how about you|and you\b|yourself\b", re.I)
+# 18 Nov (test): "I'm good. Are you?" got no "I'm doing well" back. A short
+# "you?" after their own answer is the question too; "Who are you?" is not.
+_ASKED_HOW_WE_ARE = re.compile(
+    r"how (are|r) (you|ya)|how'?s it going|how about you|and you\b|yourself\b|how'?s your day"
+    r"|\b(good|fine|well|great|okay|ok|alright|all right|not bad|pretty good|doing good)\b[^?]*\b(are|and|how about)?\s*(you|ya)\s*\?",
+    re.I,
+)
 # Abuse or "go away": say sorry once and hang up. 6 Nov: "F*** off, Daniel."
 # Asking not to be called again is an opt-out, handled by the engine, not here.
 _HOSTILE = re.compile(

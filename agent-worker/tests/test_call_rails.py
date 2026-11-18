@@ -467,3 +467,11 @@ def test_a_thinking_noise_keeps_the_stall_guard_quiet_and_their_next_words_clear
         await _turn(q, "Yes, that's me.")
         assert not q.quiet_on_purpose
     asyncio.run(go())
+
+
+def test_a_short_you_back_is_asking_how_we_are():
+    # 18 Nov test call: "I'm good. Are you?" got no "I'm doing well" back.
+    for said in ["I'm good. Are you?", "Good, you?", "Not bad, and you?", "Fine thanks, how about you?", "How are you?", "Good thanks. How's your day?"]:
+        assert agent._ASKED_HOW_WE_ARE.search(said), said
+    for said in ["Who are you?", "Good.", "Where are you from?", "Are you a robot?", "What do you want?"]:
+        assert not agent._ASKED_HOW_WE_ARE.search(said), said
