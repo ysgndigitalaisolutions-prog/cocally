@@ -766,3 +766,11 @@ def test_opening_is_prerendered_or_falls_back_to_live():
         raise RuntimeError("tts down")
 
     assert asyncio.run(agent._prerender(SimpleNamespace(synthesize=boom), "Hi")) is None
+
+
+def test_voice_reads_exclamations_calmly():
+    # 18 Nov: the client's "!" lines are read as full stops; "!?" stays a question.
+    assert agent._calm_text("help lower your bills! Do you have gas?") == "help lower your bills. Do you have gas?"
+    assert agent._calm_text("Perfect, thank you!!") == "Perfect, thank you."
+    assert agent._calm_text("Really!?") == "Really?"
+    assert agent._calm_text("No change here.") == "No change here."

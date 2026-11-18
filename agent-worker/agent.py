@@ -190,6 +190,23 @@ def _clarity_filter(sample_rate: int):  # noqa: ANN202 — numpy array
     return h
 
 
+# The client's lines are full of "!" ("...help lower your bills!"). The voices
+# read them with a salesy lift, and on the phone that is what sounds synthetic
+# (18 Nov: 94 of 149 people hung up during the opening). The words stay the
+# client's; only the voice reads "!" as a full stop. The transcript keeps "!".
+TTS_CALM = os.getenv("TTS_CALM", "1") == "1"
+_EXCLAIM_RE = re.compile(r"!+(\?)?")
+
+
+def _calm_text(text: str) -> str:
+    return _EXCLAIM_RE.sub(lambda m: m.group(1) or ".", text) if TTS_CALM else text
+
+
+async def _calm_stream(text):  # noqa: ANN001, ANN201 — AsyncIterable[str]
+    async for chunk in text:
+        yield _calm_text(chunk)
+
+
 class _VoiceShaper:
     """Clarity filter, then loudness, for one spoken line. It keeps the filter's
     memory between frames, so a frame edge makes no click."""
@@ -543,7 +560,7 @@ async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
         t0 = time.monotonic()
         frames = []
         shaper = _VoiceShaper()
-        async with tts_engine.synthesize(text) as stream:
+        async with tts_engine.synthesize(_calm_text(text)) as stream:
             async for ev in stream:
                 frame = ev.frame
                 if isinstance(frame, rtc.AudioFrame):
@@ -1212,7 +1229,7 @@ class Qualifier(Agent):
 
     async def tts_node(self, text, model_settings):  # noqa: ANN001, ANN201 — framework signature
         shaper = _VoiceShaper()
-        async for frame in Agent.default.tts_node(self, text, model_settings):
+        async for frame in Agent.default.tts_node(self, _calm_stream(text), model_settings):
             if isinstance(frame, rtc.AudioFrame):
                 frame = shaper.shape(frame)
             yield frame
@@ -2984,6 +3001,24 @@ def _with_tts_fallback(primary):  # noqa: ANN001, ANN202
             chain.append(cartesia.TTS(model="sonic-3.6", voice=os.getenv("TTS_BACKUP_VOICE", "391f4c0a-f1a8-4c21-9aa2-7a07f0a4b0dc")))
         except Exception as e:  # noqa: BLE001
             logger.warning("cartesia backup unavailable (%s)", e)
+    if TTS_PROVIDER == "cartesia":
+        # 18 Nov: Bronte (Cartesia) as Emma, Leda (Google) behind her, so a
+        # Cartesia outage does not turn Emma into a man's voice.
+        try:
+            from google.cloud import texttospeech
+            from livekit.plugins import google
+
+            chain.append(
+                google.TTS(
+                    language="en-AU",
+                    voice_name=os.getenv("TTS_BACKUP_VOICE", "en-AU-Chirp3-HD-Leda"),
+                    sample_rate=24000,
+                    use_streaming=True,
+                    audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+                )
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("google backup unavailable (%s)", e)
     if primary.provider != "ElevenLabs" and os.environ.get("ELEVENLABS_API_KEY"):
         try:
             from livekit.plugins import elevenlabs
