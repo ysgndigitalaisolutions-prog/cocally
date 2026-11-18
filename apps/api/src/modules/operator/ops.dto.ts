@@ -1,23 +1,5 @@
 import { Type } from 'class-transformer';
-import {
-  ArrayMaxSize,
-  ArrayMinSize,
-  IsArray,
-  IsBoolean,
-  IsDateString,
-  IsEmail,
-  IsIn,
-  IsInt,
-  IsNumber,
-  IsOptional,
-  IsString,
-  Matches,
-  Max,
-  MaxLength,
-  Min,
-  MinLength,
-  ValidateNested,
-} from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsBoolean, IsDateString, IsEmail, IsIn, IsInt, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
 import { ROLES, type Role } from '@cocally/shared';
 import { ADVANCE_RULES, TTS_PROVIDERS, type AdvanceRule, type TtsProvider } from '../../schemas/tenant.schema';
 import { TENANT_REGIONS } from './ops-tenants.service';
@@ -122,6 +104,12 @@ export class SellerDto {
   @IsOptional() @IsString() @MaxLength(200) email?: string;
   @IsOptional() @IsString() @MaxLength(40) phone?: string;
   @IsOptional() @IsString() @MaxLength(500) paymentDetails?: string;
+}
+
+export class CallAlertsDto {
+  @IsOptional() @IsBoolean() enabled?: boolean;
+  @IsOptional() @IsInt() @Min(5) @Max(120) intervalMinutes?: number;
+  @IsOptional() @IsArray() @ArrayMaxSize(10) @IsEmail({}, { each: true }) recipients?: string[];
 }
 
 export class RateCardDto {

@@ -9,7 +9,9 @@ import { OpsAuditService } from './ops-audit.service';
 import { OpsCallsService } from './ops-calls.service';
 import { OpsTenantsService } from './ops-tenants.service';
 import { OpsVendorsService } from './ops-vendors.service';
+import { CallAlertsService } from '../alerts/alerts.service';
 import {
+  CallAlertsDto,
   ActiveDto,
   CreateOperatorDto,
   CreateTenantDto,
@@ -50,6 +52,7 @@ export class OpsController {
     private readonly platform: PlatformService,
     private readonly operators: OperatorAuthService,
     private readonly audit: OpsAuditService,
+    private readonly alerts: CallAlertsService,
   ) {}
 
   // ── Overview ───────────────────────────────────────────────────────────
@@ -325,6 +328,27 @@ export class OpsController {
     const after = await this.platform.updateRateCard(dto);
     await this.audit.record(op, { action: 'settings.rate_card', entityType: 'PlatformSettings', entityId: 'default', before, after });
     return after;
+  }
+
+  @Get('call-alerts')
+  async callAlerts() {
+    return { settings: await this.alerts.settings(), history: await this.alerts.history(30) };
+  }
+
+  @Put('call-alerts')
+  async updateCallAlerts(@CurrentOperator() op: AuthenticatedOperator, @Body() dto: CallAlertsDto) {
+    const before = await this.alerts.settings();
+    const after = await this.alerts.updateSettings(dto);
+    await this.audit.record(op, { action: 'settings.call_alerts', entityType: 'PlatformSettings', entityId: 'default', before, after });
+    return after;
+  }
+
+  /** Runs the check now over the last interval and emails the result, even when all is normal. */
+  @Post('call-alerts/test')
+  async testCallAlerts() {
+    const s = await this.alerts.settings();
+    const to = new Date();
+    return this.alerts.check(new Date(+to - s.intervalMinutes * 60_000), to, s.recipients, true);
   }
 
   @Get('seller')

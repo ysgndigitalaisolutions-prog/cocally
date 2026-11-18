@@ -48,6 +48,7 @@ export default function OpsSettingsPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Settings</h1>
+      <CallAlerts />
       <RateCard />
       <Seller />
       <Operators />
@@ -136,6 +137,141 @@ function RateCard() {
         </button>
         <Note note={note} />
       </div>
+    </section>
+  );
+}
+
+interface AlertFindingRow {
+  severity: 'CRITICAL' | 'WARNING';
+  check: string;
+  campaignName: string;
+  title: string;
+  detail: string;
+}
+interface AlertRow {
+  _id: string;
+  windowStart: string;
+  windowEnd: string;
+  findings: AlertFindingRow[];
+  emailedTo: string[];
+  emailError?: string;
+}
+interface AlertSettings {
+  enabled: boolean;
+  intervalMinutes: number;
+  recipients: string[];
+  lastRunAt?: string;
+}
+
+function CallAlerts() {
+  const [s, setS] = useState<AlertSettings | null>(null);
+  const [recipients, setRecipients] = useState('');
+  const [history, setHistory] = useState<AlertRow[]>([]);
+  const [note, setNote] = useState<{ text: string; bad?: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    void opsApi.get<{ settings: AlertSettings; history: AlertRow[] }>('/call-alerts').then((r) => {
+      setS(r.data.settings);
+      setRecipients(r.data.settings.recipients.join(', '));
+      setHistory(r.data.history);
+    });
+  }, []);
+  useEffect(load, [load]);
+  if (!s) return null;
+  const save = () =>
+    opsApi
+      .put<AlertSettings>('/call-alerts', {
+        enabled: s.enabled,
+        intervalMinutes: s.intervalMinutes,
+        recipients: recipients.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean),
+      })
+      .then((r) => {
+        setS(r.data);
+        setNote({ text: `Saved. Checks run every ${r.data.intervalMinutes} minutes.` });
+      })
+      .catch((err) => setNote({ text: opsError(err, 'Could not save.'), bad: true }));
+  const test = () => {
+    setBusy(true);
+    void opsApi
+      .post<{ findings: AlertFindingRow[]; emailedTo: string[]; emailError?: string }>('/call-alerts/test')
+      .then((r) => {
+        const found = r.data.findings.length ? `${r.data.findings.length} issue(s) found` : 'No issues found';
+        setNote(
+          r.data.emailError
+            ? { text: `${found}. Email not sent: ${r.data.emailError}`, bad: true }
+            : { text: `${found}. Email sent to ${r.data.emailedTo.join(', ')}.` },
+        );
+        load();
+      })
+      .catch((err) => setNote({ text: opsError(err, 'Check failed.'), bad: true }))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <section className="card space-y-4 p-5">
+      <div>
+        <h2 className="font-semibold">Call alerts</h2>
+        <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+          Every interval, the calls of that interval are checked: carrier refusals (SIP 480, 503, 604…), answered calls where the AI stayed silent, the voice or
+          speech-to-text failing over, the AI model failing over often, qualified leads with nobody to take the transfer, and an active campaign that stopped
+          dialling. An email goes out only when something is found.
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={s.enabled} onChange={(e) => setS({ ...s, enabled: e.target.checked })} />
+          Alerts on
+        </label>
+        <label className="block text-xs" style={{ color: 'var(--text-dim)' }}>
+          Check every (minutes, 5–120)
+          <input
+            className="input mt-1"
+            type="number"
+            min={5}
+            max={120}
+            value={s.intervalMinutes}
+            onChange={(e) => setS({ ...s, intervalMinutes: Number(e.target.value) })}
+          />
+        </label>
+        <label className="block text-xs sm:col-span-3" style={{ color: 'var(--text-dim)' }}>
+          Email to (comma-separated)
+          <input className="input mt-1" value={recipients} onChange={(e) => setRecipients(e.target.value)} />
+        </label>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <button className="btn btn-primary" onClick={() => void save()}>
+          Save alert settings
+        </button>
+        <button className="btn" disabled={busy} onClick={test}>
+          {busy ? 'Checking…' : 'Check now and email'}
+        </button>
+        <Note note={note} />
+      </div>
+      <p className="text-xs" style={{ color: 'var(--text-dim)' }}>Last check: {fmtDateTime(s.lastRunAt)}</p>
+      {history.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold">Recent alerts</h3>
+          {history.map((a) => (
+            <div key={a._id} className="rounded-lg p-3 text-sm" style={{ background: 'var(--surface-2)' }}>
+              <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: 'var(--text-dim)' }}>
+                <span>
+                  {fmtDateTime(a.windowStart)} – {fmtDateTime(a.windowEnd)}
+                </span>
+                {a.emailedTo.length ? <Pill text="Emailed" tone="good" /> : <Pill text={`Not emailed: ${a.emailError ?? 'unknown'}`} tone="bad" />}
+              </div>
+              {a.findings.length === 0 && <p className="mt-1">Test: no issues found.</p>}
+              {a.findings.map((f, i) => (
+                <div key={i} className="mt-1">
+                  <Pill text={f.severity} tone={f.severity === 'CRITICAL' ? 'bad' : 'warn'} /> <b>{f.title}</b>{' '}
+                  <span style={{ color: 'var(--text-dim)' }}>· {f.campaignName}</span>
+                  <p className="text-xs" style={{ color: 'var(--text-dim)' }}>
+                    {f.detail}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

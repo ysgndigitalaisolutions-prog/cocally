@@ -1,3 +1,4 @@
+import { AlertsModule } from '../alerts/alerts.module';
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Call, CallSchema } from '../../schemas/call.schema';
@@ -34,6 +35,7 @@ import { OpsTenantsService } from './ops-tenants.service';
     AuditModule,
     AuthModule,
     PlatformModule,
+    AlertsModule,
   ],
   controllers: [OperatorAuthController, OpsController],
   providers: [OperatorAuthGuard, OperatorAuthService, OpsAuditService, OpsCallsService, OpsVendorsService, OpsTenantsService],

@@ -52,6 +52,10 @@ const envSchema = z.object({
   DEMO_LEAD_TOKEN_ENABLED: envBool(),
   RECORDINGS_DIR: z.string().default('./recordings-data'),
   ELEVENLABS_API_KEY: optionalString(),
+  /** Resend key for call-alert emails. Without it alerts are only stored and shown on the ops console. */
+  RESEND_API_KEY: optionalString(),
+  /** Sender for alert emails. resend.dev only delivers to the Resend account's own address until a domain is verified. */
+  ALERT_EMAIL_FROM: z.string().default('CoCally Alerts <onboarding@resend.dev>'),
   DEEPGRAM_API_KEY: optionalString(),
   OPENAI_API_KEY: optionalString(),
   ANTHROPIC_API_KEY: optionalString(),
@@ -193,6 +197,7 @@ export const config = {
     cerebras: parsed.CEREBRAS_API_KEY,
   },
   publicBaseUrl: parsed.PUBLIC_BASE_URL,
+  alertEmail: { resendApiKey: parsed.RESEND_API_KEY, from: parsed.ALERT_EMAIL_FROM },
   engineServiceToken: parsed.ENGINE_SERVICE_TOKEN,
   livekit: {
     url: parsed.LIVEKIT_URL,

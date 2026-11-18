@@ -56,10 +56,34 @@ export class PlatformSettings {
   @Prop({ type: Object, default: {} })
   seller: SellerDetails;
 
+  /** Call-abnormality alerts, edited on the ops Settings page. */
+  @Prop({ type: Object, default: () => ({ ...DEFAULT_CALL_ALERTS }) })
+  callAlerts: CallAlertSettings;
+
   /** Last invoice number used, per year: { "2026": 3 }. */
   @Prop({ type: Object, default: {} })
   invoiceSeq: Record<string, number>;
 }
+
+/**
+ * Every `intervalMinutes` the API looks at the calls of that window and emails
+ * `recipients` when something is wrong (18 Nov: Telvoq refused 131 calls in a
+ * row with SIP 480 and nobody noticed for 13 minutes).
+ */
+export interface CallAlertSettings {
+  enabled: boolean;
+  /** How often to check, and how far back each check looks. 5-120. */
+  intervalMinutes: number;
+  recipients: string[];
+  /** When the last check ran; the next one is due `intervalMinutes` later. */
+  lastRunAt?: Date;
+}
+
+export const DEFAULT_CALL_ALERTS: CallAlertSettings = {
+  enabled: true,
+  intervalMinutes: 15,
+  recipients: ['nithinyakateela@gmail.com'],
+};
 
 export interface SellerDetails {
   name?: string;
