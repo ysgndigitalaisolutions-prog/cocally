@@ -363,17 +363,53 @@ def test_their_answer_after_a_thinking_noise_cancels_the_reask():
     asyncio.run(go())
 
 
-def test_third_ask_of_a_step_is_reworded():
+def test_third_ask_of_a_yes_no_step_is_a_bare_yes_no():
+    # 18 Nov (Geoffrey): "I am" twice came out of the STT as "Hi, Anne".
     async def go():
         agent.FILLER_WAIT_S = 0.05
         q, _ = _make(S1_SAID + (LINES["S1Q"],))
         assert await _turn(q, "Oh,")
         await asyncio.sleep(0.15)
-        assert q.session_ref.said == ["Sorry, just to check, are you the account holder?"], q.session_ref.said
+        assert q.session_ref.said == [agent.YES_NO_REASK], q.session_ref.said
         lines, _ = q._lines_for_reply()
-        assert lines["S1Q"] == "Sorry, just to check, are you the account holder?"
+        assert lines["S1Q"] == agent.YES_NO_REASK
         assert lines["S1"] == LINES["S1"], "the script line itself is unchanged"
     asyncio.run(go())
+
+
+def test_third_ask_of_an_open_question_keeps_the_lead_in():
+    q, _ = _make(S1_SAID + ("Yes.", LINES["S2"], LINES["S4"], LINES["S4Q"]))
+    lines, _ = q._lines_for_reply()
+    assert lines["S4Q"] == "Sorry, just to check, which energy company are you with now?", lines["S4Q"]
+
+
+def test_the_yes_no_ask_counts_once_and_not_for_the_next_step():
+    q, _ = _make(S1_SAID + (LINES["S1Q"], agent.YES_NO_REASK))
+    lines, _ = q._lines_for_reply()
+    assert lines["S1Q"] == LINES["Q6"], "three asks, then the callback question"
+    q, _ = _make(S1_SAID + (LINES["S1Q"], agent.YES_NO_REASK, LINES["S2"], LINES["S4"]))
+    lines, _ = q._lines_for_reply()
+    assert lines["S4Q"] == LINES["S4Q"], "the earlier yes/no is not an ask of S4"
+
+
+CONSENT = "Thanks. From what you've said, there may be a better offer for you. Would you like me to put you through to our specialist now? It only takes a couple of seconds."
+
+
+def test_no_transfer_without_a_yes_to_being_put_through():
+    q, _ = _make()
+    q.script_lines["S5"] = CONSENT
+    for said, pending in [("Yes please.", False), ("Yeah, sure.", False), ("Okay.", False), ("No thanks.", True),
+                          ("Not now, call me back later.", True), ("Nah.", True), ("What's that?", True), ("No worries, go ahead.", False)]:
+        q.last_user_text = said
+        assert q._consent_pending() is pending, said
+    q.script_lines.pop("S5")
+    q.last_user_text = "No."
+    assert q._consent_pending() is None, "no consent step, no gate"
+
+
+def test_hostile_includes_the_stt_pack_off():
+    # 18 Nov: "Fuck off" came out of the STT as "Pack off."
+    assert agent._HOSTILE.search("Pack off.")
 
 
 def test_first_repeat_is_still_word_for_word():
@@ -391,7 +427,7 @@ def test_what_counts_as_a_thinking_noise():
 
 def test_after_three_asks_the_callback_question_then_goodbye():
     # 17 Nov (Rajni, Tarneit): "Are you the account holder?" ten times.
-    reworded = "Sorry, just to check, are you the account holder?"
+    reworded = agent.YES_NO_REASK
     q, _ = _make(S1_SAID + (LINES["S1Q"], reworded))
     lines, _ = q._lines_for_reply()
     assert lines["S1Q"] == LINES["Q6"], lines["S1Q"]

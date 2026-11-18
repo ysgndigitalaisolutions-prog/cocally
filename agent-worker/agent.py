@@ -337,6 +337,7 @@ STT_KEYTERMS = [k.strip() for k in (os.getenv("STT_KEYTERMS") or "").split(",") 
 STT_LANGUAGE = (os.getenv("STT_LANGUAGE") or "").strip()
 TTS_VOICE = os.getenv("TTS_VOICE")  # provider-specific voice/model id; sensible default per provider
 NOISE_CANCELLATION = os.getenv("NOISE_CANCELLATION", "1") not in ("0", "false", "no")
+NOISE_CANCELLATION_AB = os.getenv("NOISE_CANCELLATION_AB", "0") in ("1", "true", "yes")
 # livekit-agents 1.8 runs an automatic gain control stage on the room audio
 # before the VAD and STT see it. Switchable without a code change for A/B.
 AUTO_GAIN_CONTROL = os.getenv("AUTO_GAIN_CONTROL", "1") not in ("0", "false", "no")
@@ -527,6 +528,16 @@ FILLER_WAIT_S = float(os.getenv("FILLER_WAIT_S", "4"))
 # A step question asked twice already is asked a third time with this in front,
 # not word for word again. The script line itself is unchanged.
 REASK_PREFIX = "Sorry, just to check, "
+# 18 Nov (Geoffrey, Morwell): "I am" twice came out of the STT as "Hi, Anne".
+# A yes/no step asked twice is asked a third time as a bare yes/no, the
+# easiest answer for the STT to catch.
+YES_NO_REASK = "Sorry, the line's a bit unclear. Is that a yes?"
+_YES_NO_QUESTION = re.compile(r"^\s*(are|do|does|is|would|can|could|shall|will|have)\b", re.I)
+# The last step asks before transferring ("Would you like me to put you
+# through...?"). 18 Nov: Geoffrey heard "please hold" without being asked and hung up.
+_CONSENT_QUESTION = re.compile(r"\b(put you through|connect you|transfer you)\b", re.I)
+_CONSENT_YES = re.compile(r"\b(yes|yeah|yep|yup|sure|ok(ay)?|alright|all right|go ahead|please|sounds good|why not|fine|no worries|no problem)\b", re.I)
+_CONSENT_NO = re.compile(r"^\W*(no|nah|nope)\b(?![,.]?\s+(worries|problem))|^\W*(not (now|really|today|interested|at the moment)|maybe later|later)\b|\b(not interested|don'?t want|no thanks?|no thank you|not now|another time|call (me )?back)\b", re.I)
 # 17 Nov (Rajni, Tarneit): talking to someone else in the room, she got "Are you
 # the account holder?" ten times. After the reworded third ask, the callback
 # question; once that was asked, the goodbye.
@@ -554,8 +565,18 @@ HELLO_GAP_S = float(os.getenv("HELLO_GAP_S", "0.1"))
 GREET_MAX_WAIT_S = float(os.getenv("GREET_MAX_WAIT_S", "8.0"))
 
 
+# The opening is the same sentence on every call of a campaign. 18 Nov: making it
+# afresh for every dial (voicemails and failed calls too) was two thirds of the
+# Cartesia credits. Made once per text and voice, reused after.
+_PRERENDER_CACHE: dict[tuple[str, str], list] = {}
+
+
 async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
     """The opening line as audio frames, or None (then it is synthesised live)."""
+    key = (text, f"{TTS_PROVIDER}:{TTS_VOICE}")
+    if key in _PRERENDER_CACHE:
+        logger.info("opening from the cache")
+        return _PRERENDER_CACHE[key]
     try:
         t0 = time.monotonic()
         frames = []
@@ -567,6 +588,8 @@ async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
                     frame = shaper.shape(frame)  # as tts_node does for live speech
                 frames.append(frame)
         logger.info("opening pre-rendered in %.2fs", time.monotonic() - t0)
+        if frames:
+            _PRERENDER_CACHE[key] = frames
         return frames or None
     except Exception as e:  # noqa: BLE001 — live synthesis is the fallback
         logger.warning("opening pre-render failed (%s): speaking it live", e)
@@ -603,7 +626,7 @@ _ASKED_HOW_WE_ARE = re.compile(r"how (are|r) (you|ya)|how'?s it going|how about 
 # Asking not to be called again is an opt-out, handled by the engine, not here.
 _HOSTILE = re.compile(
     r"\bf+u+c*k+(ing|in)?\b|\bf\*{2,}|\bpiss off\b|\bbugger off\b|\bget lost\b|\bgo away\b|\bleave me alone\b"
-    r"|\bshut up\b|\bscam(mer)?s?\b.*\b(off|away)\b|\bp\*+ off\b",
+    r"|\bshut up\b|\bscam(mer)?s?\b.*\b(off|away)\b|\bp\*+ off\b|\bpack off\b",
     re.I,
 )
 APOLOGY_LINE = "Sorry to have bothered you. Have a great day."
@@ -1331,6 +1354,9 @@ class Qualifier(Agent):
             # questions still to ask. The specialist needs all the answers.
             logger.info("request_transfer(call=%s) refused: step %s not asked yet", self._call_id, missing)
             return f"Not yet: the script is not finished. Output the tag of the next step you have not asked yet (the last one is [{missing}])."
+        if self._consent_pending() and _CONSENT_NO.search(self.last_user_text or ""):
+            logger.info("request_transfer(call=%s) refused: they said no to being put through", self._call_id)
+            return "Not transferred: they said no to being put through. Output [Q6] to book a callback."
         text = await self._do_transfer(reason)
         if text is None:
             # The worker has already spoken (or is speaking) every line this
@@ -1402,7 +1428,42 @@ class Qualifier(Agent):
     @staticmethod
     def _reworded(line: str) -> str:
         line = line.strip()
+        if _YES_NO_QUESTION.match(line):
+            return YES_NO_REASK
         return REASK_PREFIX + line[:1].lower() + line[1:]
+
+    def _asks_of(self, q: str) -> int:
+        """Times this step question was asked: in its own words, or as the bare
+        yes/no that stands in for its third ask (counted only while no other
+        step has been asked since)."""
+        probe = re.sub(r"\s+", " ", q).strip().lower()[-40:]
+        yes_no = YES_NO_REASK.lower()[-30:]
+        others = [
+            re.sub(r"\s+", " ", l).strip().lower()[:40]
+            for t, l in self.script_lines.items()
+            if re.fullmatch(r"S\d+", t) and re.sub(r"\s+", " ", l).strip().lower()[-40:] != probe
+        ]
+        n, current = 0, False
+        for i in self.chat_ctx.items:
+            if getattr(i, "role", None) != "assistant":
+                continue
+            said = re.sub(r"\s+", " ", getattr(i, "text_content", "") or "").lower()
+            if probe in said:
+                n, current = n + 1, True
+            elif current and any(o in said for o in others):
+                current = False
+            elif current and yes_no in said:
+                n += 1
+        return n
+
+    def _consent_pending(self) -> bool | None:
+        """For a script whose last step asks before transferring: True while
+        their answer to it is not a yes, None when the script has no such step."""
+        steps = sorted((t for t in self.script_lines if re.fullmatch(r"S\d+", t)), key=lambda t: int(t[1:]))
+        if not steps or not _CONSENT_QUESTION.search(self.script_lines[steps[-1]]):
+            return None
+        said = self.last_user_text or ""
+        return not (_CONSENT_YES.search(said) and not _CONSENT_NO.search(said))
 
     def _instead_of_asking_again(self) -> str | None:
         """What to say instead of a step question asked MAX_SAME_QUESTION times."""
@@ -1417,7 +1478,7 @@ class Qualifier(Agent):
         q = self._step_question()
         if not q:
             return q
-        n = self._said_count(q)
+        n = self._asks_of(q)
         if n >= MAX_SAME_QUESTION:
             return self._instead_of_asking_again() or self._reworded(q)
         return self._reworded(q) if n >= 2 else q
@@ -1516,7 +1577,7 @@ class Qualifier(Agent):
         for tag, q in self.script_lines.items():
             if not re.fullmatch(r"S\d+Q", tag):
                 continue
-            n = self._said_count(q)
+            n = self._asks_of(q)
             if n >= MAX_SAME_QUESTION and (instead := self._instead_of_asking_again()):
                 lines[tag] = instead
             elif n >= 2:
@@ -1975,6 +2036,10 @@ class Qualifier(Agent):
             # (2 Nov: a re-called lead transferred on its first "Hello.").
             # The customer is asked the script on this call first.
             logger.info("auto-transfer (call=%s) held: step %s not asked on this call yet", self._call_id, missing)
+            return
+        if self._consent_pending():
+            # The score says qualified; the customer has not said yes to being put through.
+            logger.info("auto-transfer (call=%s) held: no yes to being put through yet", self._call_id)
             return
         logger.info("auto-transfer triggered (call=%s): %s", self._call_id, reason)
         # The score arrives while the model is already answering the same turn.
@@ -3970,7 +4035,14 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             qualifier.spawn(_forward_dtmf(digit))
 
     audio_input = AudioInputOptions(auto_gain_control=AUTO_GAIN_CONTROL)
-    if NOISE_CANCELLATION and _nc is not None:
+    # 18 Nov A/B: Geoffrey's "I am" and "AGL" were misheard live, and heard
+    # right by the same STT on the unfiltered recording. With NOISE_CANCELLATION_AB
+    # every other call (by call id) runs without the filter, to measure it.
+    noise_filter = NOISE_CANCELLATION
+    if NOISE_CANCELLATION and NOISE_CANCELLATION_AB and call_id:
+        noise_filter = sum(map(ord, call_id)) % 2 == 0
+    logger.info("noise filter %s (call=%s%s)", "on" if noise_filter else "off", call_id, ", A/B" if NOISE_CANCELLATION_AB else "")
+    if noise_filter and _nc is not None:
         try:
             # BVCTelephony is tuned for narrowband PSTN audio: cleaner STT input
             # means fewer mis-hears and fewer "sorry, could you repeat that" turns.
