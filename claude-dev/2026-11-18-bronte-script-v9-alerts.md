@@ -22,3 +22,9 @@
 - Gemini 429s on ~5% of calls (Cerebras covers). Consider the global endpoint.
 - Cartesia: ~40k credits left before the 29 Nov renewal; the opening cache should cut use by about two thirds.
 - Transfers: 5 qualified in two days, 0 handed over. Agents must be logged in.
+
+## Evening redial (18:17-19:10 Melbourne)
+- Redialled the 258 leads whose latest call today was refused by Telvoq (480 ×144, 503 ×79, 604 ×35). Fresh leads were held with `heldForRedial18` and released at the end (0 left marked).
+- 604 = "does not exist anywhere": 9 of 9 failed again, so all 35 were set aside until 18 Dec (`sip604Hold18`).
+- 233 calls: 96 voicemail, 79 failed again (mostly the 503 numbers), 38 people, 19 no answer.
+- Lost a qualified lead (6:54pm, "only power", ~$200) to an STT mishear: the company answer came out as "Meter Ergon?", which the out-of-area rule (Ergon = Queensland) closed. Fix: for VIC leads, a QLD-only retailer gets the company question again.
