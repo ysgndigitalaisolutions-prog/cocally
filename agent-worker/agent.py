@@ -542,6 +542,8 @@ _CONSENT_NO = re.compile(r"^\W*(no|nah|nope)\b(?![,.]?\s+(worries|problem))|^\W*
 # the account holder?" ten times. After the reworded third ask, the callback
 # question; once that was asked, the goodbye.
 MAX_SAME_QUESTION = 3
+# A playbook line (callback, rebuttal) begun this many times is not begun again.
+MAX_LINE_STARTS = 2
 # A lone name ("Amber.") is answering the phone too. 6 Nov: the AI spoke over
 # "Yeah, good" that came right after it. Words that answer "how are you" do not count.
 _ANSWER_WORDS = re.compile(
@@ -628,6 +630,16 @@ _ASKED_HOW_WE_ARE = re.compile(
     r"|\b(good|fine|well|great|okay|ok|alright|all right|not bad|pretty good|doing good)\b[^?]*\b(are|and|how about)?\s*(you|ya)\s*\?",
     re.I,
 )
+# 18 Nov (6:07pm): "I'm in hospital at the moment... nearly asleep" got the
+# bill question and six tries at the callback question. Someone in hospital, ill,
+# or looking after someone who is, gets a kind goodbye and nothing else.
+_UNWELL = re.compile(
+    r"\b(in (the )?hospital|hospitali[sz]ed|having (an )?operation|(had|having) surgery|heart attack|chemo(therapy)?"
+    r"|(i'?m|i am|been|feeling) (really |very |quite |a bit )?(sick|unwell|ill|crook)\b|not feeling (very |too )?well"
+    r"|passed away|funeral|just lost (my|our))",
+    re.I,
+)
+UNWELL_LINE = "Oh, I'm sorry to hear that. We'll leave you to it. Take care!"
 # Abuse or "go away": say sorry once and hang up. 6 Nov: "F*** off, Daniel."
 # Asking not to be called again is an opt-out, handled by the engine, not here.
 _HOSTILE = re.compile(
@@ -1252,6 +1264,7 @@ class Qualifier(Agent):
         # talking, a thinking noise): the stall guard must not fill the gap.
         self.quiet_on_purpose = False
         self._screening_said = 0
+        self._out_of_area_asked = False
         self.greeting_started_at: float | None = None
         self.last_speech_end: float | None = None
         self.dead_air: "_DeadAirWatch | None" = None
@@ -1471,10 +1484,22 @@ class Qualifier(Agent):
         said = self.last_user_text or ""
         return not (_CONSENT_YES.search(said) and not _CONSENT_NO.search(said))
 
+    def _starts_of(self, tag: str) -> int:
+        """Times we began this line, finished or cut off: 18 Nov (6:07pm), "No
+        problem. What would be a" was cut off six times and never counted as said."""
+        if tag not in self.script_lines:
+            return 0
+        probe = self._line_probe(tag)
+        return sum(
+            probe in re.sub(r"\s+", " ", getattr(i, "text_content", "") or "").lower()
+            for i in self.chat_ctx.items
+            if getattr(i, "role", None) == "assistant"
+        )
+
     def _instead_of_asking_again(self) -> str | None:
         """What to say instead of a step question asked MAX_SAME_QUESTION times."""
         q6 = self.script_lines.get("Q6")
-        if q6 and "Q6" not in self.blocked_tags and not self._said_count(q6):
+        if q6 and "Q6" not in self.blocked_tags and not self._said_count(q6) and self._starts_of("Q6") < MAX_LINE_STARTS:
             return q6
         return self.script_lines.get("E1")
 
@@ -1602,6 +1627,11 @@ class Qualifier(Agent):
             # who and where we are (Q1, Q2) can fairly be asked again.
             if tag not in ("Q1", "Q2", "Q4", "Q6"):
                 advance.setdefault(tag, swap)
+        # Begun twice and cut off both times: move on instead of starting it again.
+        if "E1" in lines and "Q6" not in self.blocked_tags and self._starts_of("Q6") >= MAX_LINE_STARTS:
+            advance["Q6"] = "E1"
+        if "Q4" in lines and self._starts_of("Q4") >= MAX_LINE_STARTS:
+            advance["Q4"] = "Q6" if "Q6" in lines and self._starts_of("Q6") < MAX_LINE_STARTS and "Q6" not in self.blocked_tags else ("E1" if "E1" in lines else "Q4")
         return lines, advance
 
     def _steps_past_limit(self) -> dict[str, str]:
@@ -1783,20 +1813,20 @@ class Qualifier(Agent):
         self._objection_pending = tag != "E1"
         return tag
 
-    async def _apologise_and_end(self, said: str) -> None:
-        logger.info("hostile reply (call=%s): %r -> apology and hang-up", self._call_id, said[:80])
+    async def _apologise_and_end(self, said: str, line: str = APOLOGY_LINE, why: str = "customer was hostile") -> None:
+        logger.info("%s (call=%s): %r -> closing line and hang-up", why, self._call_id, said[:80])
         self._closing = True
         self._transfer_triggered = True
         if self._call_id:
             await _post_transcript(self._call_id, "customer", said)
         if self.session_ref is not None:
             try:
-                await asyncio.wait_for(self.session_ref.say(APOLOGY_LINE, allow_interruptions=False), timeout=10.0)
+                await asyncio.wait_for(self.session_ref.say(line, allow_interruptions=False), timeout=10.0)
             except Exception as e:  # noqa: BLE001 — the hang-up must still happen
                 logger.warning("apology failed: %s", e)
         await asyncio.sleep(0.5)
         await _drop_customer_leg(self._ctx, self._call_id)
-        self._ctx.shutdown(reason="customer was hostile")
+        self._ctx.shutdown(reason=why)
 
     async def _say_objection_line(self, tag: str, said: str) -> None:
         line = self.script_lines[tag]
@@ -1873,6 +1903,9 @@ class Qualifier(Agent):
             raise StopResponse()
         if not self._closing and not self._transfer_triggered and _HOSTILE.search(self.last_user_text):
             self.spawn(self._apologise_and_end(self.last_user_text))
+            raise StopResponse()
+        if not self._closing and not self._transfer_triggered and _UNWELL.search(self.last_user_text):
+            self.spawn(self._apologise_and_end(self.last_user_text, UNWELL_LINE, "customer unwell or in hospital"))
             raise StopResponse()
         if not self._closing and not self._transfer_triggered and self.session_ref is not None and _AI_QUESTION.search(self.last_user_text):
             line = self._ai_answer()
@@ -1995,6 +2028,16 @@ class Qualifier(Agent):
         # qualification score can transfer the call (the score reaches the
         # transfer threshold on the same answer that names the retailer).
         m = self.out_of_area_re.search(self.last_user_text) if self.out_of_area_re and not self._closing else None
+        # 18 Nov (6:54pm): a Victorian on "only power, about two hundred" said a
+        # retailer the STT heard as "Meter Ergon?" and was closed as out of area.
+        # The first out-of-area name gets the company question once more.
+        if m and not self._out_of_area_asked and self.script_lines.get("S4Q") and self.session_ref is not None:
+            self._out_of_area_asked = True
+            logger.info("out-of-area retailer %r (call=%s): asking the company again", m.group(0), self._call_id)
+            if self._call_id:
+                self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+            self.session_ref.say(self.script_lines["S4Q"], add_to_chat_ctx=True)
+            raise StopResponse()
         if m:
             self._closing = True
             self._transfer_triggered = True

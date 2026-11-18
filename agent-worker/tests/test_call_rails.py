@@ -475,3 +475,50 @@ def test_a_short_you_back_is_asking_how_we_are():
         assert agent._ASKED_HOW_WE_ARE.search(said), said
     for said in ["Who are you?", "Good.", "Where are you from?", "Are you a robot?", "What do you want?"]:
         assert not agent._ASKED_HOW_WE_ARE.search(said), said
+
+
+def test_someone_in_hospital_gets_a_kind_goodbye_and_nothing_else():
+    # 18 Nov (6:07pm): "I'm in hospital at the moment" got the bill question and
+    # six tries at the callback question.
+    for said in ["When I'm home, yeah, I'm in hospital at the moment.", "My wife's in hospital, so I'm waiting for calls for her.",
+                 "I'm not feeling well.", "I'm really sick at the moment", "She just had a heart attack", "My husband passed away last week."]:
+        assert agent._UNWELL.search(said), said
+    for said in ["Not good.", "I'm good.", "Sick of these calls", "Yes.", "I'm fine thanks", "Well, how much is it?"]:
+        assert not agent._UNWELL.search(said), said
+    q, ctx, handled = _run("I'm in hospital at the moment, nearly asleep.", S1_SAID)
+    assert handled
+    assert q.session_ref.said == [agent.UNWELL_LINE], q.session_ref.said
+    assert ctx.ended, "the call ends"
+
+
+def test_a_callback_line_cut_off_twice_is_not_begun_again():
+    cut = "No problem. What would be a"
+    q, _ = _make(S1_SAID + ("Yes.", LINES["S2"], cut, cut))
+    _, advance = q._lines_for_reply()
+    assert advance.get("Q6") == "E1", advance
+    q, _ = _make(S1_SAID + ("Yes.", LINES["S2"], cut))
+    _, advance = q._lines_for_reply()
+    assert "Q6" not in advance, "one cut-off try is not enough"
+
+
+def test_an_out_of_area_retailer_gets_the_company_question_once_more():
+    # 18 Nov (6:54pm): "Meter Ergon?" closed a Victorian on "only power" as out of area.
+    async def go():
+        q, ctx = _make(S1_SAID + ("Yes.", LINES["S2"], LINES["S4"]))
+        q.out_of_area_re = agent.out_of_area_pattern(["Ergon Energy"])
+        q.out_of_area_line = "Thank you, we cannot cater to your area. Bye, take care."
+        orig = agent._no_agent_close
+        closed = []
+        async def fake_close(*a, **k):
+            closed.append(a)
+        agent._no_agent_close = fake_close
+        try:
+            assert await _turn(q, "Meter Ergon?")
+            assert q.session_ref.said == [LINES["S4Q"]], q.session_ref.said
+            assert not closed and not q._closing
+            assert await _turn(q, "Ergon.")
+            await asyncio.sleep(0)
+            assert q._closing and closed, "the second time it closes"
+        finally:
+            agent._no_agent_close = orig
+    asyncio.run(go())
