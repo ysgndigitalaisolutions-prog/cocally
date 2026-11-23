@@ -12,7 +12,10 @@ interface CliRow {
   dialsToday: number;
   answersToday: number;
   answerRate7d: number;
+  quarantineReason?: string;
 }
+
+const STATUS_LABEL: Record<CliRow['status'], string> = { ACTIVE: 'Active', RESTING: 'Resting', QUARANTINED: 'Not usable' };
 
 /** "+61390728793" → "+61 3 9072 8793"; "+61485049494" → "+61 485 049 494". Other numbers as stored. */
 export function formatCli(n: string): string {
@@ -141,22 +144,33 @@ export default function CampaignCallerIds({
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
-                <tr key={row._id} className="border-t border-border">
+              {rows.map((row) => {
+                // A number that is not usable cannot be ticked; one already ticked can still be unticked.
+                const blocked = row.status === 'QUARANTINED' && !selected.has(row._id);
+                return (
+                <tr key={row._id} className="border-t border-border" style={blocked ? { opacity: 0.55 } : undefined}>
                   <td className="py-2">
                     <input
                       type="checkbox"
                       checked={selected.has(row._id)}
+                      disabled={blocked}
                       onChange={() => toggle(row._id)}
                       aria-label={`Use ${row.number} on this campaign`}
+                      title={blocked ? 'This number cannot be used as a caller ID' : undefined}
                     />
                   </td>
-                  <td className="py-2 font-mono text-xs">{formatCli(row.number)}</td>
-                  <td className="py-2 font-semibold" style={{ color: STATUS_COLOR[row.status] }}>{row.status}</td>
+                  <td className="py-2">
+                    <span className="font-mono text-xs">{formatCli(row.number)}</span>
+                    {row.status === 'QUARANTINED' && row.quarantineReason && (
+                      <p className="mt-0.5 max-w-md text-xs text-dim">{row.quarantineReason}</p>
+                    )}
+                  </td>
+                  <td className="py-2 font-semibold" style={{ color: STATUS_COLOR[row.status] }}>{STATUS_LABEL[row.status]}</td>
                   <td className="py-2 text-right tabular-nums">{row.answersToday}/{row.dialsToday}</td>
                   <td className="py-2 text-right tabular-nums">{(row.answerRate7d * 100).toFixed(1)}%</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
           <div className="mt-3 flex items-center gap-3">

@@ -7,6 +7,7 @@ import { Campaign, CampaignDocument, DEFAULT_PREDICTIVE_DIALING } from '../../sc
 import { Client, ClientDocument } from '../../schemas/tenant.schema';
 import { FlowVersion, FlowVersionDocument } from '../../schemas/flow.schema';
 import { User, UserDocument } from '../../schemas/user.schema';
+import { CliNumber, CliNumberDocument } from '../../schemas/cli-number.schema';
 import { AuditService } from '../audit/audit.service';
 import { CountryPacksService } from '../country-packs/country-packs.service';
 
@@ -60,6 +61,7 @@ export class CampaignsService {
     @InjectModel(Client.name) private readonly clientModel: Model<ClientDocument>,
     @InjectModel(FlowVersion.name) private readonly versionModel: Model<FlowVersionDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    @InjectModel(CliNumber.name) private readonly cliModel: Model<CliNumberDocument>,
     private readonly packs: CountryPacksService,
     private readonly audit: AuditService,
   ) {}
@@ -201,6 +203,29 @@ export class CampaignsService {
       throw new BadRequestException(parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '));
     }
     patch = parsed.data as Record<string, unknown>;
+
+    // A caller ID added to the campaign must be this tenant's and usable. 23 Nov:
+    // two numbers Telvoq rejects as caller ID were marked QUARANTINED, and must
+    // not be ticked back on by mistake. Ones already in the pool may stay (the
+    // dialer skips them anyway), so unticking others still saves.
+    if (Array.isArray(patch.cliPool)) {
+      const existing = new Set((campaign.cliPool ?? []).map(String));
+      const added = (patch.cliPool as string[]).filter((id) => !existing.has(String(id)));
+      if (added.length > 0) {
+        const rows = await this.cliModel
+          .find({ _id: { $in: added.map((id) => new Types.ObjectId(String(id))) }, tenantId: new Types.ObjectId(tenantId) })
+          .select('number status quarantineReason')
+          .lean()
+          .exec();
+        if (rows.length !== new Set(added.map(String)).size) throw new BadRequestException('Caller ID not found');
+        const unusable = rows.filter((r) => r.status !== 'ACTIVE');
+        if (unusable.length > 0) {
+          throw new BadRequestException(
+            unusable.map((r) => `${r.number} cannot be used (${r.status.toLowerCase()}${r.quarantineReason ? `: ${r.quarantineReason}` : ''})`).join('; '),
+          );
+        }
+      }
+    }
 
     // The AI script must be this tenant's own, published version; and a live
     // AI campaign cannot be left without one (activation checks the same).
