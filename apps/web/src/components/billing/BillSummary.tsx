@@ -15,7 +15,7 @@ export default function BillSummary({ summary }: { summary: MonthSummary }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-        <Figure label="AI talk time" value={`${minutes(u.aiSeconds)} min`} strong />
+        <Figure label="AI talk time (charged)" value={`${minutes(u.billableAiSeconds ?? u.aiSeconds)} min`} hint="Calls a person answered" strong />
         <Figure label="Dialled" value={num(u.dials)} />
         <Figure label="Answered" value={num(u.answered)} hint={`${answerRate}% of dials`} />
         <Figure label="Voicemail / no one" value={num(u.voicemail)} />

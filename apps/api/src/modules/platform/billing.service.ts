@@ -18,19 +18,9 @@ import {
 } from '../../schemas/platform-settings.schema';
 import { Tenant, TenantDocument, type BillingTier, type TenantBilling } from '../../schemas/tenant.schema';
 import { EMPTY_USAGE, UsageService, type TenantUsage } from './usage.service';
+import { DEFAULT_BILLING, TIER_NAMES, priceUsage, type PricedUsage } from './billing-price';
 
-/** The pilot quote (Shubham Mantri, July 2026): used until a tenant's billing is set. */
-export const DEFAULT_BILLING: TenantBilling = {
-  tiers: [
-    { fromMinutes: 0, aiPerMinInr: 8.5, perDialInr: 0.8 },
-    { fromMinutes: 10_000, aiPerMinInr: 8.0, perDialInr: 0.7 },
-  ],
-  monthlyAdvanceInr: 50_000,
-  advanceRule: 'CARRY_FORWARD',
-  gstPercent: 18,
-};
-
-const TIER_NAMES = ['Standard', 'Growth', 'Scale', 'Enterprise'];
+export { DEFAULT_BILLING, priceUsage, type PricedUsage };
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -69,54 +59,6 @@ export function normaliseBilling(raw: unknown): TenantBilling {
     advanceRule: b.advanceRule ?? DEFAULT_BILLING.advanceRule,
     gstPercent: b.gstPercent ?? DEFAULT_BILLING.gstPercent,
     ...(b.billTo ? { billTo: b.billTo } : {}),
-  };
-}
-
-export interface PricedUsage {
-  aiMinutes: number;
-  tierIndex: number;
-  tierLabel: string;
-  tier: BillingTier;
-  lines: InvoiceLine[];
-  subtotalInr: number;
-}
-
-/**
- * Price a month's usage. The month's total AI minutes pick the band, and that
- * band's rates apply to all of the month's minutes and dials (the quote's
- * "as your usage scales, the per-minute rate steps down automatically").
- * AI time is billed per second, shown in minutes to two decimals.
- */
-export function priceUsage(u: TenantUsage, billing: TenantBilling): PricedUsage {
-  const aiMinutes = round2(u.aiSeconds / 60);
-  let tierIndex = 0;
-  billing.tiers.forEach((t, i) => {
-    if (aiMinutes >= t.fromMinutes) tierIndex = i;
-  });
-  const tier = billing.tiers[tierIndex] ?? DEFAULT_BILLING.tiers[0]!;
-  const lines: InvoiceLine[] = [
-    {
-      label: 'AI conversation (live AI-to-customer talk time)',
-      quantity: aiMinutes,
-      unit: 'min',
-      rateInr: tier.aiPerMinInr,
-      amountInr: round2(aiMinutes * tier.aiPerMinInr),
-    },
-    {
-      label: 'Dialled attempts (screening, AMD, voicemail detection, transfer hold)',
-      quantity: u.dials,
-      unit: 'dial',
-      rateInr: tier.perDialInr,
-      amountInr: round2(u.dials * tier.perDialInr),
-    },
-  ];
-  return {
-    aiMinutes,
-    tierIndex,
-    tierLabel: TIER_NAMES[tierIndex] ?? `Band ${tierIndex + 1}`,
-    tier,
-    lines,
-    subtotalInr: round2(lines.reduce((a, l) => a + l.amountInr, 0)),
   };
 }
 
@@ -256,7 +198,7 @@ export class BillingService {
     const nameOf = new Map(campaigns.map((c) => [c._id.toString(), c.name]));
     const byCampaign = [...byCampaignMap.entries()]
       .map(([id, u]) => {
-        const aiMinutes = round2(u.aiSeconds / 60);
+        const aiMinutes = round2(u.billableAiSeconds / 60);
         const amountInr = round2(aiMinutes * priced.tier.aiPerMinInr + u.dials * priced.tier.perDialInr);
         return { campaignId: id, name: nameOf.get(id) ?? 'Manual / no campaign', usage: u, aiMinutes, amountInr };
       })
@@ -386,7 +328,7 @@ export class BillingService {
       gstPercent: billing.gstPercent,
       gstInr: summary.gstInr,
       totalInr: summary.totalInr,
-      usage: { ...summary.usage, aiMinutes: round2(summary.usage.aiSeconds / 60) },
+      usage: { ...summary.usage, aiMinutes: round2(summary.usage.billableAiSeconds / 60) },
       billTo: { name: t.name, ...(billing.billTo ?? {}) },
       seller: { ...(await this.seller()) },
     };

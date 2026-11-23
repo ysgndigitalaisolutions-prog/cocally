@@ -173,7 +173,7 @@ export class OpsCallsService {
       // The call's own share of the bill, at the tenant's base rate. The invoice may
       // use a cheaper band for the month; this is for "what did this one call do".
       const tier = normaliseBilling(tenant?.billing).tiers[0]!;
-      const billedInr = u ? round2((u.aiSeconds / 60) * tier.aiPerMinInr + u.dials * tier.perDialInr) : 0;
+      const billedInr = u ? round2((u.billableAiSeconds / 60) * tier.aiPerMinInr + u.dials * tier.perDialInr) : 0;
       const lead = c.leadId ? n.lead.get(c.leadId.toString()) : undefined;
       return {
         id,

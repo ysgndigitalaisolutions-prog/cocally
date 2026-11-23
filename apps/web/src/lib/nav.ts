@@ -12,6 +12,7 @@ import {
   LuMegaphone,
   LuPhone,
   LuPhoneCall,
+  LuReceipt,
   LuRadio,
   LuScrollText,
   LuShield,
@@ -61,6 +62,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { href: '/leads', label: 'Leads', icon: LuList, roles: ['OWNER', 'ADMIN', 'SUPERVISOR'] },
       { href: '/calls', label: 'Calls', icon: LuPhoneCall, roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
       { href: '/reports', label: 'Reports', icon: LuFileText, roles: ['OWNER', 'ADMIN', 'SUPERVISOR', 'QA'] },
+      { href: '/billing', label: 'Billing', icon: LuReceipt, roles: ['OWNER', 'ADMIN'] },
     ],
   },
   {

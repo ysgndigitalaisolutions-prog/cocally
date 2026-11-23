@@ -99,7 +99,7 @@ export default function InvoiceDocument({ invoice }: { invoice: Invoice }) {
         <span>Dials: {num(u.dials ?? 0)}</span>
         <span>Answered: {num(u.answered ?? 0)}</span>
         <span>Transfers: {num(u.transfers ?? 0)}</span>
-        <span>AI talk: {minutes(u.aiSeconds ?? 0)} min</span>
+        <span>AI talk: {minutes(u.billableAiSeconds ?? u.aiSeconds ?? 0)} min</span>
       </section>
 
       {(s.paymentDetails || invoice.notes || invoice.paymentReference) && (

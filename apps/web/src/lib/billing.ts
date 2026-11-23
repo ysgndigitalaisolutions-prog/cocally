@@ -8,6 +8,8 @@ export interface Usage {
   manualDials: number;
   ringSeconds: number;
   aiSeconds: number;
+  /** AI seconds that are charged: calls a person answered (voicemail and phone menus are covered by the dial fee). */
+  billableAiSeconds?: number;
   humanSeconds: number;
   recordedSeconds: number;
   ttsChars: number;

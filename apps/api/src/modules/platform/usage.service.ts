@@ -19,6 +19,12 @@ export interface TenantUsage {
   manualDials: number;
   ringSeconds: number;
   aiSeconds: number;
+  /**
+   * The AI seconds billed per the contract: only calls a person answered
+   * (23 Nov). Voicemail, a phone menu ("press 1") and a line nobody spoke on
+   * are covered by the per-dial fee, though the AI was on the line.
+   */
+  billableAiSeconds: number;
   humanSeconds: number;
   recordedSeconds: number;
   ttsChars: number;
@@ -36,6 +42,7 @@ export const EMPTY_USAGE: TenantUsage = {
   manualDials: 0,
   ringSeconds: 0,
   aiSeconds: 0,
+  billableAiSeconds: 0,
   humanSeconds: 0,
   recordedSeconds: 0,
   ttsChars: 0,
@@ -155,6 +162,7 @@ export class UsageService {
           },
         },
       },
+      { $addFields: { billableAiMs: { $cond: [{ $eq: ['$pickedUp', 1] }, '$aiMs', 0] } } },
       {
         $group: {
           _id: `$${groupBy}`,
@@ -169,6 +177,7 @@ export class UsageService {
           manualDials: { $sum: { $cond: ['$manual', 1, 0] } },
           ringMs: { $sum: '$ringMs' },
           aiMs: { $sum: '$aiMs' },
+          billableAiMs: { $sum: '$billableAiMs' },
           humanMs: { $sum: '$humanMs' },
           recordedMs: { $sum: { $cond: ['$recorded', { $add: ['$aiMs', '$humanMs'] }, 0] } },
           ttsChars: { $sum: { $cond: ['$aiCall', '$ttsChars', 0] } },
@@ -189,6 +198,7 @@ export class UsageService {
         manualDials: number;
         ringMs: number;
         aiMs: number;
+        billableAiMs: number;
         humanMs: number;
         recordedMs: number;
         ttsChars: number;
@@ -208,6 +218,7 @@ export class UsageService {
         manualDials: r.manualDials,
         ringSeconds: Math.round(r.ringMs / 1000),
         aiSeconds: Math.round(r.aiMs / 1000),
+        billableAiSeconds: Math.round(r.billableAiMs / 1000),
         humanSeconds: Math.round(r.humanMs / 1000),
         recordedSeconds: Math.round(r.recordedMs / 1000),
         ttsChars: r.ttsChars,
