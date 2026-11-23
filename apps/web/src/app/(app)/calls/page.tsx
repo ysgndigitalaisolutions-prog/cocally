@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AMD_CLASSES, CALL_OUTCOMES, DISPOSITIONS } from '@cocally/shared';
 import { api } from '@/lib/api';
 import { minutes } from '@/lib/billing';
@@ -29,6 +29,17 @@ interface CallRow {
 interface CallDetail extends CallRow {
   transcript: Array<{ speaker: string; text: string; leg: string }>;
 }
+
+interface Totals {
+  calls: number;
+  answered: number;
+  transferred: number;
+  ringSeconds: number;
+  aiSeconds: number;
+  humanSeconds: number;
+}
+
+const PAGE_SIZE = 100;
 
 interface Campaign {
   _id: string;
@@ -70,6 +81,9 @@ const EMPTY = { campaignId: '', agentId: '', outcome: '', disposition: '', amdCl
 
 export default function CallsPage() {
   const [calls, setCalls] = useState<CallRow[]>([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [totals, setTotals] = useState<Totals | null>(null);
   const [detail, setDetail] = useState<CallDetail | null>(null);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   const [recordingNote, setRecordingNote] = useState('');
@@ -99,16 +113,26 @@ export default function CallsPage() {
       .catch(() => undefined);
   }, []);
 
+  // Only the latest request may fill the table: a slow earlier page can answer after a newer one.
+  const latest = useRef(0);
   const load = useCallback(async () => {
+    const req = ++latest.current;
     setLoading(true);
     try {
       const params = Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== ''));
-      const { data } = await api.get('/calls', { params: { ...params, limit: 200 } });
-      setCalls(data);
+      const { data } = await api.get('/calls', { params: { ...params, limit: PAGE_SIZE, page } });
+      if (req !== latest.current) return;
+      setCalls(data.items);
+      setTotal(data.total);
+      setTotals(data.totals);
     } finally {
-      setLoading(false);
+      if (req === latest.current) setLoading(false);
     }
-  }, [filters]);
+  }, [filters, page]);
+
+  // New filters start again at the first page.
+  useEffect(() => setPage(1), [filters]);
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   useEffect(() => {
     load().catch(() => undefined);
@@ -170,7 +194,7 @@ export default function CallsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Calls</h1>
         <span className="text-sm" style={{ color: 'var(--text-dim)' }}>
-          {loading ? 'Loading…' : `${calls.length} call${calls.length === 1 ? '' : 's'}`}
+          {loading ? 'Loading…' : `${total.toLocaleString()} call${total === 1 ? '' : 's'}`}
           {activeCount > 0 && ` · ${activeCount} filter${activeCount === 1 ? '' : 's'} active`}
         </span>
       </div>
@@ -244,7 +268,7 @@ export default function CallsPage() {
         </div>
       </section>
 
-      <CallTotals calls={calls} />
+      {totals && totals.calls > 0 && <CallTotals totals={totals} />}
 
       <div className="card overflow-x-auto">
         <table className="w-full min-w-[1040px] text-sm">
@@ -303,6 +327,21 @@ export default function CallsPage() {
           </tbody>
         </table>
       </div>
+
+      {total > PAGE_SIZE && (
+        <nav className="flex flex-wrap items-center justify-between gap-3 text-sm" aria-label="Pages">
+          <span style={{ color: 'var(--text-dim)' }}>
+            {((page - 1) * PAGE_SIZE + 1).toLocaleString()}–{Math.min(page * PAGE_SIZE, total).toLocaleString()} of {total.toLocaleString()}
+          </span>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-ghost text-xs" onClick={() => setPage(1)} disabled={page === 1 || loading}>First</button>
+            <button className="btn btn-ghost text-xs" onClick={() => setPage((p) => p - 1)} disabled={page === 1 || loading}>Previous</button>
+            <span className="tabular-nums">Page {page} of {pages}</span>
+            <button className="btn btn-ghost text-xs" onClick={() => setPage((p) => p + 1)} disabled={page >= pages || loading}>Next</button>
+            <button className="btn btn-ghost text-xs" onClick={() => setPage(pages)} disabled={page >= pages || loading}>Last</button>
+          </div>
+        </nav>
+      )}
 
       {detail && (
         <div
@@ -411,19 +450,15 @@ function secs(s?: number): string {
   return r < 60 ? `${r}s` : `${Math.floor(r / 60)}m ${String(r % 60).padStart(2, '0')}s`;
 }
 
-/** Totals for the calls on screen: calls and minutes. */
-function CallTotals({ calls }: { calls: CallRow[] }) {
-  if (calls.length === 0) return null;
-  const sum = (f: (c: CallRow) => number | undefined) => calls.reduce((a, c) => a + (f(c) ?? 0), 0);
-  const answered = calls.filter((c) => c.outcome === 'ANSWERED_HUMAN').length;
-  const transferred = calls.filter((c) => Boolean(c.agentId)).length;
+/** Totals for every call the filters match, across all pages. */
+function CallTotals({ totals }: { totals: Totals }) {
   const figures: Array<[string, string]> = [
-    ['Calls', String(calls.length)],
-    ['Answered', `${answered} (${Math.round((answered / calls.length) * 100)}%)`],
-    ['Transferred', String(transferred)],
-    ['Ring minutes', minutes(sum((c) => c.ringSeconds))],
-    ['AI minutes', minutes(sum((c) => c.aiSeconds))],
-    ['Human minutes', minutes(sum((c) => c.humanSeconds))],
+    ['Calls', totals.calls.toLocaleString()],
+    ['Answered', `${totals.answered.toLocaleString()} (${Math.round((totals.answered / totals.calls) * 100)}%)`],
+    ['Transferred', totals.transferred.toLocaleString()],
+    ['Ring minutes', minutes(totals.ringSeconds)],
+    ['AI minutes', minutes(totals.aiSeconds)],
+    ['Human minutes', minutes(totals.humanSeconds)],
   ];
   return (
     <section className="card p-4">
@@ -436,7 +471,7 @@ function CallTotals({ calls }: { calls: CallRow[] }) {
         ))}
       </div>
       <p className="mt-2 text-xs" style={{ color: 'var(--text-dim)' }}>
-        Totals for the {calls.length} calls listed{calls.length >= 200 ? ' (the most recent 200; narrow the dates for more)' : ''}.
+        Totals for all {totals.calls.toLocaleString()} calls that match the filters.
       </p>
     </section>
   );

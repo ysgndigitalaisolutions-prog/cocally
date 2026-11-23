@@ -72,7 +72,7 @@ export class AuthService {
    * password" to the caller.
    */
   async login(identifier: string, password: string, totpCode: string | undefined, ctx: RequestContext): Promise<LoginResult> {
-    const user = await this.findByIdentifier(identifier);
+    const user = await this.pickAccount(await this.findByIdentifier(identifier), password);
     const fail = async (reason: string, tenantId?: string, userId?: string) => {
       if (tenantId) {
         await this.audit.record({
@@ -307,15 +307,35 @@ export class AuthService {
     return tenant?.active !== false;
   }
 
-  private async findByIdentifier(identifier: string): Promise<UserDocument | null> {
+  /**
+   * Every account the identifier names. One person can be a user in two
+   * tenants with the same phone (23 Nov: Nithin in YSGN and in Call Tap), so a
+   * phone can match more than one account; an email matches at most one per tenant.
+   */
+  private async findByIdentifier(identifier: string): Promise<UserDocument[]> {
     const trimmed = identifier.trim();
     const select = '+passwordHash +totpSecret';
     const phone = normalizeLoginPhone(trimmed);
     if (phone) {
-      const byPhone = await this.userModel.findOne({ phone }).select(select).exec();
-      if (byPhone) return byPhone;
+      const byPhone = await this.userModel.find({ phone }).select(select).sort({ lastLoginAt: -1, _id: 1 }).exec();
+      if (byPhone.length) return byPhone;
     }
-    return this.userModel.findOne({ email: trimmed.toLowerCase() }).select(select).exec();
+    return this.userModel.find({ email: trimmed.toLowerCase() }).select(select).sort({ lastLoginAt: -1, _id: 1 }).exec();
+  }
+
+  /**
+   * The account to sign in to: with one match, that one (the checks that follow
+   * give the usual failure); with several, the first whose password is right
+   * (most recently used first), so a different password per tenant picks the
+   * tenant. With none right, the first, which then fails on the password.
+   */
+  private async pickAccount(users: UserDocument[], password: string): Promise<UserDocument | null> {
+    if (users.length <= 1) return users[0] ?? null;
+    for (const u of users) {
+      if (!u.active || !u.passwordHash) continue;
+      if (await argon2.verify(u.passwordHash, password).catch(() => false)) return u;
+    }
+    return users[0] ?? null;
   }
 
   /**

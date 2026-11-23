@@ -125,6 +125,7 @@ export class CallsController {
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('limit') limit?: string,
+    @Query('page') page?: string,
   ) {
     const filter: Record<string, unknown> = { tenantId: new Types.ObjectId(user.tenantId) };
     if (campaignId && Types.ObjectId.isValid(campaignId)) filter.campaignId = new Types.ObjectId(campaignId);
@@ -147,10 +148,17 @@ export class CallsController {
     }
     if (Object.keys(startedAt).length > 0) filter.startedAt = startedAt;
 
+    // `page` (1-based) asks for one page plus the count and totals of every
+    // matching call; without it the most recent `limit` calls come back as a
+    // plain array, as before (the lead drawer).
+    const paged = page !== undefined;
+    const pageSize = Math.max(1, Math.min(Number(limit) || 50, 200));
+    const pageNo = Math.max(1, Math.floor(Number(page) || 1));
     const calls = await this.callModel
       .find(filter)
-      .sort({ startedAt: -1 })
-      .limit(Math.min(Number(limit ?? 50), 200))
+      .sort({ startedAt: -1, _id: -1 })
+      .skip(paged ? (pageNo - 1) * pageSize : 0)
+      .limit(pageSize)
       .select('-transcript -costCents')
       .lean()
       .exec();
@@ -176,7 +184,7 @@ export class CallsController {
     ]);
     const leadById = new Map(leadRows.map((l) => [l._id.toString(), l]));
 
-    return calls.map((call) => {
+    const rows = calls.map((call) => {
       const u = usage.get(call._id.toString());
       const lead = leadById.get(call.leadId.toString());
       return {
@@ -192,6 +200,27 @@ export class CallsController {
         humanSeconds: u?.humanSeconds ?? 0,
       };
     });
+    if (!paged) return rows;
+
+    // Totals over every call the filters match, not just this page.
+    const all = await this.callModel.find(filter).select('_id outcome agentId').lean().exec();
+    const sum = all.length
+      ? (await this.usage.usage({ callIds: all.map((c) => c._id.toString()), tenantId: user.tenantId })).get(user.tenantId)
+      : undefined;
+    return {
+      items: rows,
+      total: all.length,
+      page: pageNo,
+      pageSize,
+      totals: {
+        calls: all.length,
+        answered: all.filter((c) => c.outcome === 'ANSWERED_HUMAN').length,
+        transferred: all.filter((c) => Boolean(c.agentId)).length,
+        ringSeconds: sum?.ringSeconds ?? 0,
+        aiSeconds: sum?.aiSeconds ?? 0,
+        humanSeconds: sum?.humanSeconds ?? 0,
+      },
+    };
   }
 
   /** Call deep-dive per DASH-07: replay with score-over-time, signals, compliance events. */
