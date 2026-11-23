@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
-import { IsString, IsOptional, MinLength } from 'class-validator';
+import { IsMongoId, IsString, IsOptional, MinLength } from 'class-validator';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { AllowWithout2fa, Public } from '../../common/auth/public.decorator';
@@ -21,6 +21,11 @@ class LoginDto {
   @IsOptional()
   @IsString()
   totpCode?: string;
+
+  /** The workspace to sign in to, when the phone fits accounts in several. */
+  @IsOptional()
+  @IsMongoId()
+  tenantId?: string;
 }
 
 class AcceptInviteDto {
@@ -60,7 +65,15 @@ export class AuthController {
   @Throttle({ default: { ttl: 60_000, limit: 60 } })
   @Post('login')
   login(@Body() dto: LoginDto, @Req() req: Request) {
-    return this.authService.login(dto.identifier, dto.password, dto.totpCode, ctxOf(req));
+    return this.authService.login(dto.identifier, dto.password, dto.totpCode, ctxOf(req), dto.tenantId);
+  }
+
+  /** Workspaces this person also has an account in, for "Switch workspace". */
+  @Get('workspaces')
+  @Roles(...ALL_ROLES)
+  @AllowWithout2fa()
+  workspaces(@CurrentUser() user: AuthenticatedUser) {
+    return this.authService.workspaces(user.userId);
   }
 
   /** Own profile, including whether TOTP setup is still outstanding. */

@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { api } from '@/lib/api';
 import { LuChevronDown, LuChevronRight } from 'react-icons/lu';
 import type { SessionUser } from '@/lib/store';
 import { roleLabel } from '@/lib/roles';
@@ -25,6 +26,26 @@ export default function Sidebar({ user, pathname, onLogout }: Props) {
   const active = navItemFor(pathname);
   const account = sections.find((s) => s.id === 'account');
   const body = sections.filter((s) => s.id !== 'account');
+  const [workspaces, setWorkspaces] = useState<{ current: string; workspaces: Array<{ tenantId: string; name: string }> } | null>(null);
+  const [switching, setSwitching] = useState(false);
+
+  // Which workspace this is, and the others the same person has an account in.
+  useEffect(() => {
+    if (user.support) return;
+    api
+      .get('/auth/workspaces')
+      .then((r) => setWorkspaces(r.data))
+      .catch(() => undefined);
+  }, [user.id, user.support]);
+  const currentName = workspaces?.workspaces.find((w) => w.tenantId === workspaces.current)?.name;
+  const others = workspaces?.workspaces.filter((w) => w.tenantId !== workspaces.current) ?? [];
+
+  /** Switching is a fresh sign-in to the other account (its own password and 2FA). */
+  function switchTo(tenantId: string) {
+    const id = user.phone ?? user.email ?? '';
+    onLogout();
+    window.location.assign(`/login?${new URLSearchParams({ id, workspace: tenantId }).toString()}`);
+  }
 
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-surface p-4">
@@ -41,7 +62,31 @@ export default function Sidebar({ user, pathname, onLogout }: Props) {
           <NavLink key={item.href} item={item} active={item.href === active?.href} />
         ))}
         <p className="mt-2 truncate px-2 text-sm font-medium">{user.name}</p>
-        <p className="truncate px-2 text-xs text-dim">{roleLabel(user)}</p>
+        <p className="truncate px-2 text-xs text-dim">
+          {roleLabel(user)}
+          {currentName ? ` · ${currentName}` : ''}
+        </p>
+        {others.length > 0 && (
+          <div className="mt-2 px-2">
+            <button type="button" className="text-xs text-accent hover:underline" onClick={() => setSwitching((v) => !v)} aria-expanded={switching}>
+              Switch workspace
+            </button>
+            {switching && (
+              <div className="mt-1 flex flex-col gap-0.5">
+                {others.map((w) => (
+                  <button
+                    key={w.tenantId}
+                    type="button"
+                    className="truncate rounded-md px-2 py-1 text-left text-sm hover:bg-surface-2"
+                    onClick={() => switchTo(w.tenantId)}
+                  >
+                    {w.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <button onClick={onLogout} className="btn btn-ghost mt-3 w-full text-sm">
           Sign out
         </button>

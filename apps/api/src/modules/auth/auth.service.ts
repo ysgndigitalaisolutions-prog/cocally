@@ -13,11 +13,19 @@ import { UserInvite, UserInviteDocument, type InvitePurpose } from '../../schema
 import { AuditService } from '../audit/audit.service';
 import { UserStateService } from '../../common/auth/user-state.service';
 import { normalizePhone, regionOf } from '../leads/phone.util';
+import { pickWorkspaceAccount } from './workspace-pick';
 
 export interface LoginResult {
   token?: string;
   requires2fa: boolean;
   user?: SessionProfile;
+  /** The phone/email and password fit accounts in more than one workspace: sign in again with one of these `tenantId`s. */
+  chooseWorkspace?: WorkspaceChoice[];
+}
+
+export interface WorkspaceChoice {
+  tenantId: string;
+  name: string;
 }
 
 export interface SessionProfile {
@@ -71,8 +79,21 @@ export class AuthService {
    * identifier and IP but never distinguish "no such user" from "wrong
    * password" to the caller.
    */
-  async login(identifier: string, password: string, totpCode: string | undefined, ctx: RequestContext): Promise<LoginResult> {
-    const user = await this.pickAccount(await this.findByIdentifier(identifier), password);
+  async login(
+    identifier: string,
+    password: string,
+    totpCode: string | undefined,
+    ctx: RequestContext,
+    tenantId?: string,
+  ): Promise<LoginResult> {
+    const candidates = await this.findByIdentifier(identifier);
+    // One person can hold accounts in several workspaces under the same phone;
+    // see pickWorkspaceAccount. Nothing is said about accounts the password does not open.
+    const picked = await pickWorkspaceAccount(candidates, password, tenantId, async (u, pw) =>
+      Boolean(u.active && u.passwordHash && (await this.tenantActive(u.tenantId)) && (await argon2.verify(u.passwordHash, pw).catch(() => false))),
+    );
+    if (picked.choose) return { requires2fa: false, chooseWorkspace: await this.workspaceChoices(picked.choose) };
+    const user = picked.user;
     const fail = async (reason: string, tenantId?: string, userId?: string) => {
       if (tenantId) {
         await this.audit.record({
@@ -323,20 +344,6 @@ export class AuthService {
     return this.userModel.find({ email: trimmed.toLowerCase() }).select(select).sort({ lastLoginAt: -1, _id: 1 }).exec();
   }
 
-  /**
-   * The account to sign in to: with one match, that one (the checks that follow
-   * give the usual failure); with several, the first whose password is right
-   * (most recently used first), so a different password per tenant picks the
-   * tenant. With none right, the first, which then fails on the password.
-   */
-  private async pickAccount(users: UserDocument[], password: string): Promise<UserDocument | null> {
-    if (users.length <= 1) return users[0] ?? null;
-    for (const u of users) {
-      if (!u.active || !u.passwordHash) continue;
-      if (await argon2.verify(u.passwordHash, password).catch(() => false)) return u;
-    }
-    return users[0] ?? null;
-  }
 
   /**
    * A session in a tenant for a CoCally operator, opened from the ops console.
@@ -361,6 +368,33 @@ export class AuthService {
       { expiresIn: '2h' },
     );
     return { token, user: { ...this.toProfile(user), support: { by: operatorEmail, tenantName } } };
+  }
+
+  private async workspaceChoices(users: Array<{ tenantId: Types.ObjectId }>): Promise<WorkspaceChoice[]> {
+    const ids = users.map((u) => u.tenantId);
+    const tenants = await this.tenantModel.find({ _id: { $in: ids } }).select('name').lean().exec();
+    const name = new Map(tenants.map((t) => [t._id.toString(), (t as { name?: string }).name ?? 'Workspace']));
+    return ids.map((id) => ({ tenantId: id.toString(), name: name.get(id.toString()) ?? 'Workspace' })).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
+   * The workspaces the signed-in person also has an account in (same phone, or
+   * same email), this one included, for the "Switch workspace" menu. Switching
+   * is a fresh sign-in to the other account: its own password and 2FA.
+   */
+  async workspaces(userId: string): Promise<{ current: string; workspaces: WorkspaceChoice[] }> {
+    const me = await this.userModel.findById(userId).select('tenantId phone email support').lean().exec();
+    if (!me) throw new UnauthorizedException();
+    const current = me.tenantId.toString();
+    if (me.support || (!me.phone && !me.email)) return { current, workspaces: await this.workspaceChoices([me]) };
+    const same = await this.userModel
+      .find({ active: true, support: { $ne: true }, $or: [...(me.phone ? [{ phone: me.phone }] : []), ...(me.email ? [{ email: me.email }] : [])] })
+      .select('tenantId')
+      .lean()
+      .exec();
+    const active = [];
+    for (const u of same) if (await this.tenantActive(u.tenantId)) active.push(u);
+    return { current, workspaces: await this.workspaceChoices(active) };
   }
 
   private async issueToken(user: UserDocument): Promise<LoginResult> {

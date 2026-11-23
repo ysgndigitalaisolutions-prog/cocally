@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { toE164 } from '@/lib/phone';
 import { homeFor } from '@/lib/roles';
@@ -20,19 +20,39 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [requires2fa, setRequires2fa] = useState(false);
+  // The phone and password fit accounts in several workspaces: which one.
+  const [choices, setChoices] = useState<Array<{ tenantId: string; name: string }>>([]);
+  const [tenantId, setTenantId] = useState('');
+
+  // "Switch workspace" lands here with the identifier and the workspace chosen.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get('id')) setIdentifier(q.get('id') ?? '');
+    if (q.get('workspace')) setTenantId(q.get('workspace') ?? '');
+  }, []);
+
+  /** An email is sent as typed; a phone gets the country code. */
+  function loginId(): string {
+    return identifier.includes('@') ? identifier.trim() : toE164(countryCode, identifier);
+  }
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  async function submit(e?: React.FormEvent, workspace = tenantId) {
+    e?.preventDefault();
     setError('');
     setLoading(true);
     try {
       const { data } = await api.post('/auth/login', {
-        identifier: toE164(countryCode, identifier),
+        identifier: loginId(),
         password,
         ...(totpCode ? { totpCode } : {}),
+        ...(workspace ? { tenantId: workspace } : {}),
       });
+      if (data.chooseWorkspace?.length) {
+        setChoices(data.chooseWorkspace);
+        return;
+      }
       if (data.requires2fa) {
         setRequires2fa(true);
         return;
@@ -62,7 +82,7 @@ export default function LoginPage() {
         </div>
         <form onSubmit={submit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium">Phone number</label>
+            <label className="mb-1 block text-sm font-medium">Phone number or email</label>
             <div className="flex gap-2">
               <select
                 className="input"
@@ -81,7 +101,7 @@ export default function LoginPage() {
                 className="input"
                 style={{ flex: 1, minWidth: 0 }}
                 type="text"
-                inputMode="tel"
+                inputMode={identifier.includes('@') ? 'email' : 'tel'}
                 autoComplete="username"
                 placeholder="98xxx xxxxx"
                 value={identifier}
@@ -101,6 +121,28 @@ export default function LoginPage() {
               autoComplete="current-password"
             />
           </div>
+          {choices.length > 0 && !requires2fa && (
+            <div>
+              <p className="mb-2 text-sm font-medium">Which workspace?</p>
+              <div className="flex flex-col gap-2">
+                {choices.map((c) => (
+                  <button
+                    key={c.tenantId}
+                    type="button"
+                    className="btn btn-ghost w-full justify-start border"
+                    style={{ borderColor: 'var(--border)' }}
+                    disabled={loading}
+                    onClick={() => {
+                      setTenantId(c.tenantId);
+                      submit(undefined, c.tenantId);
+                    }}
+                  >
+                    {c.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {requires2fa && (
             <div>
               <label className="mb-1 block text-sm font-medium">Authenticator code</label>
