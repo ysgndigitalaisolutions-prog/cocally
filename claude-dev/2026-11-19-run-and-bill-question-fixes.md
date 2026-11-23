@@ -29,3 +29,11 @@
 - Screener hand-off ("stay on the line", "please hold", "while I connect you") before any step is asked: stay quiet, hold the dead-air check, and greet the person when they say hello.
 - Opening audio is saved to disk (`OPENING_CACHE_DIR`, default `/tmp/cocally-opening-cache` in the worker container), keyed by text, voice and audio settings. Every call in the container reuses it; a take made by a backup voice is not saved. Expected to cut Cartesia use by about two thirds.
 - 123 worker tests pass (10 new).
+
+## 23 Nov: Call Tap admin, workspace picker, Calls pagination (deployed `2bc06ec`)
+- Nithin added to the Call Tap tenant as ADMIN (user `6b046b585e75c9478c2f6e79`, email + phone +919902352425). Shubham stays OWNER. Set-password link issued with `reset-password.js` (48 h).
+- Sign-in: one phone can have accounts in several workspaces. The accounts the password opens are offered as "Which workspace?"; one that opens goes straight in. The sidebar shows the workspace name and "Switch workspace" (a fresh sign-in to the other account, its own password and 2FA). `GET /auth/workspaces`. Logic in `apps/api/src/modules/auth/workspace-pick.ts`, 6 tests.
+- Login page: email sign-in works (it used to get "+91" put in front).
+- Calls tab: 100 per page with First/Previous/Next/Last; the count and totals cover every matching call (`GET /calls?page=`). Without `page` the API returns the old plain list (lead drawer).
+- Same deploy took the call fixes (`5d2ee31`): someone else looks after the bills, screener hand-off, opening audio on disk. Own-number test call still to do before customers.
+- Alerts plan (not built): provider balances (Cartesia admin key, Deepgram billing:read key), Telvoq outage, daily cost; delivery channel undecided (Resend key / Telegram). Cartesia credits likely near zero: Pro is 100k/month, 18 Nov alone used ~85k.
