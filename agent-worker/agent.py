@@ -570,7 +570,59 @@ GREET_MAX_WAIT_S = float(os.getenv("GREET_MAX_WAIT_S", "8.0"))
 # The opening is the same sentence on every call of a campaign. 18 Nov: making it
 # afresh for every dial (voicemails and failed calls too) was two thirds of the
 # Cartesia credits. Made once per text and voice, reused after.
+# 19 Nov: the in-memory cache had 0 hits, because each call is its own process.
+# So it is kept on disk as well, shared by every call in the worker container (a
+# redeploy starts it empty, and the first call makes it again).
 _PRERENDER_CACHE: dict[tuple[str, str], list] = {}
+OPENING_CACHE_DIR = os.getenv("OPENING_CACHE_DIR", "/tmp/cocally-opening-cache")
+
+
+def _opening_cache_path(text: str) -> str:
+    import hashlib
+
+    # Everything that changes how the line sounds is in the key.
+    sig = "|".join(
+        [text, TTS_PROVIDER, str(TTS_VOICE), TTS_EMOTION, str(TTS_GAIN_DB), str(TTS_CLARITY), str(TTS_CALM), "v1"]
+    )
+    return os.path.join(OPENING_CACHE_DIR, hashlib.sha256(sig.encode()).hexdigest()[:32] + ".pcm")
+
+
+def _save_opening(path: str, frames: list) -> None:
+    """Frames to one file: a JSON header line, then the 16-bit samples."""
+    try:
+        f0 = frames[0]
+        if any(f.sample_rate != f0.sample_rate or f.num_channels != f0.num_channels for f in frames):
+            return
+        head = {"rate": f0.sample_rate, "channels": f0.num_channels, "sizes": [f.samples_per_channel for f in frames]}
+        os.makedirs(OPENING_CACHE_DIR, exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(json.dumps(head).encode() + b"\n")
+            for f in frames:
+                fh.write(bytes(f.data))
+        os.replace(tmp, path)  # whole or not at all: a call starting meanwhile never reads half a file
+    except Exception as e:  # noqa: BLE001 — the cache is only a saving
+        logger.warning("opening not saved to disk (%s)", e)
+
+
+def _load_opening(path: str) -> list | None:
+    try:
+        with open(path, "rb") as fh:
+            head = json.loads(fh.readline())
+            pcm = fh.read()
+    except FileNotFoundError:
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("opening on disk unreadable (%s): making it again", e)
+        return None
+    rate, ch, frames, pos = head["rate"], head["channels"], [], 0
+    for n in head["sizes"]:
+        size = n * ch * 2
+        if pos + size > len(pcm):
+            return None  # cut short: make it again
+        frames.append(rtc.AudioFrame(pcm[pos : pos + size], rate, ch, n))
+        pos += size
+    return frames or None
 
 
 async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
@@ -579,6 +631,12 @@ async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
     if key in _PRERENDER_CACHE:
         logger.info("opening from the cache")
         return _PRERENDER_CACHE[key]
+    path = _opening_cache_path(text)
+    frames = await asyncio.to_thread(_load_opening, path)
+    if frames:
+        logger.info("opening from the disk cache")
+        _PRERENDER_CACHE[key] = frames
+        return frames
     try:
         t0 = time.monotonic()
         frames = []
@@ -592,6 +650,13 @@ async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
         logger.info("opening pre-rendered in %.2fs", time.monotonic() - t0)
         if frames:
             _PRERENDER_CACHE[key] = frames
+            # Only Emma's own voice is kept: a take made by a backup voice while
+            # the main one was down would otherwise open every call after it.
+            status = getattr(tts_engine, "_status", None)
+            if not status or getattr(status[0], "available", True):
+                await asyncio.to_thread(_save_opening, path, frames)
+            else:
+                logger.warning("opening made by a backup voice: not saved to disk")
         return frames or None
     except Exception as e:  # noqa: BLE001 — live synthesis is the fallback
         logger.warning("opening pre-render failed (%s): speaking it live", e)
@@ -1118,6 +1183,54 @@ _SCREENING_FOLLOW_UP = re.compile(
 )
 
 
+# Someone else looks after the bills. 18-19 Nov: "Yes. Oh, it's my husband",
+# "My daughter... pays all the bills for me", "Not me": each got the bill question
+# again or the goodbye, and the call was lost. Now they are asked for that person.
+_SOMEONE_ELSE = re.compile(
+    r"\b(my|our|the)\s+(husband|hubby|wife|partner|son|daughter|mum|mom|mother|dad|father|brother|sister"
+    r"|boyfriend|girlfriend|son-in-law|daughter-in-law|flatmate|housemate|carer)\b"
+    r"|\bnot me\b|\bsomeone else\b|\b(he|she) (does|looks after|pays|handles|takes care)\b",
+    re.I,
+)
+# "My husband and I", "we both do": they are one of the bill payers.
+_BOTH_OF_US = re.compile(r"\b(and|&) (i|me)\b|\bboth\b|\bwe (both|do|share)\b|\b(me|i) and (my|our)\b|\bwith my\b", re.I)
+_HIM = re.compile(r"\b(husband|hubby|son|dad|father|brother|boyfriend|son-in-law|he)\b", re.I)
+_HER = re.compile(r"\b(wife|daughter|mum|mom|mother|sister|girlfriend|daughter-in-law|she)\b", re.I)
+SOMEONE_ELSE_PROBE = "around for a quick chat"
+
+
+def someone_else_line(said: str) -> str:
+    """"Is he around...?" with the pronoun for the person they named."""
+    he, she = _HIM.search(said), _HER.search(said)
+    if he and not she:
+        return "No worries. Is he around for a quick chat, or is there a better time to call him?"
+    if she and not he:
+        return "No worries. Is she around for a quick chat, or is there a better time to call her?"
+    return "No worries. Are they around for a quick chat, or is there a better time to call them?"
+
+
+# Plainly "it's me" to the bill question. 18 Nov (Frankston): "I just said I pay
+# them" got the question again.
+_BILL_PAYER_YES = re.compile(
+    r"\bI (do|pay|look after|handle|take care of)\b(?!n'?t)|\b(that'?s|it'?s) me\b|\bI'?m the (account holder|one)\b", re.I
+)
+_NOT_AROUND = re.compile(
+    r"\b(not (here|home|around|in|available)|at work|(is|he'?s|she'?s|they'?re) (out|away|busy|asleep|working)|no\b|nah\b|nope\b)",
+    re.I,
+)
+
+
+# A screener handing the call to the person when its first question ("say your
+# name and reason for calling") was spoken over our greeting and never reached a
+# turn. 19 Nov (4:48pm, 5:09pm): "Thanks, Emma. Please stay on the line." was taken
+# as the customer, and the bill question went to the screener.
+_SCREENER_HANDOFF = re.compile(
+    r"\bstay on the line\b|\bplease hold\b|\bwhile I (try to )?connect you\b|\bI'?ll (see if|try to) (get|reach|connect)\b"
+    r"|\blet (them|him|her) know you'?re (calling|here|on the line)\b",
+    re.I,
+)
+
+
 def out_of_area_pattern(retailers: list[str]) -> re.Pattern[str] | None:
     """Regex for a campaign's out-of-area retailers, on the distinctive word of
     each name ("Ergon Energy" -> "ergon"): customers say "I'm with Ergon"."""
@@ -1265,6 +1378,10 @@ class Qualifier(Agent):
         self.quiet_on_purpose = False
         self._screening_said = 0
         self._out_of_area_asked = False
+        self._screener_handed_over = False
+        # The "is he around?" question was asked; a new person may come to the phone.
+        self._someone_else_asked = False
+        self._new_person = False
         self.greeting_started_at: float | None = None
         self.last_speech_end: float | None = None
         self.dead_air: "_DeadAirWatch | None" = None
@@ -1513,6 +1630,70 @@ class Qualifier(Agent):
         if n >= MAX_SAME_QUESTION:
             return self._instead_of_asking_again() or self._reworded(q)
         return self._reworded(q) if n >= 2 else q
+
+    def _on_bill_question(self) -> bool:
+        """The last thing we said was the bill question (S1), in any of its forms."""
+        if self._steps_asked() - {"S1"}:
+            return False
+        last = re.sub(r"\s+", " ", self._last_ai_text()).strip().lower()
+        probes = [re.sub(r"\s+", " ", self.script_lines.get(t, "")).strip().lower()[-30:] for t in ("S1", "S1Q")]
+        return any(p and p in last for p in probes) or YES_NO_REASK.lower()[-30:] in last
+
+    def _say_logged(self, line: str, why: str) -> None:
+        logger.info("%s (call=%s): %r -> %r", why, self._call_id, self.last_user_text[:80], line[:60])
+        if self._call_id:
+            self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+        self.session_ref.say(line, add_to_chat_ctx=True)
+
+    def _someone_else_turn(self, turn_ctx) -> bool:  # noqa: ANN001
+        """Someone else looks after the bills: ask for them, wait while they are
+        fetched, greet them, and ask them the bill question. True if the turn was
+        answered here (the caller then stops the model's reply)."""
+        said = self.last_user_text
+        last = self._last_ai_text().lower()
+        if self._new_person:
+            # The person who was fetched has heard the greeting and answered it.
+            self._new_person = False
+            note = "A different person, the one who looks after the bills, has just come to the phone and heard the greeting. Say the [S1] line again, word for word."
+            if not _ASKED_HOW_WE_ARE.search(said):
+                note += " They did not ask how you are, so do not say how you are."
+            turn_ctx.add_message(role="system", content=note)
+            return False
+        if self._someone_else_asked and (SOMEONE_ELSE_PROBE in last or last.strip() == HOLD_LINE.lower()):
+            # "Hello?", "Hi, this is John": not "He's coming" from the person who went to get him.
+            if _GREETING_ONLY.match(said) or (last.strip() == HOLD_LINE.lower() and re.match(r"^\W*(hello|hi|hey|g'?day)\b", said, re.I)):
+                # The person they went to get.
+                self._new_person = True
+                self._say_logged(self.opening_line or self.script_lines.get("S1", ""), "new person on the phone")
+                return True
+            if SOMEONE_ELSE_PROBE not in last:
+                return False
+            if _TIME_WORDS.search(said):
+                return False  # a time: booked by the callback check
+            words = len(said.split())
+            if words <= 6 and _CONSENT_YES.search(said) and not _NOT_AROUND.search(said):
+                if self.dead_air is not None:
+                    self.dead_air.hold(HOLD_WAIT_S)
+                self._say_logged(HOLD_LINE, "fetching the bill payer")
+                return True
+            if _NOT_AROUND.search(said):
+                q6 = self.script_lines.get("Q6")
+                if q6 and "Q6" not in self.blocked_tags and not self._said_count(q6):
+                    self._say_logged(q6, "bill payer not around")
+                    return True
+            return False
+        if not self._on_bill_question():
+            return False
+        if not self._someone_else_asked and _SOMEONE_ELSE.search(said) and not _BOTH_OF_US.search(said):
+            self._someone_else_asked = True
+            self._say_logged(someone_else_line(said), "someone else looks after the bills")
+            return True
+        if _BILL_PAYER_YES.search(said) and not _SOMEONE_ELSE.search(said):
+            turn_ctx.add_message(
+                role="system",
+                content="They said yes: they look after the bills. Do not ask the bill question again; go on to the next scripted line.",
+            )
+        return False
 
     async def _reask_after_filler(self) -> None:
         """Nothing came after their "Oh," / "Um": ask the question again."""
@@ -1888,6 +2069,26 @@ class Qualifier(Agent):
             )
         ):
             raise StopResponse()  # their "Hello?": the greeting is the reply
+        if (
+            not self._screening_answered
+            and not self._closing
+            and not self._transfer_triggered
+            and not self._steps_asked()
+            and _SCREENER_HANDOFF.search(self.last_user_text)
+        ):
+            # The screener has our name and is fetching the person. Wait for them;
+            # their "Hello?" then gets the greeting again (the hello-after-the-
+            # opening check below), since they never heard who is calling.
+            self._screening_answered = True
+            self._screener_handed_over = True
+            logger.info("screener handing over (call=%s): %r", self._call_id, self.last_user_text[:80])
+            if self._call_id:
+                self.spawn(_post_transcript(self._call_id, "customer", self.last_user_text))
+            if self.dead_air is not None:
+                self.dead_air.hold(HOLD_WAIT_S)
+            self.quiet_on_purpose = True
+            self._first_turn_done = False  # the person's first words are still the first answer
+            raise StopResponse()
         if self.restore_endpointing is not None:
             restore, self.restore_endpointing = self.restore_endpointing, None
             restore()
@@ -1936,6 +2137,10 @@ class Qualifier(Agent):
             self.dead_air.hold(HOLD_WAIT_S)
             self.session_ref.say(HOLD_LINE, add_to_chat_ctx=True)
             raise StopResponse()
+        if not self._closing and not self._transfer_triggered and self.session_ref is not None:
+            handled = self._someone_else_turn(turn_ctx)
+            if handled:
+                raise StopResponse()
         # A bare "Hello?" right after the opening question means they did not hear
         # it (6 Nov, Philip: his second hello was taken as the answer and step 1
         # ran over his "Yes, it is"). Ask it once more instead.
@@ -1946,7 +2151,11 @@ class Qualifier(Agent):
             and _GREETING_ONLY.match(self.last_user_text)
             # After a gate the person may have picked up during step 1 and heard
             # nothing of who is calling, so they get the introduction too.
-            and (self._only_opening_said() or (self.gate_presses and not (self._steps_asked() - {"S1"})))
+            and (
+                self._only_opening_said()
+                or (self.gate_presses and not (self._steps_asked() - {"S1"}))
+                or (self._screener_handed_over and not self._steps_asked())
+            )
         ):
             self._opening_repeated = True
             logger.info("hello after the opening (call=%s): asking it again", self._call_id)
@@ -1984,7 +2193,7 @@ class Qualifier(Agent):
         q6 = self.script_lines.get("Q6", "")
         if q6 and "Q6" not in self.blocked_tags and _TIME_WORDS.search(self.last_user_text):
             last_ai = next((getattr(i, "text_content", "") or "" for i in reversed(self.chat_ctx.items) if getattr(i, "role", None) == "assistant"), "")
-            if q6[-40:].lower() in last_ai.lower():
+            if q6[-40:].lower() in last_ai.lower() or SOMEONE_ELSE_PROBE in last_ai.lower():
                 turn_ctx.add_message(
                     role="system",
                     content="The customer just gave their callback time. Call schedule_callback with it now, before saying anything; then confirm the time in words and say goodbye.",

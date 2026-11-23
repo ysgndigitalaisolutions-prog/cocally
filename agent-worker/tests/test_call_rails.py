@@ -522,3 +522,118 @@ def test_an_out_of_area_retailer_gets_the_company_question_once_more():
         finally:
             agent._no_agent_close = orig
     asyncio.run(go())
+
+
+# 23 Nov fixes: someone else looks after the bills, screener hand-off, opening on disk.
+
+def test_my_husband_looks_after_it_asks_for_him():
+    for text, line in [
+        ("Yes. Oh, it's my husband.", "Is he around for a quick chat, or is there a better time to call him?"),
+        ("My daughter pays all the bills for me.", "Is she around for a quick chat, or is there a better time to call her?"),
+        ("I don't... No. Not me.", "Are they around for a quick chat, or is there a better time to call them?"),
+    ]:
+        q, ctx, handled = _run(text, S1_SAID)
+        assert handled and not ctx.ended, text
+        assert q.session_ref.said == ["No worries. " + line], (text, q.session_ref.said)
+
+
+def test_my_husband_and_i_is_a_yes():
+    for text in ["My husband and I both do.", "Yes, me and my wife."]:
+        q, _, handled = _run(text, S1_SAID)
+        assert not handled and not q.session_ref.said, text
+
+
+def test_someone_else_only_after_the_bill_question():
+    q, _, handled = _run("My husband's at work.", (OPENING, LINES["S1"], LINES["S2"]))
+    assert not any("quick chat" in s for s in q.session_ref.said)
+
+
+def test_someone_else_then_fetched_then_greeted():
+    async def go():
+        q, _ = _make(S1_SAID)
+        assert await _turn(q, "It's my husband.")
+        q._chat_ctx.add_message(role="assistant", content=q.session_ref.said[-1])
+        assert await _turn(q, "Yeah.")
+        assert q.session_ref.said[-1] == agent.HOLD_LINE
+        q._chat_ctx.add_message(role="assistant", content=agent.HOLD_LINE)
+        assert not await _turn(q, "He's coming.")  # still the first person: the model's turn
+        assert await _turn(q, "Hello?")
+        assert q.session_ref.said[-1] == OPENING
+        q._chat_ctx.add_message(role="assistant", content=OPENING)
+        assert not await _turn(q, "Good thanks.")  # the model asks [S1] again
+        notes = [i.text_content for i in q._chat_ctx.items if getattr(i, "role", None) == "system"]
+        assert any("Say the [S1] line again" in n for n in notes), notes
+
+    asyncio.run(go())
+
+
+def test_someone_else_not_around_gets_the_callback_question():
+    async def go():
+        q, _ = _make(S1_SAID)
+        await _turn(q, "My wife does.")
+        q._chat_ctx.add_message(role="assistant", content=q.session_ref.said[-1])
+        assert await _turn(q, "No, she's at work.")
+        assert q.session_ref.said[-1] == LINES["Q6"]
+
+    asyncio.run(go())
+
+
+def test_someone_else_with_a_time_is_booked():
+    async def go():
+        q, _ = _make(S1_SAID)
+        await _turn(q, "My wife does.")
+        q._chat_ctx.add_message(role="assistant", content=q.session_ref.said[-1])
+        assert not await _turn(q, "Call back after six tonight.")
+        notes = [i.text_content for i in q._chat_ctx.items if getattr(i, "role", None) == "system"]
+        assert any("schedule_callback" in n for n in notes), notes
+
+    asyncio.run(go())
+
+
+def test_i_just_said_i_pay_them_is_a_yes():
+    async def go():
+        q, _ = _make((OPENING, LINES["S1"], LINES["S1Q"]))
+        assert not await _turn(q, "I just said I pay them.")
+        notes = [i.text_content for i in q._chat_ctx.items if getattr(i, "role", None) == "system"]
+        assert any("They said yes" in n for n in notes), notes
+
+    asyncio.run(go())
+
+
+def test_screener_handing_over_is_not_the_customer():
+    async def go():
+        q, _ = _make((OPENING,))
+        assert await _turn(q, "Thanks, Emma. Please stay on the line.")
+        assert not q.session_ref.said and q.quiet_on_purpose
+        assert await _turn(q, "Hello?")  # the person: the greeting again
+        assert q.session_ref.said == [OPENING]
+
+    asyncio.run(go())
+
+
+def test_please_stay_on_the_line_after_step_one_is_left_alone():
+    q, _, handled = _run("Please stay on the line.", S1_SAID)
+    assert not q._screener_handed_over
+
+
+def test_opening_on_disk_round_trip(tmp_path=None):
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    old = agent.OPENING_CACHE_DIR
+    agent.OPENING_CACHE_DIR = d
+    try:
+        frames = [rtc.AudioFrame(np.arange(n, dtype=np.int16).tobytes(), 24000, 1, n) for n in (480, 480, 123)]
+        path = agent._opening_cache_path(OPENING)
+        assert agent._load_opening(path) is None
+        agent._save_opening(path, frames)
+        back = agent._load_opening(path)
+        assert [f.samples_per_channel for f in back] == [480, 480, 123]
+        assert all(bytes(a.data) == bytes(b.data) for a, b in zip(frames, back))
+        assert back[0].sample_rate == 24000
+        assert agent._opening_cache_path(OPENING + "!") != path
+        with open(path, "r+b") as fh:  # cut short
+            fh.truncate(200)
+        assert agent._load_opening(path) is None
+    finally:
+        agent.OPENING_CACHE_DIR = old
