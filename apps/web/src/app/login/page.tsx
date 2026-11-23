@@ -27,16 +27,30 @@ export default function LoginPage() {
   // "Switch workspace" lands here with the identifier and the workspace chosen.
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
-    if (q.get('id')) setIdentifier(q.get('id') ?? '');
+    const id = q.get('id');
+    if (id) {
+      setUseEmail(id.includes('@'));
+      // "+919902352425" fills as +91 and 9902352425.
+      const cc = id.includes('@') ? undefined : COUNTRY_CODES.find((c) => id.startsWith(c.code));
+      if (cc) setCountryCode(cc.code);
+      setIdentifier(cc ? id.slice(cc.code.length) : id);
+    }
     if (q.get('workspace')) setTenantId(q.get('workspace') ?? '');
   }, []);
 
-  // Letters or an "@" mean an email: no country code for it.
-  const looksLikeEmail = /[@a-z]/i.test(identifier);
+  // Phone is the sign-in; email is the alternative behind a link.
+  const [useEmail, setUseEmail] = useState(false);
 
   /** An email is sent as typed; a phone gets the country code. */
   function loginId(): string {
-    return looksLikeEmail ? identifier.trim() : toE164(countryCode, identifier);
+    return useEmail ? identifier.trim() : toE164(countryCode, identifier);
+  }
+
+  function switchMethod() {
+    setUseEmail((v) => !v);
+    setIdentifier('');
+    setChoices([]);
+    setError('');
   }
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -84,10 +98,25 @@ export default function LoginPage() {
           </p>
         </div>
         <form onSubmit={submit} className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Phone number or email</label>
-            <div className="flex gap-2">
-              {!looksLikeEmail && (
+          {useEmail ? (
+            <div>
+              <label className="mb-1 block text-sm font-medium" htmlFor="login-email">Email</label>
+              <input
+                id="login-email"
+                className="input"
+                type="email"
+                inputMode="email"
+                autoComplete="username"
+                placeholder="you@company.com"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                required
+              />
+            </div>
+          ) : (
+            <div>
+              <label className="mb-1 block text-sm font-medium" htmlFor="login-phone">Phone number</label>
+              <div className="flex gap-2">
                 <select
                   className="input"
                   style={{ width: '8.5rem', flex: 'none' }}
@@ -101,20 +130,21 @@ export default function LoginPage() {
                     </option>
                   ))}
                 </select>
-              )}
-              <input
-                className="input"
-                style={{ flex: 1, minWidth: 0 }}
-                type="text"
-                inputMode={looksLikeEmail ? 'email' : 'text'}
-                autoComplete="username"
-                placeholder="98xxx xxxxx or you@company.com"
-                value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                required
-              />
+                <input
+                  id="login-phone"
+                  className="input"
+                  style={{ flex: 1, minWidth: 0 }}
+                  type="tel"
+                  inputMode="tel"
+                  autoComplete="username"
+                  placeholder="98xxx xxxxx"
+                  value={identifier}
+                  onChange={(e) => setIdentifier(e.target.value)}
+                  required
+                />
+              </div>
             </div>
-          </div>
+          )}
           <div>
             <label className="mb-1 block text-sm font-medium">Password</label>
             <input
@@ -169,6 +199,11 @@ export default function LoginPage() {
           <button className="btn btn-primary w-full" disabled={loading}>
             {loading ? 'Signing in…' : 'Sign in'}
           </button>
+          <p className="text-center text-sm">
+            <button type="button" className="text-accent hover:underline" onClick={switchMethod}>
+              {useEmail ? 'Use phone number instead' : 'Use email instead'}
+            </button>
+          </p>
         </form>
       </div>
     </main>
