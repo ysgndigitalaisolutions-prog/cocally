@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AMD_CLASSES, CALL_OUTCOMES, DISPOSITIONS } from '@cocally/shared';
 import { api } from '@/lib/api';
 import { minutes } from '@/lib/billing';
+import { formatCli } from '@/components/CampaignCallerIds';
 
 interface CallRow {
   _id: string;
@@ -314,7 +315,7 @@ export default function CallsPage() {
                   {call.leadName && <p className="font-medium">{call.leadName}</p>}
                   <p className="font-mono text-xs" style={{ color: 'var(--text-dim)' }}>{call.leadPhone ?? '—'}</p>
                 </td>
-                <td className="p-3 font-mono text-xs">{call.callerId ?? '—'}</td>
+                <td className="p-3 font-mono text-xs">{call.callerId ? formatCli(call.callerId) : '—'}</td>
                 <td className="p-3">{campaignName(call.campaignId) ?? '—'}</td>
                 <td className="p-3 font-medium">{resultLabel(call)}</td>
                 <td className="p-3">{call.agentName ?? <span style={{ color: 'var(--text-dim)' }}>AI only</span>}</td>

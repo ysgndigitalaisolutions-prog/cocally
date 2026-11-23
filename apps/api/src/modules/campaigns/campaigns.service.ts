@@ -19,6 +19,9 @@ const CAMPAIGN_PATCH_SCHEMA = z
     activeFlowVersionId: objectId.nullable(),
     dailyDialBudget: z.number().int().min(0).max(1_000_000),
     maxConcurrentCalls: z.number().int().min(1).max(500),
+    dialGapSeconds: z
+      .object({ min: z.number().min(0).max(120), max: z.number().min(0).max(120) })
+      .refine((g) => g.max >= g.min, 'max must be at least min'),
     dialsPerAvailableAgent: z.number().min(0.1).max(20),
     noAgentFallback: z.enum(['BOOK', 'HOLD', 'AI_CLOSE']),
     voicemailPolicy: z.string(),
@@ -222,6 +225,7 @@ export class CampaignsService {
       'activeFlowVersionId',
       'dailyDialBudget',
       'maxConcurrentCalls',
+      'dialGapSeconds',
       'dialsPerAvailableAgent',
       'noAgentFallback',
       'voicemailPolicy',

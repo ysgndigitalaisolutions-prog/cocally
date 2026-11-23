@@ -5,7 +5,7 @@ import { Model, Types } from 'mongoose';
 import { AuditService } from '../audit/audit.service';
 import { Call, CallDocument } from '../../schemas/call.schema';
 import { CliNumber, CliNumberDocument } from '../../schemas/cli-number.schema';
-import { cliCandidateFilter, isValidCliNumber } from './cli-rules';
+import { cliCandidateFilter, isValidCliNumber, pickCli } from './cli-rules';
 
 /** Minimum answered-or-not sample before the 7-day rate is trusted enough to act on — a handful of unlucky dials must not quarantine a healthy number. */
 const MIN_SAMPLE_FOR_QUARANTINE = 20;
@@ -48,6 +48,8 @@ export class CliService {
     geoMatch: boolean;
     /** Only numbers from the campaign's country: a +61 caller ID fails on the Indian test route. */
     countryPackCode?: string;
+    /** Numbers on a live call right now: used only when every number is. */
+    busy?: string[];
   }): Promise<CliNumberDocument | null> {
     const candidates = await this.cliModel.find(cliCandidateFilter(input)).sort({ _id: 1 }).exec();
     if (candidates.length === 0) return null;
@@ -59,7 +61,7 @@ export class CliService {
     }
 
     this.rotationCursor = (this.rotationCursor + 1) % pool.length;
-    return pool[this.rotationCursor % pool.length] ?? null;
+    return pickCli(pool, input.busy ?? [], this.rotationCursor);
   }
 
   async recordDial(cliId: Types.ObjectId, answered: boolean): Promise<void> {

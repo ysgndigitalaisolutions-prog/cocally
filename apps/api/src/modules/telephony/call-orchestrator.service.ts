@@ -63,6 +63,11 @@ export class CallOrchestratorService {
     return this.liveDriver.activeOnAuLine();
   }
 
+  /** Caller IDs on a live call in this tenant now. */
+  liveClis(tenantId: string): string[] {
+    return this.liveDriver.liveClis(tenantId);
+  }
+
   activeCallCount(campaignId: string): number {
     return (
       [...this.activeCalls.values()].filter((c) => c.campaignId === campaignId).length +

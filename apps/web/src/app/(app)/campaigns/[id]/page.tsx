@@ -34,7 +34,9 @@ interface Campaign {
   countryPackCode: string;
   dailyDialBudget: number;
   maxConcurrentCalls: number;
+  dialGapSeconds?: { min: number; max: number };
   dialsPerAvailableAgent: number;
+  cliPool?: string[];
   voicemailPolicy: string;
   transcriptionMode: string;
   whisperEnabled: boolean;
@@ -271,7 +273,12 @@ export default function CampaignDetailPage() {
 
       <CampaignTeamAssignment campaignId={String(params.id)} onChanged={load} />
 
-      <CampaignCallerIds campaignId={String(params.id)} countryPackCode={campaign.countryPackCode} />
+      <CampaignCallerIds
+        campaignId={String(params.id)}
+        countryPackCode={campaign.countryPackCode}
+        maxConcurrentCalls={campaign.maxConcurrentCalls}
+        dialGapSeconds={campaign.dialGapSeconds ?? { min: 3, max: 5 }}
+      />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <section className="card space-y-4 p-6">
@@ -285,6 +292,16 @@ export default function CampaignDetailPage() {
             label="Max concurrent calls"
             value={campaign.maxConcurrentCalls}
             onSave={(v) => save({ maxConcurrentCalls: Number(v) })}
+          />
+          <Field
+            label="Seconds between dials, from"
+            value={campaign.dialGapSeconds?.min ?? 3}
+            onSave={(v) => save({ dialGapSeconds: { min: Number(v), max: Math.max(Number(v), campaign.dialGapSeconds?.max ?? 5) } })}
+          />
+          <Field
+            label="Seconds between dials, up to"
+            value={campaign.dialGapSeconds?.max ?? 5}
+            onSave={(v) => save({ dialGapSeconds: { min: Math.min(Number(v), campaign.dialGapSeconds?.min ?? 3), max: Number(v) } })}
           />
           <Field
             label="Dials per available agent"

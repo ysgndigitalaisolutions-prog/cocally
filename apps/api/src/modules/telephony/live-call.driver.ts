@@ -44,6 +44,8 @@ interface LiveCallEntry {
   leadId: string;
   /** Goes out on the Australian carrier line, which has its own limit across tenants. */
   au: boolean;
+  /** The caller ID it shows. */
+  cli?: string;
 }
 
 /**
@@ -99,7 +101,7 @@ export class LiveCallDriver implements OnModuleInit {
     const since = new Date(Date.now() - 2 * 60 * 60_000);
     const live = await this.callModel
       .find({ state: { $in: [...LIVE_CALL_STATES] }, manual: { $ne: true }, agentId: null, startedAt: { $gte: since } })
-      .select('_id campaignId tenantId leadId')
+      .select('_id campaignId tenantId leadId cli')
       .lean()
       .exec();
     for (const c of live) {
@@ -109,6 +111,7 @@ export class LiveCallDriver implements OnModuleInit {
         leadId: c.leadId.toString(),
         // Pack unknown here: counting it against the Australian line errs on the safe side.
         au: true,
+        cli: c.cli ?? undefined,
       });
     }
     if (live.length > 0) this.logger.warn(`restored ${live.length} live call(s) into the pacing registry after restart`);
@@ -121,6 +124,11 @@ export class LiveCallDriver implements OnModuleInit {
   /** Live calls on the Australian carrier line, all tenants together. */
   activeOnAuLine(): number {
     return [...this.liveCalls.values()].filter((c) => c.au).length;
+  }
+
+  /** Caller IDs on a live call in this tenant now. */
+  liveClis(tenantId: string): string[] {
+    return [...this.liveCalls.values()].filter((c) => c.tenantId === tenantId && c.cli).map((c) => c.cli!);
   }
 
   totalActiveForTenant(tenantId: string): number {
@@ -175,7 +183,7 @@ export class LiveCallDriver implements OnModuleInit {
       startedAt: new Date(),
     });
     const callId = call._id.toString();
-    this.liveCalls.set(callId, { campaignId, tenantId, leadId: lead._id.toString(), au: (campaign.countryPackCode ?? 'AU') === 'AU' });
+    this.liveCalls.set(callId, { campaignId, tenantId, leadId: lead._id.toString(), au: (campaign.countryPackCode ?? 'AU') === 'AU', cli });
     options?.onCallCreated?.(callId);
 
     try {

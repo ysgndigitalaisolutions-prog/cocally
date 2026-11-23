@@ -14,6 +14,14 @@ interface CliRow {
   answerRate7d: number;
 }
 
+/** "+61390728793" → "+61 3 9072 8793"; "+61485049494" → "+61 485 049 494". Other numbers as stored. */
+export function formatCli(n: string): string {
+  const au = /^\+61(\d{9})$/.exec(n);
+  if (!au) return n;
+  const d = au[1]!;
+  return d.startsWith('4') ? `+61 ${d.slice(0, 3)} ${d.slice(3, 6)} ${d.slice(6)}` : `+61 ${d[0]} ${d.slice(1, 5)} ${d.slice(5)}`;
+}
+
 const STATUS_COLOR: Record<CliRow['status'], string> = {
   ACTIVE: 'var(--good)',
   RESTING: 'var(--accent)',
@@ -25,7 +33,17 @@ const STATUS_COLOR: Record<CliRow['status'], string> = {
  * ticked means the carrier's default number, so a newly added number only goes
  * out where someone ticks it.
  */
-export default function CampaignCallerIds({ campaignId, countryPackCode }: { campaignId: string; countryPackCode: string }) {
+export default function CampaignCallerIds({
+  campaignId,
+  countryPackCode,
+  maxConcurrentCalls,
+  dialGapSeconds,
+}: {
+  campaignId: string;
+  countryPackCode: string;
+  maxConcurrentCalls?: number;
+  dialGapSeconds?: { min: number; max: number };
+}) {
   const [rows, setRows] = useState<CliRow[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [saved, setSaved] = useState<Set<string>>(new Set());
@@ -42,7 +60,12 @@ export default function CampaignCallerIds({ campaignId, countryPackCode }: { cam
     const d = defaults?.data;
     setCarrierDefault((countryPackCode === 'AU' ? d?.au : d?.other) ?? null);
     const pool = new Set((campaign.data.cliPool ?? []).map(String));
-    setRows(numbers.data.filter((n) => n.countryPackCode === countryPackCode));
+    // The numbers in use first, then the rest.
+    setRows(
+      numbers.data
+        .filter((n) => n.countryPackCode === countryPackCode)
+        .sort((a, b) => Number(pool.has(b._id)) - Number(pool.has(a._id)) || a.number.localeCompare(b.number)),
+    );
     setSelected(pool);
     setSaved(pool);
   }, [campaignId, countryPackCode]);
@@ -76,6 +99,13 @@ export default function CampaignCallerIds({ campaignId, countryPackCode }: { cam
 
   if (rows === null) return null;
   const changed = selected.size !== saved.size || [...selected].some((id) => !saved.has(id));
+  const inUse = rows.filter((r) => saved.has(r._id)).map((r) => formatCli(r.number));
+  const gap = dialGapSeconds && dialGapSeconds.max > 0
+    ? dialGapSeconds.min === dialGapSeconds.max
+      ? `${dialGapSeconds.max} seconds apart`
+      : `${dialGapSeconds.min}–${dialGapSeconds.max} seconds apart`
+    : 'with no wait between dials';
+  const list = inUse.length > 1 ? `${inUse.slice(0, -1).join(', ')} and ${inUse[inUse.length - 1]}` : inUse[0];
 
   return (
     <section className="card p-6">
@@ -83,10 +113,19 @@ export default function CampaignCallerIds({ campaignId, countryPackCode }: { cam
         <h2 className="font-semibold">Caller IDs</h2>
         <Link href="/cli-numbers" className="text-sm text-dim hover:underline">Manage numbers</Link>
       </div>
-      <p className="mt-1 text-sm text-dim">
-        {selected.size > 0
-          ? `This campaign rotates through the ${selected.size === 1 ? 'number' : `${selected.size} numbers`} ticked below.`
-          : `None ticked: calls show the carrier's default number${carrierDefault ? ` (${carrierDefault})` : ''}.`}
+      <p className="mt-1 text-sm">
+        {inUse.length > 0 ? (
+          <>
+            Calls show <b className="font-mono">{list}</b>
+            {maxConcurrentCalls
+              ? `. Up to ${maxConcurrentCalls} call${maxConcurrentCalls === 1 ? '' : 's'} at a time${inUse.length > 1 ? ', each on a different number' : ''}, dialled ${gap}.`
+              : '.'}
+          </>
+        ) : (
+          <span className="text-dim">
+            None ticked: calls show the carrier&apos;s default number{carrierDefault ? ` (${formatCli(carrierDefault)})` : ''}.
+          </span>
+        )}
       </p>
 
       {rows.length > 0 && (
@@ -112,7 +151,7 @@ export default function CampaignCallerIds({ campaignId, countryPackCode }: { cam
                       aria-label={`Use ${row.number} on this campaign`}
                     />
                   </td>
-                  <td className="py-2 font-mono text-xs">{row.number}</td>
+                  <td className="py-2 font-mono text-xs">{formatCli(row.number)}</td>
                   <td className="py-2 font-semibold" style={{ color: STATUS_COLOR[row.status] }}>{row.status}</td>
                   <td className="py-2 text-right tabular-nums">{row.answersToday}/{row.dialsToday}</td>
                   <td className="py-2 text-right tabular-nums">{(row.answerRate7d * 100).toFixed(1)}%</td>

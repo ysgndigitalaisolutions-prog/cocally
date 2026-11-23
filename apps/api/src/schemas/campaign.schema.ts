@@ -74,6 +74,13 @@ export class Campaign {
   @Prop({ default: 3 })
   maxConcurrentCalls: number;
 
+  /**
+   * Seconds between this campaign's dials, a random wait in [min, max]: the
+   * next dial, and the dial after a line frees up (23 Nov). max 0 = no spacing.
+   */
+  @Prop({ type: Object, default: { min: 3, max: 5 } })
+  dialGapSeconds: { min: number; max: number };
+
   /** Availability-aware pacing per XFER-03: max concurrent dials per free agent. */
   @Prop({ default: 3 })
   dialsPerAvailableAgent: number;

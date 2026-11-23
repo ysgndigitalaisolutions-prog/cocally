@@ -15,6 +15,7 @@ import { SuppressionService } from '../leads/suppression.service';
 import { PresenceService } from '../workspace/presence.service';
 import { CallOrchestratorService } from './call-orchestrator.service';
 import { CliService } from './cli.service';
+import { DialGap, gapOf } from './dial-gap';
 
 /** Why a campaign that looks "on" is not placing calls right now. */
 export type DialBlockReason =
@@ -100,7 +101,11 @@ export class DialerService {
     private readonly cli: CliService,
   ) {}
 
-  @Interval(5000)
+  /** 3-5 s between a campaign's dials; see dial-gap.ts. */
+  private readonly gap = new DialGap();
+
+  // Every second (was 5 s): the dial spacing is 3-5 s, so a 5 s tick would add up to 5 s more.
+  @Interval(1000)
   async tick(): Promise<void> {
     if (!this.enabled || this.ticking) return;
     this.ticking = true;
@@ -324,10 +329,15 @@ export class DialerService {
   private async dialCampaign(campaign: CampaignDocument): Promise<void> {
     const verdict = await this.assessCapacity(campaign);
     if (verdict.blocked) return;
+    const gap = gapOf(campaign);
+    const spaced = gap.max > 0;
+    if (!this.gap.ready(campaign._id.toString(), this.orchestrator.activeCallCount(campaign._id.toString()), Date.now(), gap)) return;
 
     const pack = await this.packs.getByCode(campaign.countryPackCode);
 
-    for (let i = 0; i < verdict.capacity; i += 1) {
+    // Spaced: one dial now, the next after the gap. Otherwise every free slot at once.
+    const dials = spaced ? Math.min(1, verdict.capacity) : verdict.capacity;
+    for (let i = 0; i < dials; i += 1) {
       // Atomic lead lock: state dialable, due, unlocked → locked.
       const lead = await this.leadModel
         .findOneAndUpdate(
@@ -397,8 +407,10 @@ export class DialerService {
         poolIds: campaign.cliPool,
         leadState: lead.state,
         geoMatch: campaign.cliRules.geoMatch,
+        busy: this.orchestrator.liveClis(campaign.tenantId.toString()),
       });
 
+      this.gap.placed(campaign._id.toString(), Date.now(), gap);
       // Fire the call without blocking the tick loop. The orchestrator picks
       // the simulation or the live-carrier path itself (isLiveTelephony), so
       // nothing here needs to know which one ran — except for CLI health.
