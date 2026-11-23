@@ -663,6 +663,54 @@ async def _prerender(tts_engine, text: str):  # noqa: ANN001, ANN202
         return None
 
 
+# Every fixed line Emma says (the script lines, the callback and goodbye lines,
+# the hold and re-ask lines) is the same audio on every call. 23 Nov: kept on
+# disk the first time it is spoken, and served from there after, like the
+# opening. Same voice and shaping, so it sounds the same; about 85% fewer
+# Cartesia credits, and no wait for synthesis. Words the model makes up, and
+# anything that differs by a character, are still spoken live.
+LINE_CACHE = os.getenv("LINE_CACHE", "1") == "1"
+STALL_LINE = "Sorry, I didn't quite catch that. Could you say it again?"
+def _fixed_constants() -> tuple[str, ...]:
+    """The worker's own fixed lines (a function: some are defined further down)."""
+    return (
+        HOLD_LINE,
+        YES_NO_REASK,
+        UNWELL_LINE,
+        APOLOGY_LINE,
+        AI_ANSWER_LINE_NO_CLIENT,
+        PERSON_LINE,
+        DEAD_AIR_REPROMPT_LINE,
+        DEAD_AIR_GOODBYE_LINE,
+        STALL_LINE,
+        "No worries. Is he around for a quick chat, or is there a better time to call him?",
+        "No worries. Is she around for a quick chat, or is there a better time to call her?",
+        "No worries. Are they around for a quick chat, or is there a better time to call them?",
+    )
+
+
+def _split_fixed(chunk: str, lines: list[str]) -> list[tuple[bool, str]]:
+    """A chunk of a reply cut into (is_fixed_line, text) pieces, in order. The
+    longest line wins where two overlap (a line can contain a shorter one)."""
+    out: list[tuple[bool, str]] = []
+    rest = chunk
+    while rest:
+        best = None
+        for line in lines:
+            i = rest.find(line)
+            if i >= 0 and (best is None or i < best[0] or (i == best[0] and len(line) > len(best[1]))):
+                best = (i, line)
+        if best is None:
+            out.append((False, rest))
+            break
+        i, line = best
+        if rest[:i]:
+            out.append((False, rest[:i]))
+        out.append((True, line))
+        rest = rest[i + len(line):]
+    return out
+
+
 async def _wait_for_their_hello(session, qualifier) -> str:  # noqa: ANN001
     """'spoke' once they said something and paused, 'silent' if they said nothing,
     'skip' if the call is no longer ours to greet (a gate, a hang-up)."""
@@ -1379,6 +1427,8 @@ class Qualifier(Agent):
         self._screening_said = 0
         self._out_of_area_asked = False
         self._screener_handed_over = False
+        # Called when a reply's first audio comes from a saved line (no TTS metrics then).
+        self.on_cached_audio = None
         # The "is he around?" question was asked; a new person may come to the phone.
         self._someone_else_asked = False
         self._new_person = False
@@ -1386,12 +1436,107 @@ class Qualifier(Agent):
         self.last_speech_end: float | None = None
         self.dead_air: "_DeadAirWatch | None" = None
 
+    def _fixed_lines(self) -> list[str]:
+        """The lines served from saved audio on this call, as the voice reads them."""
+        lines = [*self.script_lines.values(), *_fixed_constants()]
+        if self.opening_line:
+            lines.append(self.opening_line)
+        if self.client_name:
+            lines.append(AI_ANSWER_LINE.format(client=self.client_name))
+        out = {_calm_text(l).strip() for l in lines if l and len(l.strip()) >= 12}
+        return sorted(out, key=len, reverse=True)
+
     async def tts_node(self, text, model_settings):  # noqa: ANN001, ANN201 — framework signature
-        shaper = _VoiceShaper()
-        async for frame in Agent.default.tts_node(self, _calm_stream(text), model_settings):
-            if isinstance(frame, rtc.AudioFrame):
-                frame = shaper.shape(frame)
-            yield frame
+        if not LINE_CACHE:
+            shaper = _VoiceShaper()
+            async for frame in Agent.default.tts_node(self, _calm_stream(text), model_settings):
+                if isinstance(frame, rtc.AudioFrame):
+                    frame = shaper.shape(frame)
+                yield frame
+            return
+
+        lines = self._fixed_lines()
+        pieces: asyncio.Queue = asyncio.Queue()
+        END = object()
+
+        async def _read() -> None:
+            try:
+                async for chunk in _calm_stream(text):
+                    for fixed, piece in _split_fixed(chunk, lines):
+                        await pieces.put((fixed, piece))
+            finally:
+                await pieces.put(END)
+
+        reader = asyncio.create_task(_read())
+        held = None  # a piece taken off the queue by the live stream that ends it
+        first = True
+        try:
+            while True:
+                item = held if held is not None else await pieces.get()
+                held = None
+                if item is END:
+                    break
+                fixed, piece = item
+                if fixed:
+                    frames = await self._saved_line(piece)
+                    if frames:
+                        if first and self.on_cached_audio is not None:
+                            self.on_cached_audio()
+                        for f in frames:
+                            yield f
+                    else:
+                        # Not saved yet: spoken live, and kept if it was said in full.
+                        shaper, said = _VoiceShaper(), []
+
+                        async def _one(t=piece):  # noqa: ANN202
+                            yield t
+
+                        async for frame in Agent.default.tts_node(self, _one(), model_settings):
+                            if isinstance(frame, rtc.AudioFrame):
+                                frame = shaper.shape(frame)
+                                said.append(frame)
+                            yield frame
+                        if said:
+                            self.spawn(self._keep_line(piece, said))
+                    first = False
+                    continue
+
+                # The model's own words: one live stream until the next fixed line.
+                async def _live(start=piece):  # noqa: ANN202
+                    nonlocal held
+                    yield start
+                    while True:
+                        nxt = await pieces.get()
+                        if nxt is END or nxt[0]:
+                            held = nxt
+                            return
+                        yield nxt[1]
+
+                shaper = _VoiceShaper()
+                async for frame in Agent.default.tts_node(self, _live(), model_settings):
+                    if isinstance(frame, rtc.AudioFrame):
+                        frame = shaper.shape(frame)
+                    yield frame
+                first = False
+        finally:
+            reader.cancel()
+
+    async def _saved_line(self, line: str) -> list | None:
+        key = (line, f"{TTS_PROVIDER}:{TTS_VOICE}")
+        if key in _PRERENDER_CACHE:
+            return _PRERENDER_CACHE[key]
+        frames = await asyncio.to_thread(_load_opening, _opening_cache_path(line))
+        if frames:
+            _PRERENDER_CACHE[key] = frames
+        return frames
+
+    async def _keep_line(self, line: str, frames: list) -> None:
+        """Save a fixed line spoken in full, unless a backup voice spoke it."""
+        status = getattr(getattr(self.session_ref, "tts", None), "_status", None)
+        if status and not getattr(status[0], "available", True):
+            return
+        _PRERENDER_CACHE[(line, f"{TTS_PROVIDER}:{TTS_VOICE}")] = frames
+        await asyncio.to_thread(_save_opening, _opening_cache_path(line), frames)
 
     async def llm_node(self, chat_ctx, tools, model_settings):  # noqa: ANN001, ANN201 — framework signature
         if self._closing:
@@ -3977,6 +4122,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # not something dug out of worker logs after the fact.
     turn: dict[str, float | str] = {}
 
+    def _cached_turn() -> None:
+        # A reply that starts from a saved line has no TTS request: its voice time is 0.
+        turn["tts"] = 0.0
+        turn["tts_served"] = "saved line"
+        qualifier.spawn(_flush_turn())
+
+
     async def _flush_turn() -> None:
         if not call_id or "eou" not in turn or "tts" not in turn:
             turn.clear()
@@ -4064,7 +4216,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         logger.warning("turn stall guard: still no reply — asking the customer to repeat (call=%s)", call_id)
         qualifier.spawn(_post_event(call_id, "stall_guard", (STALL_GUARD_S + 2.0) * 1000, "nothing transcribed; asked to repeat"))
         try:
-            session.say("Sorry, I didn't quite catch that. Could you say it again?")
+            session.say(STALL_LINE)
         except Exception as e:  # noqa: BLE001
             logger.warning("stall guard repeat line failed: %s", e)
 
@@ -4190,6 +4342,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             )
 
     qualifier = Qualifier(instructions=instructions, call_id=call_id, job_ctx=ctx)
+    qualifier.on_cached_audio = _cached_turn
     qualifier.transfer_line = ((brief or {}).get("transferLine") or "").strip() or None
     qualifier.script_lines = {str(k): str(v) for k, v in ((brief or {}).get("scriptLines") or {}).items() if v}
     out_of_area = (brief or {}).get("outOfArea") or {}

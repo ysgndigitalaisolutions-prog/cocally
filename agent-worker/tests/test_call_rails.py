@@ -637,3 +637,95 @@ def test_opening_on_disk_round_trip(tmp_path=None):
         assert agent._load_opening(path) is None
     finally:
         agent.OPENING_CACHE_DIR = old
+
+
+# 23 Nov: fixed lines are spoken once, then served from saved audio.
+
+def test_split_fixed_lines_out_of_a_reply():
+    s1 = LINES["S1"]
+    parts = agent._split_fixed(f"I'm doing well, thanks. {s1}", [s1])
+    assert parts == [(False, "I'm doing well, thanks. "), (True, s1)]
+    assert agent._split_fixed("Something else.", [s1]) == [(False, "Something else.")]
+    # the longer of two overlapping lines wins
+    assert agent._split_fixed("Are you the account holder? Yes.", ["Are you the account holder?", "account holder"])[0] == (True, "Are you the account holder?")
+
+
+def test_fixed_lines_are_saved_then_reused():
+    import tempfile
+
+    async def go():
+        d = tempfile.mkdtemp()
+        old_dir, old_default = agent.OPENING_CACHE_DIR, agent.Agent.default.tts_node
+        agent.OPENING_CACHE_DIR = d
+        agent._PRERENDER_CACHE.clear()
+        synthesised = []
+
+        async def fake_tts(self, text, settings):  # noqa: ANN001
+            words = "".join([t async for t in text])
+            synthesised.append(words)
+            for _ in range(3):
+                yield rtc.AudioFrame(np.zeros(480, dtype=np.int16).tobytes(), 24000, 1, 480)
+
+        agent.Agent.default.tts_node = fake_tts
+        try:
+            q, _ = _make()
+
+            async def reply(*chunks):
+                async def text():
+                    for c in chunks:
+                        yield c
+                return [f async for f in q.tts_node(text(), None)]
+
+            first = await reply("Good to hear. ", LINES["S1"])
+            await asyncio.sleep(0.2)  # the save runs in the background
+            assert synthesised == ["Good to hear. ", LINES["S1"]]
+            assert len(first) == 6
+            synthesised.clear()
+            agent._PRERENDER_CACHE.clear()  # a new call: from disk, not memory
+            hooked = []
+            q2, _ = _make()
+            q2.on_cached_audio = lambda: hooked.append(1)
+
+            async def text2():
+                yield LINES["S1"]
+            again = [f async for f in q2.tts_node(text2(), None)]
+            assert synthesised == [] and len(again) == 3, synthesised
+            assert hooked == [1]  # the turn's timing is still recorded
+        finally:
+            agent.OPENING_CACHE_DIR, agent.Agent.default.tts_node = old_dir, old_default
+            agent._PRERENDER_CACHE.clear()
+
+    asyncio.run(go())
+
+
+def test_a_line_cut_off_is_not_saved():
+    import tempfile
+
+    async def go():
+        d = tempfile.mkdtemp()
+        old_dir, old_default = agent.OPENING_CACHE_DIR, agent.Agent.default.tts_node
+        agent.OPENING_CACHE_DIR = d
+        agent._PRERENDER_CACHE.clear()
+
+        async def fake_tts(self, text, settings):  # noqa: ANN001
+            async for _ in text:
+                pass
+            for _ in range(5):
+                yield rtc.AudioFrame(np.zeros(480, dtype=np.int16).tobytes(), 24000, 1, 480)
+
+        agent.Agent.default.tts_node = fake_tts
+        try:
+            q, _ = _make()
+
+            async def text():
+                yield LINES["S1"]
+            gen = q.tts_node(text(), None)
+            await gen.__anext__()
+            await gen.aclose()  # the customer talked over it
+            await asyncio.sleep(0.2)
+            assert agent._load_opening(agent._opening_cache_path(LINES["S1"])) is None
+        finally:
+            agent.OPENING_CACHE_DIR, agent.Agent.default.tts_node = old_dir, old_default
+            agent._PRERENDER_CACHE.clear()
+
+    asyncio.run(go())
